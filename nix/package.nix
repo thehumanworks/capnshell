@@ -5,7 +5,7 @@ let
     root = ../.;
     fileset = lib.fileset.unions [
       ../src ../nix ../package.json ../bun.lock ../tsconfig.json
-      ../flake.nix ../flake.lock ../README.md ../README-MAC.md
+      ../flake.nix ../flake.lock ../README.md
     ];
   };
   # Follow nixpkgs' Bun packaging pattern: only this fixed-output derivation
@@ -30,7 +30,7 @@ let
     '';
     outputHashMode = "recursive";
     outputHashAlgo = "sha256";
-    outputHash = "sha256-OkH6D/BjAuV685e5zSEc7KJ7lVhtheRU1voPbVTTAxk=";
+    outputHash = "sha256-gZIw/W6i4uj7yNYYOayzE/v/sfR+NaPgd5XWlhQwqqA=";
   };
 in
 stdenvNoCC.mkDerivation {
@@ -44,13 +44,10 @@ stdenvNoCC.mkDerivation {
   # Bun appends its module bundle to the executable; stripping would corrupt it.
   dontStrip = true;
   dontPatchELF = true;
-  # Distributed source must keep its portable /usr/bin/env bun shebang.
-  dontPatchShebangs = true;
   buildPhase = ''
     runHook preBuild
     cp -R ${dependencies}/node_modules .
     bun run build \
-      --define "CAPNWEB_DEFAULT_SOURCE=\"$out/share/capnweb-shell\"" \
       --define 'CAPNWEB_DEFAULT_BASH="${bash}/bin/bash"'
     runHook postBuild
   '';
@@ -63,20 +60,17 @@ stdenvNoCC.mkDerivation {
   '';
   installPhase = ''
     runHook preInstall
-    install -Dm755 dist/capnweb-shell "$out/bin/capnweb-shell"
-    mkdir -p "$out/share/capnweb-shell"
-    cp -R src nix package.json bun.lock tsconfig.json flake.nix flake.lock README.md README-MAC.md "$out/share/capnweb-shell/"
+    install -Dm755 dist/cns "$out/bin/cns"
     runHook postInstall
   '';
   doInstallCheck = true;
   installCheckPhase = ''
-    "$out/bin/capnweb-shell" --help
-    "$out/bin/capnweb-shell" bundle-mac --output "$TMPDIR/source.tar.gz"
+    "$out/bin/cns" --help
   '';
   passthru = { inherit dependencies; };
   meta = {
     description = "Standalone bidirectional Cap'n Web shell peers, compiled with Bun";
-    mainProgram = "capnweb-shell";
+    mainProgram = "cns";
     platforms = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" ];
   };
 }

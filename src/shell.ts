@@ -34,6 +34,8 @@ export interface RunResult {
   stderr: string;
   exitCode: number | null;
   signal: NodeJS.Signals | null;
+  /** Signal numbers differ across operating systems; report the executor's value. */
+  signalNumber: number | null;
   timedOut: boolean;
   truncated: boolean;
   elapsedMs: number;
@@ -134,6 +136,7 @@ export class ShellApi extends RpcTarget {
           stderr: Buffer.concat(stderr).toString("utf8"),
           exitCode,
           signal,
+          signalNumber: signal ? os.constants.signals[signal] ?? null : null,
           timedOut,
           truncated,
           elapsedMs: Date.now() - started,

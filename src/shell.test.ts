@@ -115,3 +115,11 @@ test("disposal kills in-flight commands and disallows new ones", async () => {
   assert.ok(result.elapsedMs < 8000);
   await assert.rejects(api.run("echo test"), /closed/);
 });
+
+
+test("reports signal numbers from the executing operating system", { skip: windows }, async (t) => {
+  const result = await apiFor(t).run("kill -USR1 $$");
+  assert.equal(result.exitCode, null);
+  assert.equal(result.signal, "SIGUSR1");
+  assert.equal(result.signalNumber, os.constants.signals.SIGUSR1);
+});

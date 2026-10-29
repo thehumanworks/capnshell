@@ -1,0 +1,149 @@
+import assert from "node:assert/strict";
+import { once } from "node:events";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import net from "node:net";
+import os from "node:os";
+import path from "node:path";
+import test, { type TestContext } from "node:test";
+import { ShellApi } from "../shell.js";
+import { launchCli as launch } from "../test-support.js";
+import { connectControl, serveControl } from "./daemon.js";
+
+async function temporaryState(t: TestContext): Promise<string> {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "cns-daemon-"));
+  t.after(() => rm(directory, { force: true, recursive: true }));
+  return path.join(directory, "daemon.json");
+}
+
+async function unusedPort(): Promise<string> {
+  const server = net.createServer();
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  return String(address.port);
+}
+
+test("local control authenticates before upgrade and exclusively owns private state", async (t) => {
+  const statePath = await temporaryState(t);
+  const shell = new ShellApi();
+  t.after(() => shell[Symbol.dispose]());
+  const controller = {
+    async peers() { return [{ id: "p1", info: shell.info() }]; },
+    async info(id: string) { assert.equal(id, "p1"); return shell.info(); },
+    async run(id: string, command: string) { assert.equal(id, "p1"); return shell.run(command); },
+  };
+  const cleanup = await serveControl(controller, () => {}, statePath);
+  t.after(cleanup);
+  const state = JSON.parse(await readFile(statePath, "utf8"));
+  if (process.platform !== "win32") assert.equal((await stat(statePath)).mode & 0o777, 0o600);
+  const url = `http://127.0.0.1:${state.port}`;
+  assert.equal((await fetch(url)).status, 401);
+  assert.equal((await fetch(url, { headers: { Authorization: "Bearer bad-token" } })).status, 401);
+  assert.equal((await fetch(url, { headers: { Authorization: `Bearer ${state.token}`, Origin: "https://example.invalid" } })).status, 401);
+  assert.equal((await fetch(url, { headers: { Authorization: `Bearer ${state.token}` } })).status, 400);
+  await assert.rejects(() => serveControl(controller, () => {}, statePath), /Another daemon/);
+  assert.equal(JSON.parse(await readFile(statePath, "utf8")).token, state.token);
+  const connection = await connectControl(statePath);
+  try {
+    assert.equal((await connection.controller.peers())[0]?.info.pid, process.pid);
+    assert.equal((await connection.controller.info("p1")).pid, process.pid);
+  } finally { connection.close(); }
+  await cleanup();
+  await assert.rejects(() => stat(statePath), { code: "ENOENT" });
+});
+
+test("control cleanup never removes another daemon's state", async (t) => {
+  const statePath = await temporaryState(t);
+  const shell = new ShellApi();
+  const cleanup = await serveControl({
+    async peers() { return []; },
+    async info() { return shell.info(); },
+    async run() { throw new Error("unused"); },
+  }, () => {}, statePath);
+  const replacement = { ...JSON.parse(await readFile(statePath, "utf8")), token: "f".repeat(64) };
+  await writeFile(statePath, JSON.stringify(replacement));
+  await cleanup();
+  assert.equal(JSON.parse(await readFile(statePath, "utf8")).token, replacement.token);
+});
+
+test("daemon starts, attaches bidirectionally, survives detach, rejects duplicate start and stops", { timeout: 30000 }, async (t) => {
+  const statePath = await temporaryState(t);
+  const port = await unusedPort();
+  const url = `ws://127.0.0.1:${port}`;
+  const started = launch(t, ["listen", "--daemon", "--state", statePath, "--port", port]);
+  assert.equal(await started.exited, 0, started.output);
+  assert.match(started.output, /Daemon listening/);
+  // Keep the authenticated connection usable even if another cleanup removes the file.
+  const cleanupConnection = await connectControl(statePath);
+  t.after(async () => {
+    try { await cleanupConnection.remote.stop(); } catch { /* Already stopped. */ }
+    finally { cleanupConnection.close(); }
+  });
+  const state = JSON.parse(await readFile(statePath, "utf8"));
+  const duplicate = launch(t, ["listen", "--daemon", "--state", statePath, "--port", await unusedPort()]);
+  assert.equal(await duplicate.exited, 1, duplicate.output);
+  assert.match(duplicate.output, /already exists/);
+  assert.equal(JSON.parse(await readFile(statePath, "utf8")).token, state.token);
+  const peer = launch(t, ["connect", url]);
+  await peer.waitFor("Connected to");
+  const attachment = launch(t, ["attach", "--state", statePath]);
+  await attachment.waitFor("Type a shell command");
+  await attachment.send(":peers", "p1");
+  await attachment.send(":info", `"pid": ${peer.child.pid}`);
+  await peer.send(":info", `"pid": ${state.pid}`);
+  const command = process.platform === "win32" ? "[Console]::Write('ATTACHED_RUN')" : "printf ATTACHED_RUN";
+  await attachment.send(command, "ATTACHED_RUN");
+  await attachment.waitFor("[exit=0;");
+  attachment.child.stdin.write(":quit\n");
+  assert.equal(await attachment.exited, 0, attachment.output);
+  // EOF may arrive before asynchronous RPCs finish. Drain queued commands without
+  // trying to redraw a readline interface that has already closed.
+  const piped = launch(t, ["attach", "--state", statePath]);
+  piped.child.stdin.end(`:peers\n:use p1\n:info\n${command}\n:quit\n`);
+  assert.equal(await piped.exited, 0, piped.output);
+  assert.match(piped.stdout, /ATTACHED_RUN/);
+  assert.equal(piped.stderr, "");
+  await peer.send(":info", `"pid": ${state.pid}`);
+  const connection = await connectControl(statePath);
+  try { assert.equal((await connection.controller.peers()).length, 1); }
+  finally { connection.close(); }
+  const stopped = launch(t, ["stop", "--state", statePath]);
+  assert.equal(await stopped.exited, 0, stopped.output);
+  assert.match(stopped.output, /Daemon stopped/);
+  await assert.rejects(() => stat(statePath), { code: "ENOENT" });
+  assert.equal(await peer.exited, 0, peer.output);
+});
+
+
+test("daemon startup reports a listener failure and leaves no state", { timeout: 15000 }, async (t) => {
+  const statePath = await temporaryState(t);
+  const occupied = net.createServer();
+  occupied.listen(0, "127.0.0.1");
+  await once(occupied, "listening");
+  t.after(() => new Promise<void>((resolve) => occupied.close(() => resolve())));
+  const address = occupied.address();
+  assert.ok(address && typeof address !== "string");
+  const started = launch(t, ["listen", "--daemon", "--state", statePath, "--port", String(address.port)]);
+  assert.equal(await started.exited, 1, started.output);
+  assert.match(started.output, /exited during startup/);
+  await assert.rejects(() => stat(statePath), { code: "ENOENT" });
+});
+
+test("concurrent daemon starts cannot replace the winner's state", { timeout: 15000 }, async (t) => {
+  const statePath = await temporaryState(t);
+  const ports = await Promise.all([unusedPort(), unusedPort()]);
+  const children = ports.map((port) => launch(t, ["listen", "--daemon", "--state", statePath, "--port", port]));
+  const codes = await Promise.all(children.map((child) => child.exited));
+  const connection = await connectControl(statePath);
+  t.after(async () => {
+    try { await connection.remote.stop(); } catch { /* Already stopped. */ }
+    finally { connection.close(); }
+  });
+  assert.deepEqual(codes.sort(), [0, 1], children.map((child) => child.output).join("\n"));
+  assert.deepEqual(await connection.controller.peers(), []);
+  const stopped = launch(t, ["stop", "--state", statePath]);
+  assert.equal(await stopped.exited, 0, stopped.output);
+  await assert.rejects(() => stat(statePath), { code: "ENOENT" });
+});

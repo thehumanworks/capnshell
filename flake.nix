@@ -15,16 +15,18 @@
           capnweb-shell = pkgs.callPackage ./nix/package.nix { };
         in {
           inherit capnweb-shell;
+          cns = capnweb-shell;
           default = capnweb-shell;
         });
 
       apps = forAllSystems (system: {
         default = {
           type = "app";
-          program = "${self.packages.${system}.default}/bin/capnweb-shell";
+          program = "${self.packages.${system}.default}/bin/cns";
           meta.description = "Bidirectional Cap'n Web shell CLI";
         };
         capnweb-shell = self.apps.${system}.default;
+        cns = self.apps.${system}.default;
       });
 
       devShells = forAllSystems (system:

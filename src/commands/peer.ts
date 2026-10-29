@@ -1,170 +1,210 @@
-import readline from "node:readline";
 import { newBunWebSocketRpcSession, newWebSocketRpcSession, type BunWebSocketTransport, type RpcStub } from "capnweb";
 import { serve, type Server, type ServerWebSocket } from "bun";
-import { MAX_TIMEOUT_MS, ShellApi, type ShellInfo } from "../shell.js";
+import { z } from "zod";
+import { ShellApi, type RunResult, type ShellInfo } from "../shell.js";
+import { openConsole, type PeerController } from "../console.js";
 import type { PeerConfig } from "../options.js";
+import { serveControl } from "./daemon.js";
 
-interface SocketData { transport?: BunWebSocketTransport<SocketData> }
+// Bound unauthenticated connections, including peers that never complete the RPC handshake.
+export const MAX_PEERS = 32;
+const HANDSHAKE_MS = 5000;
+const infoSchema = z.object({
+  platform: z.enum(["aix", "android", "darwin", "freebsd", "haiku", "linux", "openbsd", "sunos", "win32", "cygwin", "netbsd"]),
+  name: z.string().max(128), shell: z.enum(["PowerShell", "Bash"]),
+  hostname: z.string().max(256), cwd: z.string().max(32768), pid: z.int().positive(),
+});
+interface SocketData { address: string; transport?: BunWebSocketTransport<SocketData>; session?: Session }
+interface Session {
+  id: string;
+  address: string;
+  socket: WebSocket | ServerWebSocket<SocketData>;
+  local: ShellApi;
+  remote: RpcStub<ShellApi>;
+  timer: ReturnType<typeof setTimeout>;
+  info?: ShellInfo;
+}
 
-export function startPeer(config: PeerConfig): void {
-  const { mode, bind, port, url, noRepl } = config;
+export function commandExitCode(result: RunResult): number {
+  if (result.timedOut) return 124;
+  if (result.exitCode !== null) return result.exitCode;
+  return result.signalNumber != null ? 128 + result.signalNumber : 1;
+}
+
+export async function startPeer(config: PeerConfig): Promise<void> {
+  const daemonChild = process.env.CNS_DAEMON_CHILD === "1";
+  delete process.env.CNS_DAEMON_CHILD;
+  const sessions = new Map<string, Session>();
+  let nextId = 1;
   let listener: Server<SocketData> | undefined;
-  let socket: WebSocket | ServerWebSocket<SocketData> | undefined;
-  let handshakeTimer: ReturnType<typeof setTimeout> | undefined;
-  let local: ShellApi | undefined;
-  let input: readline.Interface | undefined;
+  let input: ReturnType<typeof openConsole> | undefined;
+  let controlCleanup: (() => Promise<void>) | undefined;
   let stopping = false;
+  let finished!: () => void;
+  const done = new Promise<void>((resolve) => { finished = resolve; });
+  const oneShot = config.command !== undefined;
+  const announce = (message: string) => { if (!oneShot) console.log(message); };
 
-  function stop(code = 0) {
+  function describe(session: Session): string {
+    const endpoint = session.info ? `${session.info.hostname} (${session.address})` : session.address;
+    return config.noRepl ? endpoint : `${session.id}: ${endpoint}`;
+  }
+
+  function remove(session: Session) {
+    if (!sessions.delete(session.id)) return;
+    clearTimeout(session.timer);
+    session.local[Symbol.dispose]();
+    session.remote[Symbol.dispose]();
+    session.socket.close(1000, "Shell session ended");
+    const timer = setTimeout(() => session.socket.terminate(), 750);
+    timer.unref();
+    if (!stopping) {
+      announce(`Disconnected from ${describe(session)}.`);
+      void input?.refresh();
+    }
+  }
+
+  async function stop(code = 0) {
     if (stopping) return;
     stopping = true;
     process.exitCode = code;
     input?.close();
-    local?.[Symbol.dispose]();
-    socket?.close(1000, "Shell session ended");
-    clearTimeout(handshakeTimer);
-    void listener?.stop();
-    if (socket) {
-      const timer = setTimeout(() => socket?.terminate(), 750);
-      timer.unref();
-    }
-  }
-
-  function help() {
-    console.log(`
-  Type a shell command to execute it on the OTHER peer.
-    :info              Show the remote platform, shell and home directory.
-    :cwd PATH          Set the remote working directory (absolute, no quotes).
-    :cwd               Show the selected remote working directory.
-    :timeout           Show the current command timeout.
-    :timeout MS        Set an optional timeout, 1-${MAX_TIMEOUT_MS} ms.
-    :timeout 0         Disable the command timeout (the default).
-    :help              Show this help.
-    :quit              Disconnect both peers.
-  Each command starts a fresh shell. No interactive programs or persistent shell state.
-  `);
-  }
-
-  async function repl(remote: RpcStub<ShellApi>, info: ShellInfo) {
-    let cwd = info.cwd;
-    let timeoutMs = 0;
-    const lines = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: !!process.stdin.isTTY });
-    input = lines;
-    lines.on("SIGINT", () => stop());
-    help();
-    const prompt = () => {
-      if (!stopping) {
-        lines.setPrompt(`${info.name ?? info.platform}> `);
-        lines.prompt();
-      }
-    };
-    prompt();
-    for await (const raw of lines) {
-      const line = raw.trim();
-      try {
-        if (!line) { /* Just redraw the prompt. */ }
-        else if (line === ":quit") { stop(); break; }
-        else if (line === ":help") help();
-        else if (line === ":info") {
-          const details = await remote.info();
-          try { console.log(JSON.stringify(details, null, 2)); }
-          finally { details[Symbol.dispose]?.(); }
-        }
-        else if (line === ":cwd") console.log(cwd);
-        else if (line.startsWith(":cwd ")) { cwd = line.slice(5).trim(); console.log(`Remote cwd: ${cwd}`); }
-        else if (line === ":timeout" || line.startsWith(":timeout ")) {
-          if (line !== ":timeout") {
-            const value = Number(line.slice(9));
-            if (!Number.isInteger(value) || value < 0 || value > MAX_TIMEOUT_MS) throw new Error("Invalid timeout.");
-            timeoutMs = value;
-          }
-          console.log(timeoutMs === 0 ? "Timeout: disabled" : `Timeout: ${timeoutMs} ms`);
-        } else if (line.startsWith(":")) throw new Error("Unknown command. Try :help.");
-        else {
-          const result = await remote.run(raw, { cwd, timeoutMs });
-          try {
-            if (result.stdout) process.stdout.write(result.stdout.endsWith("\n") ? result.stdout : result.stdout + "\n");
-            if (result.stderr) process.stderr.write(result.stderr.endsWith("\n") ? result.stderr : result.stderr + "\n");
-            console.log(`[exit=${result.exitCode ?? result.signal ?? "unknown"}; ${result.elapsedMs} ms${result.timedOut ? "; TIMED OUT" : ""}${result.truncated ? "; OUTPUT TRUNCATED at 1 MiB" : ""}]`);
-          } finally { result[Symbol.dispose]?.(); }
-        }
-      } catch (error) {
-        if (!stopping) console.error(`Error: ${error instanceof Error ? error.message : String(error)}`);
-      }
-      prompt();
-    }
-    stop();
-  }
-
-  async function attach(remote: RpcStub<ShellApi>) {
-    // BOTH endpoints export a ShellApi and receive a typed stub over one socket.
-    // Cap'n Web's own Bun/browser transports handle all framing and RPC.
-    remote.onRpcBroken(() => {
-      if (!stopping) console.log("\nPeer disconnected. Restart both peers to reconnect.");
-      stop();
-    });
+    for (const session of sessions.values()) remove(session);
     try {
-      const info = await remote.info();
-      try {
-        console.log(`Connected to ${info.platform} / ${info.shell} on ${info.hostname}.`);
-        if (!noRepl && !stopping) await repl(remote, info);
-      } finally { info[Symbol.dispose]?.(); }
+      await Promise.all([listener?.stop(true), controlCleanup?.()]);
     } catch (error) {
-      if (!stopping) { console.error(error instanceof Error ? error.message : String(error)); stop(1); }
+      process.exitCode = 1;
+      console.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      process.off("SIGINT", interrupt);
+      process.off("SIGTERM", terminate);
+      finished();
     }
   }
+  const interrupt = () => { void stop(oneShot ? 130 : 0); };
+  const terminate = () => { void stop(oneShot ? 143 : 0); };
+  process.once("SIGINT", interrupt);
+  process.once("SIGTERM", terminate);
 
-  process.once("SIGINT", () => stop());
-  process.once("SIGTERM", () => stop());
-  console.log(config.remote
-    ? "WARNING: unauthenticated remote shell access. Trusted LAN/VPN test only; each peer can execute commands as your user."
-    : "No authentication. Local shell access only; stop both peers when finished.");
+  function requireSession(id: string) {
+    const session = sessions.get(id);
+    if (!session?.info) throw new Error(`Peer ${id} is not connected. Use :peers and :use ID.`);
+    return session;
+  }
+  const controller: PeerController = {
+    async peers() {
+      return [...sessions.values()].flatMap(({ id, info }) => info ? [{ id, info: { ...info } }] : []);
+    },
+    async info(id) { return { ...requireSession(id).info! }; },
+    async run(id, command, options) {
+      // Capture the session once; its ID is never reused, even after disconnect.
+      const session = requireSession(id);
+      const result = await session.remote.run(command, options);
+      try { return { ...result }; }
+      finally { result[Symbol.dispose](); }
+    },
+  };
 
-  if (mode === "listen") {
-    let claimed = false;
-    listener = serve<SocketData>({
-      hostname: bind,
-      port,
-      fetch(request, server) {
-        if (request.headers.has("Origin")) return new Response("Browser origins are not allowed", { status: 401 });
-        if (claimed) return new Response("Only one peer at a time", { status: 409 });
-        if (server.upgrade(request, { data: {} })) {
-          claimed = true;
-          return;
+  function disconnected(session: Session, code = oneShot || !session.info ? 1 : 0) {
+    if (!sessions.has(session.id)) return;
+    remove(session);
+    if (config.mode === "connect") void stop(code);
+  }
+
+  function register(socket: Session["socket"], local: ShellApi, remote: RpcStub<ShellApi>, address: string): Session {
+    const id = `p${nextId++}`;
+    const session: Session = { id, address, socket, local, remote, timer: setTimeout(() => {
+      if (!sessions.has(id)) return;
+      console.error(`Handshake with ${describe(session)} timed out.`);
+      disconnected(session, 1);
+    }, HANDSHAKE_MS) };
+    sessions.set(id, session);
+    remote.onRpcBroken(() => disconnected(session));
+    void (async () => {
+      try {
+        const info = await remote.info();
+        try { session.info = infoSchema.parse(info); }
+        finally { info[Symbol.dispose]?.(); }
+        if (!sessions.has(id) || stopping) return;
+        clearTimeout(session.timer);
+        announce(`Connected to ${describe(session)} [${session.info.platform} / ${session.info.shell}].`);
+        if (config.mode === "connect") {
+          if (oneShot) {
+            const result = await controller.run(id, config.command!, { cwd: config.cwd, timeoutMs: config.timeoutMs });
+            process.stdout.write(result.stdout);
+            process.stderr.write(result.stderr);
+            if (result.truncated) console.error("cns: OUTPUT TRUNCATED at 1 MiB");
+            if (result.timedOut) console.error("cns: command timed out");
+            await stop(commandExitCode(result));
+          } else if (!config.noRepl) input = openConsole(controller, () => { void stop(); });
+        } else void input?.refresh();
+      } catch (error) {
+        if (!stopping && sessions.has(id)) {
+          console.error(error instanceof Error ? error.message : String(error));
+          disconnected(session, 1);
         }
-        return new Response("WebSocket upgrade required", { status: 400 });
-      },
-      websocket: {
-        // No idle deadline: commands can legitimately run for hours.
-        idleTimeout: 0,
-        maxPayloadLength: 8 * 1024 * 1024,
-        open(ws) {
-          socket = ws;
-          local = new ShellApi();
-          const { stub, transport } = newBunWebSocketRpcSession<ShellApi, SocketData>(ws, local);
-          ws.data.transport = transport;
-          void attach(stub);
+      }
+    })();
+    return session;
+  }
+
+  try {
+    // Machine-readable run output must contain only the remote command's streams.
+    announce(config.remote
+      ? "WARNING: unauthenticated remote shell access. Trusted LAN/VPN only; both peers can execute commands as your user."
+      : "No authentication. Local shell access only.");
+    if (config.mode === "listen") {
+      listener = serve<SocketData>({
+        hostname: config.bind, port: config.port,
+        fetch(request, server) {
+          if (request.headers.has("Origin")) return new Response("Browser origins are not allowed", { status: 401 });
+          if (server.pendingWebSockets >= MAX_PEERS) return new Response("Peer limit reached", { status: 503 });
+          const remote = server.requestIP(request);
+          const address = remote
+            ? `${remote.family === "IPv6" ? `[${remote.address}]` : remote.address}:${remote.port}`
+            : "unknown address";
+          if (server.upgrade(request, { data: { address } })) return;
+          return new Response("WebSocket upgrade required", { status: 400 });
         },
-        message(ws, message) { ws.data.transport?.dispatchMessage(message); },
-        close(ws, code, reason) { ws.data.transport?.dispatchClose(code, reason); },
-      },
-    });
-    const label = process.platform === "win32" ? "Windows" : process.platform === "darwin" ? "Mac" : "Linux";
-    console.log(`${label} listening at ${url}. Start the connecting peer now.`);
-  } else {
-    const client = new WebSocket(url);
-    socket = client;
-    handshakeTimer = setTimeout(() => {
-      if (!stopping) { console.error(`Connection to ${url} timed out.`); stop(1); }
-    }, 5000);
-    client.addEventListener("error", () => {
-      if (!stopping) { console.error(`Cannot connect to ${url}. Check that the listener is running and reachable from this host.`); stop(1); }
-    });
-    client.addEventListener("open", () => {
-      clearTimeout(handshakeTimer);
-      if (stopping) return;
-      local = new ShellApi();
-      void attach(newWebSocketRpcSession<ShellApi>(client, local));
-    }, { once: true });
+        websocket: {
+          idleTimeout: 0, maxPayloadLength: 8 * 1024 * 1024,
+          open(ws) {
+            if (stopping) { ws.close(); return; }
+            const local = new ShellApi();
+            const { stub, transport } = newBunWebSocketRpcSession<ShellApi, SocketData>(ws, local);
+            ws.data.transport = transport;
+            ws.data.session = register(ws, local, stub, ws.data.address);
+          },
+          message(ws, message) { ws.data.transport?.dispatchMessage(message); },
+          close(ws, code, reason) {
+            ws.data.transport?.dispatchClose(code, reason);
+            if (ws.data.session) disconnected(ws.data.session);
+          },
+        },
+      });
+      if (daemonChild) {
+        controlCleanup = await serveControl(controller, () => { void stop(); }, config.state);
+        if (stopping) { await controlCleanup(); return; }
+        process.send?.({ ready: true });
+        if (process.connected) process.disconnect?.();
+      }
+      if (!config.noRepl) input = openConsole(controller, () => { void stop(); });
+      const label = process.platform === "win32" ? "Windows" : process.platform === "darwin" ? "Mac" : "Linux";
+      announce(`${label} listening at ${config.url}.`);
+    } else {
+      const socket = new WebSocket(config.url);
+      const local = new ShellApi();
+      const remote = newWebSocketRpcSession<ShellApi>(socket, local);
+      const session = register(socket, local, remote, new URL(config.url).host);
+      socket.addEventListener("error", () => {
+        if (!stopping) console.error(`Cannot connect to ${config.url}. Check that the listener is running and reachable.`);
+        disconnected(session, 1);
+      });
+      socket.addEventListener("close", () => disconnected(session));
+    }
+    await done;
+  } catch (error) {
+    await stop(1);
+    throw error;
   }
 }
