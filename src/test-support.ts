@@ -27,10 +27,17 @@ export async function unusedPort(): Promise<string> {
   return String(address.port);
 }
 
+/** Keep user CLI defaults out of tests unless explicitly supplied. */
+export function cliEnvironment(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  return { ...process.env, CNS_BIND: undefined, CNS_PORT: undefined, CNS_CWD: undefined, ...overrides };
+}
+
 /** Exercise actual CLI processes, keeping exact streams available for run assertions. */
 export function launchCli(t: TestContext, args: string[], options: SpawnOptionsWithoutStdio = {}) {
   const invocation = cliInvocation(args);
-  const child = spawn(invocation.file, invocation.args, { ...options, stdio: ["pipe", "pipe", "pipe"] });
+  const child = spawn(invocation.file, invocation.args, {
+    ...options, env: cliEnvironment(options.env), stdio: ["pipe", "pipe", "pipe"],
+  });
   const events = new EventEmitter();
   let output = "";
   let stdout = "";

@@ -4,11 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { execa } from "execa";
-import { cliInvocation } from "./test-support.js";
+import { cliEnvironment, cliInvocation } from "./test-support.js";
 
 function runCli(args: string[], cwd: string, reject = true) {
   const invocation = cliInvocation(args);
-  return execa(invocation.file, invocation.args, { cwd, reject });
+  return execa(invocation.file, invocation.args, { cwd, reject, env: cliEnvironment() });
 }
 
 async function temporaryDirectory(t: TestContext): Promise<string> {
@@ -25,6 +25,11 @@ test("the CLI exposes only cross-platform peer commands with side-effect-free he
     const result = await runCli([command, "--help"], cwd);
     assert.match(result.stdout, /Usage: cns/);
     assert.doesNotMatch(result.stdout, /listening at/);
+    if (command === "run" || command === "listen") {
+      assert.match(result.stdout, /CNS_BIND/);
+      assert.match(result.stdout, /CNS_PORT/);
+    }
+    if (command === "run") assert.match(result.stdout, /CNS_CWD/);
   }
   assert.doesNotMatch(stdout, /bundle-mac|install-windows|integration-smoke|\bwindows\b|\bwsl\b/);
   assert.deepEqual(await readdir(cwd), []);

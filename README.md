@@ -33,7 +33,7 @@ Use an address reachable from the other machine. This does not configure routing
 | `listen --daemon` | Start a background listener. |
 | `connect <url>` | Open a bidirectional connection and interactive console. |
 | `connect <url> --no-repl` | Connect and expose local execution without a console. |
-| `run <url> -- '<command>'` | Execute one shell command and exit with its status. |
+| `run [url] -- '<command>'` | Execute one shell command and exit with its status. |
 | `attach` | Open a console for the local daemon. |
 | `stop` | Stop the local daemon and its sessions. |
 
@@ -73,6 +73,36 @@ Pass exactly one shell string after `--`; quote it to preserve spaces, redirects
 cns run ws://127.0.0.1:47381 -- 'printf "hello\n"; exit 7'
 cns run ws://127.0.0.1:47381 --cwd /tmp --timeout 10000 -- 'pwd; ls -la'
 ```
+
+### Environment defaults
+
+Set these environment variables in your shell to avoid repeating the endpoint and remote working directory:
+
+```sh
+export CNS_BIND=192.168.1.10
+export CNS_PORT=47381
+export CNS_CWD=/srv/project
+cns run -- 'pwd; ls -la'
+
+# Override any default for one invocation
+cns run --bind 192.168.1.20 --port 47382 --cwd /tmp -- 'pwd'
+```
+
+In PowerShell, set variables with e.g. `$env:CNS_BIND = '192.168.1.10'`.
+
+| Environment variable | CLI override | Applies to | Default when unset |
+| --- | --- | --- | --- |
+| `CNS_BIND` | `--bind <address>` | `run` destination; `listen` interface | `127.0.0.1` |
+| `CNS_PORT` | `--port <port>` | `run` destination; `listen` port | `47381` |
+| `CNS_CWD` | `--cwd <path>` | `run` remote working directory | Remote user's home directory |
+
+Precedence is **CLI flag > environment variable > built-in default**. `CNS_BIND` must be a numeric IPv4 or IPv6 address, and `CNS_PORT` must be an integer from 1 to 65535. Empty or invalid values are rejected unless overridden. The working directory is an absolute path on the **remote** machine, not the local one.
+
+Without a URL, `run` connects to `ws://<bind>:<port>` using these defaults. An explicit URL (including a hostname, path or `wss://` endpoint) replaces `CNS_BIND` and `CNS_PORT`; do not combine a URL with `--bind` or `--port`. `CNS_CWD` still applies with an explicit URL. `connect` continues to require a URL and ignores these environment variables.
+
+`listen` also uses `CNS_BIND` and `CNS_PORT`, including with `--daemon`. A non-loopback bind still requires explicit `--allow-remote`; environment variables do not opt in to remote shell access.
+
+### Output and execution behavior
 
 `run` writes remote stdout and stderr to the corresponding local streams without prompts or added newlines and propagates the exit status. A timeout exits with status 124. The connection remains bidirectional while the command runs, so the listener can execute commands on the connecting machine too.
 

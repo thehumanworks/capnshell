@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -21,16 +21,16 @@ async function eventually(check: () => Promise<boolean>, label: string): Promise
 test("listener routes multiple bidirectional peers explicitly and survives disconnects", { timeout: 30000 }, async (t) => {
   const port = await unusedPort();
   const url = `ws://[::1]:${port}`;
-  const listener = launchCli(t, ["listen", "--bind", "::1", "--port", port], { env: { ...process.env, CNS_TEST_PEER: "LISTENER_ONLY" } });
+  const listener = launchCli(t, ["listen", "--bind", "::1", "--port", port], { env: { CNS_TEST_PEER: "LISTENER_ONLY" } });
   await listener.waitFor("listening at");
   const rejected = await fetch(`http://[::1]:${port}`, { headers: { Origin: "https://example.invalid", Upgrade: "websocket" } });
   assert.equal(rejected.status, 401);
-  const first = launchCli(t, ["connect", url], { env: { ...process.env, CNS_TEST_PEER: "FIRST_ONLY" } });
+  const first = launchCli(t, ["connect", url], { env: { CNS_TEST_PEER: "FIRST_ONLY" } });
   await first.waitFor("Type a shell command");
   await listener.send(":info", `"pid": ${first.child.pid}`);
   await listener.send(environment, "FIRST_ONLY");
 
-  const second = launchCli(t, ["connect", url], { env: { ...process.env, CNS_TEST_PEER: "SECOND_ONLY" } });
+  const second = launchCli(t, ["connect", url], { env: { CNS_TEST_PEER: "SECOND_ONLY" } });
   await second.waitFor("Type a shell command");
   // Wait for the listener to complete its own handshake too.
   await listener.waitFor("p2");
@@ -60,7 +60,7 @@ test("listener routes multiple bidirectional peers explicitly and survives disco
   await second.send(print("SECOND_STILL_WORKS"), "SECOND_STILL_WORKS");
   assert.equal(listener.closed, false);
 
-  const third = launchCli(t, ["connect", url], { env: { ...process.env, CNS_TEST_PEER: "THIRD_ONLY" } });
+  const third = launchCli(t, ["connect", url], { env: { CNS_TEST_PEER: "THIRD_ONLY" } });
   await third.waitFor("Type a shell command");
   await listener.waitFor("p3");
   await listener.send(":info", `"pid": ${second.child.pid}`);
@@ -103,6 +103,40 @@ test("run preserves exact output, quoting and remote exit status against a headl
   assert.doesNotMatch(listener.stdout, /\bp\d+\b/);
 });
 
+test("run uses environment defaults and honors explicit endpoint and cwd overrides", { timeout: 30000 }, async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "cns env "));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const override = path.join(directory, "override cwd");
+  await mkdir(override);
+  await writeFile(path.join(directory, "marker.txt"), "ENV_CWD");
+  await writeFile(path.join(override, "marker.txt"), "FLAG_CWD");
+  const port = await unusedPort();
+  const env = { CNS_BIND: "::1", CNS_PORT: port, CNS_CWD: directory };
+  const listener = launchCli(t, ["listen", "--no-repl"], { env });
+  await listener.waitFor(`listening at ws://[::1]:${port}`);
+  const command = process.platform === "win32"
+    ? "[Console]::Write((Get-Content -Raw marker.txt)); exit 7"
+    : "printf '%s' \"$(< marker.txt)\"; exit 7";
+  for (const scenario of [
+    { args: ["run", "--", command], env, output: "ENV_CWD" },
+    {
+      args: ["run", "--bind", "::1", "--port", port, "--cwd", override, "--", command],
+      env: { CNS_BIND: "invalid", CNS_PORT: "invalid", CNS_CWD: "" },
+      output: "FLAG_CWD",
+    },
+    {
+      args: ["run", `ws://[::1]:${port}`, "--", command],
+      env: { ...env, CNS_BIND: "invalid", CNS_PORT: "invalid" },
+      output: "ENV_CWD",
+    },
+  ]) {
+    const run = launchCli(t, scenario.args, { env: scenario.env });
+    assert.equal(await run.exited, 7, run.output);
+    assert.equal(run.stdout, scenario.output);
+    assert.equal(run.stderr, "");
+  }
+});
+
 test("run exports reverse RPC while its command is live and disconnect cleans up its processes only", { timeout: 30000, skip: process.platform === "win32" }, async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "cns transport "));
   t.after(() => rm(directory, { recursive: true, force: true }));
@@ -113,7 +147,7 @@ test("run exports reverse RPC while its command is live and disconnect cleans up
   await listener.waitFor("listening at");
   const survivor = launchCli(t, ["connect", url]);
   await survivor.waitFor("Type a shell command");
-  const run = launchCli(t, ["run", url, "--cwd", directory, "--", "printf '%s' $$ > command.pid; exec sleep 60"], { env: { ...process.env, CNS_TEST_PEER: "REVERSE_RUN_ONLY" } });
+  const run = launchCli(t, ["run", url, "--cwd", directory, "--", "printf '%s' $$ > command.pid; exec sleep 60"], { env: { CNS_TEST_PEER: "REVERSE_RUN_ONLY" } });
   await eventually(async () => { try { return (await readFile(pidFile, "utf8")).length > 0; } catch { return false; } }, "remote command started in requested cwd");
   const pid = Number(await readFile(pidFile, "utf8"));
   assert.ok(Number.isInteger(pid) && pid > 0);

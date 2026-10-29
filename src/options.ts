@@ -1,5 +1,5 @@
 import { isIP } from "node:net";
-import { Command } from "commander";
+import { Command, Option } from "commander";
 import { z } from "zod";
 import { MAX_TIMEOUT_MS } from "./shell.js";
 
@@ -41,14 +41,24 @@ export function isLoopback(host: string): boolean {
   return unwrapped === "::1" || (isIP(unwrapped) === 4 && unwrapped.startsWith("127."));
 }
 
-function resolveOptions(role: PeerRole, rawOptions: unknown, destination: string | undefined): PeerConfig {
+function resolveOptions(role: PeerRole, command: Command, destination: string | undefined): PeerConfig {
   const mode = role === "listen" ? "listen" : "connect";
-  const { bind, port, repl, allowRemote, daemon, state, cwd, timeout } = peerOptionsSchema.parse(rawOptions);
+  const options = { ...command.opts() };
+  if (destination !== undefined) {
+    for (const name of ["bind", "port"]) {
+      if (command.getOptionValueSource(name) === "cli") {
+        throw new Error(`Use either a URL or --${name}, not both.`);
+      }
+      // An explicit URL replaces endpoint defaults, including invalid env values.
+      delete options[name];
+    }
+  }
+  const { bind, port, repl, allowRemote, daemon, state, cwd, timeout } = peerOptionsSchema.parse(options);
   if (mode === "listen" && !isLoopback(bind) && !allowRemote) {
     throw new Error("A non-loopback listener exposes shell access. Add --allow-remote only for a trusted LAN/VPN test.");
   }
   let url = `ws://${isIP(bind) === 6 ? `[${bind}]` : bind}:${port}`;
-  if (role === "connect" || role === "run") {
+  if (role === "connect" || destination !== undefined) {
     if (!destination) throw new Error(`${role} requires one ws:// or wss:// URL.`);
     const parsed = new URL(destination);
     if (!["ws:", "wss:"].includes(parsed.protocol) || !parsed.hostname || parsed.username || parsed.password || parsed.hash) {
@@ -73,17 +83,19 @@ export function addPeerCommands(program: Command, run: (config: PeerConfig) => v
     const command = program.command(role).description(descriptions[role])
       .addHelpText("after", "\nNo authentication. Remote mode is only for a temporary trusted LAN/private VPN test.");
     if (role !== "run") command.option("--no-repl", "Disable the interactive command prompt");
-    if (role === "listen") command.option("--port <port>", "TCP port (default: 47381)");
+    if (role !== "connect") {
+      command.addOption(new Option("--bind <address>", `Numeric ${role === "listen" ? "interface" : "remote peer"} address (default: 127.0.0.1)`).env("CNS_BIND"))
+        .addOption(new Option("--port <port>", "TCP port (default: 47381)").env("CNS_PORT"));
+    }
     if (role === "listen") {
-      command.option("--bind <address>", "Numeric interface address (default: 127.0.0.1)")
-        .option("--allow-remote", "Explicitly allow a non-loopback listener")
+      command.option("--allow-remote", "Explicitly allow a non-loopback listener")
         .option("--daemon", "Run the listener in the background")
         .option("--state <path>", "Local daemon state file");
     }
     if (role === "run") {
-      command.option("--cwd <path>", "Absolute working directory on the remote peer")
+      command.addOption(new Option("--cwd <path>", "Absolute working directory on the remote peer").env("CNS_CWD"))
         .option("--timeout <ms>", `Command timeout, 0-${MAX_TIMEOUT_MS} ms (0 disables it)`)
-        .addHelpText("after", "\nPass exactly one quoted shell string after --. Your local shell removes the outer quotes.\nExample: cns run ws://localhost:47381 -- 'printf \"hello\\n\"'");
+        .addHelpText("after", "\nPass exactly one quoted shell string after --. Your local shell removes the outer quotes.\nWithout a URL, use --bind/--port, then CNS_BIND/CNS_PORT, then 127.0.0.1:47381.\nAn explicit URL overrides endpoint environment variables; do not combine it with --bind/--port.\nExample: cns run -- 'printf \"hello\\n\"'");
     }
     // Commander handles parsing/help; reject repeats rather than silently using
     // the last value for security-sensitive listener options.
@@ -95,20 +107,27 @@ export function addPeerCommands(program: Command, run: (config: PeerConfig) => v
       });
     }
     if (role === "run") {
-      command.argument("<url>").argument("<command>").action((url: string, shellCommand: string) => {
+      command.usage("[url] [options] -- <command>")
+        .argument("[url]").argument("[command]");
+      command.action((url: string | undefined, shellCommand: string | undefined) => {
+        // With no URL, Commander puts the shell command in the first argument.
+        if (shellCommand === undefined) {
+          shellCommand = url;
+          url = undefined;
+        }
         // Positional parsing preserves the subcommand delimiter in the parent args.
         const rawArgs = program.args;
         const delimiter = rawArgs.indexOf("--");
         if (delimiter < 0 || rawArgs.length - delimiter !== 2 || rawArgs[delimiter + 1] !== shellCommand) {
           throw new Error("run requires -- followed by exactly one quoted shell command.");
         }
-        if (!shellCommand.trim() || shellCommand.length > 8192) throw new Error("Command must contain 1-8192 characters.");
-        return run({ ...resolveOptions(role, command.opts(), url), command: shellCommand });
+        if (!shellCommand?.trim() || shellCommand.length > 8192) throw new Error("Command must contain 1-8192 characters.");
+        return run({ ...resolveOptions(role, command, url), command: shellCommand });
       });
     } else if (role === "connect") {
-      command.argument("<url>").action((url: string) => run(resolveOptions(role, command.opts(), url)));
+      command.argument("<url>").action((url: string) => run(resolveOptions(role, command, url)));
     } else {
-      command.action(() => run(resolveOptions(role, command.opts(), undefined)));
+      command.action(() => run(resolveOptions(role, command, undefined)));
     }
   }
 }

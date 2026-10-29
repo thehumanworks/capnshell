@@ -72,7 +72,9 @@ test("daemon starts, attaches bidirectionally, survives detach, rejects duplicat
   const statePath = await temporaryState(t);
   const port = await unusedPort();
   const url = `ws://127.0.0.1:${port}`;
-  const started = launch(t, ["listen", "--daemon", "--state", statePath, "--port", port]);
+  const started = launch(t, ["listen", "--daemon", "--state", statePath], {
+    env: { CNS_BIND: "127.0.0.1", CNS_PORT: port },
+  });
   assert.equal(await started.exited, 0, started.output);
   assert.match(started.output, /Daemon listening/);
   // Keep the authenticated connection usable even if another cleanup removes the file.
