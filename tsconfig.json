@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "Preserve",
+    "moduleResolution": "Bundler",
+    "customConditions": [
+      "bun"
+    ],
+    "lib": [
+      "ES2022",
+      "ESNext.Disposable"
+    ],
+    "types": [
+      "bun"
+    ],
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "verbatimModuleSyntax": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": [
+    "src/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "build",
+    "dist"
+  ]
+}

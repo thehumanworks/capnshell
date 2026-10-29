@@ -1,0 +1,41 @@
+{
+  "name": "capnweb-shell",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Bidirectional Cap'n Web shell peers for WSL, Windows and macOS.",
+  "bin": {
+    "capnweb-shell": "src/cli.ts"
+  },
+  "scripts": {
+    "build": "bun build --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig --define CAPNWEB_COMPILED=true --outfile dist/capnweb-shell src/cli.ts",
+    "typecheck": "bun node_modules/typescript/bin/tsc --noEmit",
+    "start": "bun src/cli.ts",
+    "wsl": "bun src/cli.ts wsl",
+    "windows": "bun src/cli.ts windows",
+    "listen": "bun src/cli.ts listen",
+    "connect": "bun src/cli.ts connect",
+    "bundle:mac": "bun src/cli.ts bundle-mac",
+    "install:windows": "bun src/cli.ts install-windows",
+    "test": "bun test --timeout 30000 ./src",
+    "test:compiled": "bun run build && CAPNWEB_TEST_BINARY=1 bun test --timeout 30000 ./src",
+    "test:integration": "bun src/cli.ts integration-smoke"
+  },
+  "engines": {
+    "bun": ">=1.4.2"
+  },
+  "dependencies": {
+    "capnweb": "0.12.0",
+    "commander": "14.0.3",
+    "execa": "10.2.1",
+    "tar": "7.5.22",
+    "tree-kill": "1.2.2",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.4",
+    "@types/node": "22.20.5",
+    "typescript": "7.0.2"
+  },
+  "packageManager": "bun@1.4.2"
+}
