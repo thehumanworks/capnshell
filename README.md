@@ -34,6 +34,7 @@ Use an address reachable from the other machine. This does not configure routing
 | `connect <url>` | Open a bidirectional connection and interactive console. |
 | `connect <url> --no-repl` | Connect and expose local execution without a console. |
 | `run [url] -- '<command>'` | Execute one shell command and exit with its status. |
+| `tty [url] [-- '<command>']` | Open an interactive terminal (PTY) running a login shell or one command. |
 | `attach` | Open a console for the local daemon. |
 | `stop` | Stop the local daemon and its sessions. |
 
@@ -62,6 +63,7 @@ The console automatically selects the initial sole peer. When several peers are 
 | `:info` | Show the selected peer's platform, shell, hostname and process ID. |
 | `:cwd [PATH]` | Show/set its working directory; use an absolute remote path without quotes. |
 | `:timeout [MS]` | Show/set its deadline; `0` disables it (the default). |
+| `:tty [COMMAND]` | Open an interactive terminal on it: its login shell, or `COMMAND`. Returns to the prompt when the program exits. |
 | `:help` | Show prompt help. |
 | `:quit` | Exit this CLI; from `attach`, detach the console. |
 
@@ -92,13 +94,13 @@ In PowerShell, set variables with e.g. `$env:CNS_BIND = '192.168.1.10'`.
 
 | Environment variable | CLI override | Applies to | Default when unset |
 | --- | --- | --- | --- |
-| `CNS_BIND` | `--bind <address>` | `run` destination; `listen` interface | `127.0.0.1` |
-| `CNS_PORT` | `--port <port>` | `run` destination; `listen` port | `47381` |
-| `CNS_CWD` | `--cwd <path>` | `run` remote working directory | Remote user's home directory |
+| `CNS_BIND` | `--bind <address>` | `run`/`tty` destination; `listen` interface | `127.0.0.1` |
+| `CNS_PORT` | `--port <port>` | `run`/`tty` destination; `listen` port | `47381` |
+| `CNS_CWD` | `--cwd <path>` | `run`/`tty` remote working directory | Remote user's home directory |
 
 Precedence is **CLI flag > environment variable > built-in default**. `CNS_BIND` must be a numeric IPv4 or IPv6 address, and `CNS_PORT` must be an integer from 1 to 65535. Empty or invalid values are rejected unless overridden. The working directory is an absolute path on the **remote** machine, not the local one.
 
-Without a URL, `run` connects to `ws://<bind>:<port>` using these defaults. An explicit URL (including a hostname, path or `wss://` endpoint) replaces `CNS_BIND` and `CNS_PORT`; do not combine a URL with `--bind` or `--port`. `CNS_CWD` still applies with an explicit URL. `connect` continues to require a URL and ignores these environment variables.
+Without a URL, `run` and `tty` connect to `ws://<bind>:<port>` using these defaults. An explicit URL (including a hostname, path or `wss://` endpoint) replaces `CNS_BIND` and `CNS_PORT`; do not combine a URL with `--bind` or `--port`. `CNS_CWD` still applies with an explicit URL. `connect` continues to require a URL and ignores these environment variables.
 
 `listen` also uses `CNS_BIND` and `CNS_PORT`, including with `--daemon`. A non-loopback bind still requires explicit `--allow-remote`; environment variables do not opt in to remote shell access.
 
@@ -106,11 +108,36 @@ Without a URL, `run` connects to `ws://<bind>:<port>` using these defaults. An e
 
 `run` writes remote stdout and stderr to the corresponding local streams without prompts or added newlines and propagates the exit status. A timeout exits with status 124. The connection remains bidirectional while the command runs, so the listener can execute commands on the connecting machine too.
 
-Every command starts a fresh noninteractive shell. Shell variables and standalone `cd` commands do not persist; use `:cwd` or combine operations in one command. There is no PTY, streaming terminal or interactive editor support. Remote stdin is closed; piping input to `cns run` does not forward it.
+Every command starts a fresh noninteractive shell. Shell variables and standalone `cd` commands do not persist; use `:cwd` or combine operations in one command. Remote stdin is closed; piping input to `cns run` does not forward it. For interactive programs, editors and TUIs, use [`tty`](#interactive-terminals-pty).
 
 Output is buffered until completion, with a combined 1 MiB capture limit. Excess output is drained and discarded. Truncation and timeouts add a diagnostic to stderr. Commands have no deadline by default; the maximum optional timeout is 2147483647 ms. Stopping a peer or disconnecting its session attempts to kill that session's process trees; deliberately detached processes can escape cleanup.
 
 The listener allows up to 32 connections and four concurrent commands per connection. Incomplete RPC handshakes expire after five seconds.
+
+## Interactive terminals (PTY)
+
+`tty` runs a program on a pseudo-terminal on a Linux or macOS peer, so interactive CLIs and full-screen TUIs such as `vim`, `top` or Claude Code render and take keyboard input:
+
+```sh
+cns tty                                   # the remote user's login shell ($SHELL -l, else Bash)
+cns tty --cwd /srv/app -- 'claude'        # one command, with the run quoting rules
+cns tty ws://192.168.1.10:47381 -- 'htop'
+```
+
+From a console, `:tty` and `:tty COMMAND` do the same on the selected peer, including the reverse direction from a listener or `attach` to a connected peer. The console's `:cwd` and `:timeout` apply.
+
+- A local terminal is switched to raw mode, so Ctrl-C, Ctrl-D, Esc and arrow keys go to the remote program. Its size is sent on start and on every resize. The local terminal is restored when the program exits or the connection drops.
+- `tty` exits with the remote program's status (124 after `--timeout`, 128 + signal number after a signal). A timeout or `:tty` hang-up sends SIGHUP to the program, then SIGKILL after one second.
+- Without a local terminal, for example from an agent, piped stdin is forwarded byte for byte and output is written raw, including escape sequences. Pass `--cols`/`--rows` for a fixed size (default 80×24) and `--term` for `TERM` (default `xterm-256color`). The end of piped input is not sent as a keystroke. Send `\x04` yourself where a program expects Ctrl-D:
+
+  ```sh
+  printf 'ls --color\nexit\n' | cns tty --cols 120 --rows 40
+  printf 'hello\n\x04' | cns tty -- 'cat'
+  ```
+
+Over RPC, `ShellApi.openPty(sink, options)` starts the program and returns a `PtySession` stub with `write(data)`, `resize(cols, rows)` and `close()`; disposing the stub also hangs up. The caller passes `sink`, an `RpcTarget` with `output(bytes)` and `exit(result)`, by reference. The executor waits for each `output` acknowledgement before sending more, coalescing reads into messages of up to 64 KiB. Bun cannot pause PTY reads, so a caller that falls more than 8 MiB behind is hung up with an error. Each connection allows four concurrent PTYs; input is limited to 64 KiB per `write`. The daemon proxies both stubs between `attach` and its peers.
+
+Windows peers do not support PTYs yet: Bun's PTY support covers Linux and macOS only.
 
 ## Background operation
 
@@ -179,4 +206,4 @@ bun test --timeout 30000 ./src
 bun run test:compiled
 ```
 
-Tests exercise multiple bidirectional peers, target selection, disconnect isolation, reverse calls during one-shot commands, output/exit-status handling, process cleanup, connection limits, daemon attachment and startup races. The compiled suite additionally tests the executable outside its checkout without a JavaScript runtime on `PATH`.
+Tests exercise multiple bidirectional peers, target selection, disconnect isolation, reverse calls during one-shot commands and PTY sessions, output/exit-status handling, PTY input, sizing, hang-up, timeouts and flow control, PTY proxying through the daemon, process cleanup, connection limits, daemon attachment and startup races. The compiled suite additionally tests the executable outside its checkout without a JavaScript runtime on `PATH`.

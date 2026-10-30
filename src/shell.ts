@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { RpcTarget } from "capnweb";
@@ -13,6 +14,13 @@ export const MAX_OUTPUT_BYTES = 1024 * 1024;
 // Largest delay supported by Node timers without overflowing. Zero means no deadline.
 export const MAX_TIMEOUT_MS = 2_147_483_647;
 
+export const MAX_PTY_INPUT_BYTES = 64 * 1024;
+// Bun cannot pause PTY reads. A caller that stops acknowledging output ends its
+// session rather than growing this process's memory without bound.
+export const MAX_PTY_BACKLOG_BYTES = 8 * 1024 * 1024;
+const PTY_CHUNK_BYTES = 64 * 1024;
+const MAX_PTYS = 4;
+
 const commandSchema = z.string().max(8192, "Command must be at most 8192 characters.")
   .refine((value) => value.trim().length > 0, "Command must be nonempty.");
 const optionsSchema = z.strictObject({
@@ -21,6 +29,17 @@ const optionsSchema = z.strictObject({
     .default(() => os.homedir()),
 });
 export type RunOptions = z.input<typeof optionsSchema>;
+const dimension = z.int().min(1).max(1000);
+const ptyOptionsSchema = optionsSchema.extend({
+  /** Omit to start the executing user's login shell. */
+  command: commandSchema.optional(),
+  cols: dimension.default(80),
+  rows: dimension.default(24),
+  term: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/, "term must be a terminfo name.").default("xterm-256color"),
+});
+export type PtyOptions = z.input<typeof ptyOptionsSchema>;
+const ptyInputSchema = z.union([z.string(), z.instanceof(Uint8Array)])
+  .refine((data) => Buffer.byteLength(data) <= MAX_PTY_INPUT_BYTES, `PTY input must be at most ${MAX_PTY_INPUT_BYTES} bytes per write.`);
 export interface ShellInfo {
   platform: NodeJS.Platform;
   name: string;
@@ -41,6 +60,29 @@ export interface RunResult {
   elapsedMs: number;
 }
 
+export interface PtyExit {
+  exitCode: number | null;
+  signal: string | null;
+  signalNumber: number | null;
+  timedOut: boolean;
+  elapsedMs: number;
+  /** Why the executor ended the session, when it was not the program's own exit. */
+  error: string | null;
+}
+/**
+ * Implemented by the caller and passed by reference. The executor pushes terminal
+ * output to it and waits for each acknowledgement before sending more.
+ */
+export interface PtySink {
+  output(data: Uint8Array): void | Promise<void>;
+  exit(result: PtyExit): void | Promise<void>;
+}
+type SinkStub = PtySink & { dup?(): SinkStub; [Symbol.dispose]?(): void };
+
+function signalGroup(pid: number, signal: NodeJS.Signals): void {
+  try { process.kill(-pid, signal); } catch { /* The group has already exited. */ }
+}
+
 function killTree(child: ChildProcess): void {
   if (!child.pid) return;
   if (process.platform === "win32") {
@@ -56,9 +98,137 @@ function killTree(child: ChildProcess): void {
   }
 }
 
+/** An interactive program on a pseudo-terminal, controlled by reference over RPC. */
+export class PtySession extends RpcTarget {
+  #process: Bun.Subprocess;
+  #terminal: Bun.Terminal;
+  #sink: SinkStub;
+  #queue: Uint8Array[] = [];
+  #queued = 0;
+  #pump?: Promise<void>;
+  #error: string | null = null;
+  #ended = false;
+  #killTimer?: ReturnType<typeof setTimeout>;
+
+  constructor(sink: SinkStub, options: z.output<typeof ptyOptionsSchema>, onEnd: (session: PtySession) => void) {
+    super();
+    const { command, cwd, cols, rows, term, timeoutMs } = options;
+    let eof!: () => void;
+    const drained = new Promise<void>((resolve) => { eof = resolve; });
+    const shell = process.env.SHELL && path.isAbsolute(process.env.SHELL) && existsSync(process.env.SHELL) ? process.env.SHELL : bash;
+    const started = Date.now();
+    this.#process = Bun.spawn(command === undefined ? [shell, "-l"] : [bash, "--noprofile", "--norc", "-c", command], {
+      cwd,
+      env: { ...process.env, TERM: term },
+      terminal: {
+        cols, rows, name: term,
+        data: (_terminal, data) => this.#push(data.slice()),
+        exit: () => eof(),
+      },
+    });
+    this.#terminal = this.#process.terminal!;
+    // Parameters are released after the call returns; keep our own reference.
+    this.#sink = sink.dup?.() ?? sink;
+    let timedOut = false;
+    const timer = timeoutMs > 0 ? setTimeout(() => {
+      timedOut = true;
+      this.#hangUp();
+    }, timeoutMs) : undefined;
+    void this.#process.exited.then(async () => {
+      clearTimeout(timer);
+      clearTimeout(this.#killTimer);
+      // Output written just before exit can still be in the PTY buffer.
+      await Promise.race([drained, new Promise((resolve) => setTimeout(resolve, 250))]);
+      this.#ended = true;
+      this.#terminal.close();
+      onEnd(this);
+      // A stalled caller may never acknowledge its pending output.
+      if (!this.#error) await this.#pump;
+      const code = this.#process.signalCode;
+      const signal = typeof code === "string" ? code : null;
+      try {
+        await this.#sink.exit({
+          exitCode: this.#process.exitCode, signal,
+          signalNumber: signal ? os.constants.signals[signal as NodeJS.Signals] ?? null : null,
+          timedOut, elapsedMs: Date.now() - started, error: this.#error,
+        });
+      } catch { /* The caller has gone; nothing is waiting for the result. */ }
+      this.#sink[Symbol.dispose]?.();
+    });
+  }
+
+  /** Send keystrokes or other input bytes to the program. */
+  write(data: string | Uint8Array): void {
+    ptyInputSchema.parse(data);
+    if (!this.#ended && !this.#terminal.closed) this.#terminal.write(data);
+  }
+
+  resize(cols: number, rows: number): void {
+    dimension.parse(cols);
+    dimension.parse(rows);
+    if (!this.#ended && !this.#terminal.closed) this.#terminal.resize(cols, rows);
+  }
+
+  /** Hang up, as when a terminal window closes. The sink still receives exit(). */
+  close(): void { this.#hangUp(); }
+
+  [Symbol.dispose]() { this.#hangUp(); }
+
+  #hangUp(error?: string) {
+    if (error && !this.#error) this.#error = error;
+    if (this.#ended || this.#killTimer) return;
+    // A PTY's process group is its session leader's. Jobs started by an interactive
+    // shell receive SIGHUP from the shell and the closing terminal.
+    signalGroup(this.#process.pid, "SIGHUP");
+    this.#terminal.close();
+    this.#killTimer = setTimeout(() => signalGroup(this.#process.pid, "SIGKILL"), 1000);
+  }
+
+  #push(data: Uint8Array) {
+    if (this.#error) return;
+    this.#queue.push(data);
+    this.#queued += data.length;
+    if (this.#queued > MAX_PTY_BACKLOG_BYTES) {
+      this.#queue = [];
+      this.#queued = 0;
+      this.#hangUp("PTY output backlog exceeded; the caller stopped reading.");
+      return;
+    }
+    this.#pump ??= this.#drain();
+  }
+
+  async #drain() {
+    while (this.#queue.length) {
+      // Coalesce small reads so a fast program does not cost one round trip per read.
+      const chunks: Uint8Array[] = [];
+      let length = 0;
+      while (this.#queue.length && length + this.#queue[0]!.length <= PTY_CHUNK_BYTES) {
+        length += this.#queue[0]!.length;
+        chunks.push(this.#queue.shift()!);
+      }
+      if (!chunks.length) {
+        const first = this.#queue[0]!;
+        chunks.push(first.subarray(0, PTY_CHUNK_BYTES));
+        this.#queue[0] = first.subarray(PTY_CHUNK_BYTES);
+        length = PTY_CHUNK_BYTES;
+      }
+      this.#queued -= length;
+      try {
+        await this.#sink.output(chunks.length === 1 ? chunks[0]! : Buffer.concat(chunks));
+      } catch {
+        this.#queue = [];
+        this.#queued = 0;
+        this.#hangUp("The caller stopped receiving PTY output.");
+      }
+    }
+    this.#pump = undefined;
+  }
+}
+
 // Only these prototype methods are exported. Internal state uses JS #private fields.
 export class ShellApi extends RpcTarget {
   #children = new Set<ChildProcess>();
+  #ptys = new Set<PtySession>();
   #closed = false;
 
   info(): ShellInfo {
@@ -145,9 +315,26 @@ export class ShellApi extends RpcTarget {
     });
   }
 
+  /**
+   * Start a program on a pseudo-terminal so interactive CLIs and TUIs render. Output
+   * and the final status are pushed to the caller's sink; the returned session takes
+   * input, resizes and hangs up. Disposing the session also hangs up.
+   */
+  openPty(sink: PtySink, options: PtyOptions = {}): PtySession {
+    if (this.#closed) throw new Error("This shell session is closed.");
+    if (process.platform === "win32") throw new Error("PTY sessions require a Linux or macOS peer.");
+    if (!sink || (typeof sink !== "object" && typeof sink !== "function")) throw new Error("A PTY sink is required.");
+    const parsed = ptyOptionsSchema.parse(options);
+    if (this.#ptys.size >= MAX_PTYS) throw new Error("Too many simultaneous PTY sessions.");
+    const session = new PtySession(sink, parsed, (ended) => this.#ptys.delete(ended));
+    this.#ptys.add(session);
+    return session;
+  }
+
   [Symbol.dispose]() {
     if (this.#closed) return;
     this.#closed = true;
     for (const child of this.#children) killTree(child);
+    for (const pty of this.#ptys) pty.close();
   }
 }

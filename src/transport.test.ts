@@ -167,6 +167,33 @@ test("run exports reverse RPC while its command is live and disconnect cleans up
   assert.equal(listener.closed, false);
 });
 
+test("tty runs programs on a remote terminal with piped input and returns their status", { timeout: 30000, skip: process.platform === "win32" }, async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "cns tty "));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const port = await unusedPort();
+  const url = `ws://[::1]:${port}`;
+  const listener = launchCli(t, ["listen", "--bind", "::1", "--port", port]);
+  await listener.waitFor("listening at");
+  const tty = launchCli(t, ["tty", url, "--cwd", directory, "--cols", "100", "--rows", "30", "--term", "vt100", "--",
+    `tty -s && printf 'IS''TTY %s %s ' "$TERM" "$(pwd)"; stty size; read -r line; printf 'got:%s\n' "$line"; exit 5`]);
+  await tty.waitFor("ISTTY");
+  // Reverse calls keep working while the forward PTY is live.
+  await listener.send(":use p1\n:info", `"pid": ${tty.child.pid}`);
+  // Without a local terminal the console cannot hand its keyboard to a PTY.
+  await listener.send(":tty", ":tty requires an interactive local terminal");
+  tty.child.stdin.write("héllo\r");
+  assert.equal(await tty.exited, 5, tty.output);
+  // The terminal echoes input wherever it arrives, so check each fact separately.
+  assert.ok(tty.stdout.includes(`ISTTY vt100 `) && tty.stdout.includes(`${path.basename(directory)} `), tty.stdout);
+  assert.match(tty.stdout, /[ \n]30 100\r\n/);
+  assert.match(tty.stdout, /got:héllo\r\n/);
+  assert.equal(tty.stderr, "");
+
+  const timed = launchCli(t, ["tty", url, "--timeout", "100", "--", "sleep 60"]);
+  assert.equal(await timed.exited, 124);
+  assert.match(timed.stderr, /timed out/);
+  assert.equal(listener.closed, false);
+});
 
 test("run and interactive connect report unreachable listeners as failure", { timeout: 15000 }, async (t) => {
   const url = `ws://[::1]:${await unusedPort()}`;

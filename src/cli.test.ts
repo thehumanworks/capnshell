@@ -20,16 +20,16 @@ async function temporaryDirectory(t: TestContext): Promise<string> {
 test("the CLI exposes only cross-platform peer commands with side-effect-free help", async (t) => {
   const cwd = await temporaryDirectory(t);
   const { stdout } = await runCli(["--help"], cwd);
-  for (const command of ["listen", "connect", "run", "attach", "stop"]) {
+  for (const command of ["listen", "connect", "run", "tty", "attach", "stop"]) {
     assert.ok(stdout.includes(command));
     const result = await runCli([command, "--help"], cwd);
     assert.match(result.stdout, /Usage: cns/);
     assert.doesNotMatch(result.stdout, /listening at/);
-    if (command === "run" || command === "listen") {
+    if (command === "run" || command === "tty" || command === "listen") {
       assert.match(result.stdout, /CNS_BIND/);
       assert.match(result.stdout, /CNS_PORT/);
     }
-    if (command === "run") assert.match(result.stdout, /CNS_CWD/);
+    if (command === "run" || command === "tty") assert.match(result.stdout, /CNS_CWD/);
   }
   assert.doesNotMatch(stdout, /bundle-mac|install-windows|integration-smoke|\bwindows\b|\bwsl\b/);
   assert.deepEqual(await readdir(cwd), []);
@@ -42,6 +42,7 @@ test("CLI syntax errors and removed setup commands exit nonzero without side eff
     ["run", "ws://127.0.0.1:1", "echo bad"],
     ["run", "ws://127.0.0.1:1", "--", "echo", "bad"],
     ["run", "ws://127.0.0.1:1", "--", ""],
+    ["tty", "htop"], ["tty", "--", "echo", "bad"], ["tty", "--cols", "0"],
     ["bundle-mac"], ["install-windows"], ["integration-smoke"], ["windows"], ["wsl"]]) {
     const result = await runCli(args, cwd, false);
     assert.notEqual(result.exitCode, 0, `Expected rejection: ${args.join(" ")}`);

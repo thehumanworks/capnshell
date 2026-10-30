@@ -5,7 +5,8 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
-import { ShellApi } from "../shell.js";
+import { RpcTarget } from "capnweb";
+import { ShellApi, type PtyExit } from "../shell.js";
 import { launchCli as launch } from "../test-support.js";
 import { connectControl, serveControl } from "./daemon.js";
 
@@ -13,6 +14,15 @@ async function temporaryState(t: TestContext): Promise<string> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "cns-daemon-"));
   t.after(() => rm(directory, { force: true, recursive: true }));
   return path.join(directory, "daemon.json");
+}
+
+/** Passed by reference, so a peer's PTY output travels back through the daemon. */
+class CollectingSink extends RpcTarget {
+  text = "";
+  #finish!: (result: PtyExit) => void;
+  exited = new Promise<PtyExit>((resolve) => { this.#finish = resolve; });
+  output(data: Uint8Array) { this.text += new TextDecoder().decode(data); }
+  exit(result: PtyExit) { this.#finish(result); }
 }
 
 async function unusedPort(): Promise<string> {
@@ -33,6 +43,7 @@ test("local control authenticates before upgrade and exclusively owns private st
     async peers() { return [{ id: "p1", info: shell.info() }]; },
     async info(id: string) { assert.equal(id, "p1"); return shell.info(); },
     async run(id: string, command: string) { assert.equal(id, "p1"); return shell.run(command); },
+    async openPty() { throw new Error("unused"); },
   };
   const cleanup = await serveControl(controller, () => {}, statePath);
   t.after(cleanup);
@@ -61,6 +72,7 @@ test("control cleanup never removes another daemon's state", async (t) => {
     async peers() { return []; },
     async info() { return shell.info(); },
     async run() { throw new Error("unused"); },
+    async openPty() { throw new Error("unused"); },
   }, () => {}, statePath);
   const replacement = { ...JSON.parse(await readFile(statePath, "utf8")), token: "f".repeat(64) };
   await writeFile(statePath, JSON.stringify(replacement));
@@ -98,6 +110,7 @@ test("daemon starts, attaches bidirectionally, survives detach, rejects duplicat
   const command = process.platform === "win32" ? "[Console]::Write('ATTACHED_RUN')" : "printf ATTACHED_RUN";
   await attachment.send(command, "ATTACHED_RUN");
   await attachment.waitFor("[exit=0;");
+  await attachment.send(":tty", ":tty requires an interactive local terminal");
   attachment.child.stdin.write(":quit\n");
   assert.equal(await attachment.exited, 0, attachment.output);
   // EOF may arrive before asynchronous RPCs finish. Drain queued commands without
@@ -109,8 +122,20 @@ test("daemon starts, attaches bidirectionally, survives detach, rejects duplicat
   assert.equal(piped.stderr, "");
   await peer.send(":info", `"pid": ${state.pid}`);
   const connection = await connectControl(statePath);
-  try { assert.equal((await connection.controller.peers()).length, 1); }
-  finally { connection.close(); }
+  try {
+    assert.equal((await connection.controller.peers()).length, 1);
+    if (process.platform !== "win32") {
+      // The attached client's sink and the peer's session are both proxied by the daemon.
+      const sink = new CollectingSink();
+      const pty = await connection.controller.openPty("p1", sink, { command: "read -r line; printf 'VIA_DAEMON:%s' \"$line\"; exit 3" });
+      // The terminal buffers input until the program reads it.
+      await pty.write(new TextEncoder().encode("ok\r"));
+      const result = await sink.exited;
+      pty[Symbol.dispose]();
+      assert.match(sink.text, /VIA_DAEMON:ok/);
+      assert.equal(result.exitCode, 3);
+    }
+  } finally { connection.close(); }
   const stopped = launch(t, ["stop", "--state", statePath]);
   assert.equal(await stopped.exited, 0, stopped.output);
   assert.match(stopped.output, /Daemon stopped/);

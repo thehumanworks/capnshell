@@ -1,11 +1,13 @@
 import readline from "node:readline";
-import { MAX_TIMEOUT_MS, type RunOptions, type RunResult, type ShellInfo } from "./shell.js";
+import { MAX_TIMEOUT_MS, type PtyOptions, type PtySink, type RunOptions, type RunResult, type ShellInfo } from "./shell.js";
+import { attachTerminal, type RemotePty } from "./terminal.js";
 
 export interface PeerSummary { id: string; info: ShellInfo }
 export interface PeerController {
   peers(): Promise<PeerSummary[]>;
   info(id: string): Promise<ShellInfo>;
   run(id: string, command: string, options: RunOptions): Promise<RunResult>;
+  openPty(id: string, sink: PtySink, options: PtyOptions): Promise<RemotePty>;
 }
 
 const help = `
@@ -15,9 +17,10 @@ const help = `
     :info              Show the selected peer's platform, shell and process ID.
     :cwd [PATH]        Show/set its remote working directory (absolute, no quotes).
     :timeout [MS]      Show/set its deadline; 0 disables it (the default).
+    :tty [COMMAND]     Open an interactive terminal (login shell or COMMAND) on it.
     :help              Show this help.
     :quit              Exit this console (a foreground listener stops its peers).
-  Each command starts a fresh shell. No PTY or persistent shell state.
+  Each command starts a fresh shell without persistent state; use :tty for TUIs.
 `;
 
 /** Selection belongs to a console, never to the shared listener or another attachment. */
@@ -32,12 +35,31 @@ export function openConsole(controller: PeerController, onQuit: () => void) {
   lines.once("close", () => { inputEnded = true; });
   let busy = false;
   let revision = 0;
+  const cancelled = new AbortController();
 
   const close = () => {
     if (closed) return;
     closed = true;
+    cancelled.abort();
     lines.close();
   };
+
+  // Readline keeps editing the prompt line from keypresses. Detach it while the
+  // remote program owns the terminal, then give it back unchanged.
+  async function terminal(id: string, command: string | undefined, options: { cwd: string; timeoutMs: number }) {
+    if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error(":tty requires an interactive local terminal. Use cns tty with piped input.");
+    const keypress = process.stdin.listeners("keypress") as ((...args: unknown[]) => void)[];
+    for (const listener of keypress) process.stdin.off("keypress", listener);
+    try {
+      const result = await attachTerminal((sink, ptyOptions) => controller.openPty(id, sink, ptyOptions),
+        { ...options, command }, cancelled.signal);
+      if (result.error) console.error(`Error: ${result.error}`);
+      console.log(`\r\n[exit=${result.exitCode ?? result.signal ?? "unknown"}; ${result.elapsedMs} ms${result.timedOut ? "; TIMED OUT" : ""}]`);
+    } finally {
+      for (const listener of keypress) process.stdin.on("keypress", listener);
+      process.stdin.resume();
+    }
+  }
   const quit = () => { close(); onQuit(); };
   lines.on("SIGINT", quit);
 
@@ -111,6 +133,8 @@ export function openConsole(controller: PeerController, onQuit: () => void) {
                 options.timeoutMs = value;
               }
               console.log(options.timeoutMs === 0 ? "Timeout: disabled" : `Timeout: ${options.timeoutMs} ms`);
+            } else if (line === ":tty" || line.startsWith(":tty ")) {
+              await terminal(id, line.slice(5).trim() || undefined, { ...options });
             } else if (line.startsWith(":")) throw new Error("Unknown command. Try :help.");
             else {
               const result = await controller.run(id, raw, { ...options });

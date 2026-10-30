@@ -4,6 +4,7 @@ import { z } from "zod";
 import { ShellApi, type RunResult, type ShellInfo } from "../shell.js";
 import { openConsole, type PeerController } from "../console.js";
 import type { PeerConfig } from "../options.js";
+import { attachTerminal } from "../terminal.js";
 import { serveControl } from "./daemon.js";
 
 // Bound unauthenticated connections, including peers that never complete the RPC handshake.
@@ -25,7 +26,7 @@ interface Session {
   info?: ShellInfo;
 }
 
-export function commandExitCode(result: RunResult): number {
+export function commandExitCode(result: Pick<RunResult, "exitCode" | "signalNumber" | "timedOut">): number {
   if (result.timedOut) return 124;
   if (result.exitCode !== null) return result.exitCode;
   return result.signalNumber != null ? 128 + result.signalNumber : 1;
@@ -42,7 +43,8 @@ export async function startPeer(config: PeerConfig): Promise<void> {
   let stopping = false;
   let finished!: () => void;
   const done = new Promise<void>((resolve) => { finished = resolve; });
-  const oneShot = config.command !== undefined;
+  const oneShot = config.role === "run" || config.role === "tty";
+  const cancelled = new AbortController();
   const announce = (message: string) => { if (!oneShot) console.log(message); };
 
   function describe(session: Session): string {
@@ -68,6 +70,7 @@ export async function startPeer(config: PeerConfig): Promise<void> {
     if (stopping) return;
     stopping = true;
     process.exitCode = code;
+    cancelled.abort();
     input?.close();
     for (const session of sessions.values()) remove(session);
     try {
@@ -103,6 +106,9 @@ export async function startPeer(config: PeerConfig): Promise<void> {
       try { return { ...result }; }
       finally { result[Symbol.dispose](); }
     },
+    async openPty(id, sink, options) {
+      return await requireSession(id).remote.openPty(sink, options);
+    },
   };
 
   function disconnected(session: Session, code = oneShot || !session.info ? 1 : 0) {
@@ -129,7 +135,14 @@ export async function startPeer(config: PeerConfig): Promise<void> {
         clearTimeout(session.timer);
         announce(`Connected to ${describe(session)} [${session.info.platform} / ${session.info.shell}].`);
         if (config.mode === "connect") {
-          if (oneShot) {
+          if (config.role === "tty") {
+            const { command, cwd, timeoutMs, cols, rows, term } = config;
+            const result = await attachTerminal((sink, options) => controller.openPty(id, sink, options),
+              { command, cwd, timeoutMs, cols, rows, term }, cancelled.signal);
+            if (result.error) console.error(`cns: ${result.error}`);
+            if (result.timedOut) console.error("cns: command timed out");
+            await stop(commandExitCode(result));
+          } else if (oneShot) {
             const result = await controller.run(id, config.command!, { cwd: config.cwd, timeoutMs: config.timeoutMs });
             process.stdout.write(result.stdout);
             process.stderr.write(result.stderr);

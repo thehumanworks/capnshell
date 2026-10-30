@@ -9,7 +9,7 @@ import { z } from "zod";
 import { openConsole, type PeerController } from "../console.js";
 import type { PeerConfig } from "../options.js";
 import { selfInvocation } from "../runtime.js";
-import type { RunOptions } from "../shell.js";
+import type { PtyOptions, PtySink, RunOptions } from "../shell.js";
 
 const stateSchema = z.strictObject({
   version: z.literal(1),
@@ -52,6 +52,8 @@ class ControlApi extends RpcTarget {
   peers() { return this.#controller.peers(); }
   info(id: string) { return this.#controller.info(id); }
   run(id: string, command: string, options: RunOptions = {}) { return this.#controller.run(id, command, options); }
+  /** The attached console's sink and the peer's session stub are proxied by reference. */
+  openPty(id: string, sink: PtySink, options: PtyOptions = {}) { return this.#controller.openPty(id, sink, options); }
   stop() {
     // Let Cap'n Web send the successful result before closing the transport.
     setTimeout(this.#stop, 25);
@@ -195,6 +197,7 @@ async function connectToState(state: DaemonState): Promise<{ controller: PeerCon
       peers: () => plain(remote.peers()),
       info: (id) => plain(remote.info(id)),
       run: (id, command, options) => plain(remote.run(id, command, options)),
+      openPty: async (id, sink, options) => await remote.openPty(id, sink, options),
     },
     close() {
       remote[Symbol.dispose]();

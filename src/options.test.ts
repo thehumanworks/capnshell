@@ -182,3 +182,26 @@ test("run requires an explicit delimiter and exactly one nonempty shell string",
     ["run", "ws://localhost", "--timeout", "1.5", "--", "echo ok"],
   ]) assert.throws(() => parseOptions(args), `Expected rejection: ${args.join(" ")}`);
 });
+
+test("tty opens a login shell or one quoted command with optional terminal settings", () => {
+  const shell = parseOptions(["tty"]);
+  assert.equal(shell.role, "tty");
+  assert.equal(shell.mode, "connect");
+  assert.equal(shell.noRepl, true);
+  assert.equal(shell.command, undefined);
+  assert.equal(shell.url, "ws://127.0.0.1:47381");
+  const command = "claude --resume 'a b'";
+  const config = parseOptions(["tty", "ws://localhost:47382", "--cwd", "/srv", "--timeout", "1000",
+    "--cols", "120", "--rows", "40", "--term", "screen-256color", "--", command]);
+  assert.equal(config.url, "ws://localhost:47382/");
+  assert.equal(config.command, command);
+  assert.deepEqual([config.cwd, config.timeoutMs, config.cols, config.rows, config.term], ["/srv", 1000, 120, 40, "screen-256color"]);
+  assert.equal(parseOptions(["tty", "--", "htop"]).command, "htop");
+  assert.equal(parseOptions(["tty", "ws://[::1]:47381"]).command, undefined);
+  assert.equal(parseOptions(["tty", "--", "htop"], { CNS_PORT: "47382", CNS_CWD: "/srv" }).url, "ws://127.0.0.1:47382");
+  for (const args of [
+    ["tty", "htop"], ["tty", "ws://localhost", "htop"], ["tty", "--"], ["tty", "--", " "],
+    ["tty", "--", "echo", "ok"], ["tty", "--cols", "0"], ["tty", "--rows", "1001"], ["tty", "--cols", "8x"],
+    ["tty", "--term", "xterm 256"], ["tty", "--no-repl"], ["tty", "--timeout", "-1"],
+  ]) assert.throws(() => parseOptions(args), `Expected rejection: ${args.join(" ")}`);
+});

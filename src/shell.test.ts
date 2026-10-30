@@ -3,7 +3,7 @@ import { mkdtemp, realpath, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
-import { MAX_OUTPUT_BYTES, MAX_TIMEOUT_MS, ShellApi } from "./shell.js";
+import { MAX_OUTPUT_BYTES, MAX_PTY_BACKLOG_BYTES, MAX_PTY_INPUT_BYTES, MAX_TIMEOUT_MS, ShellApi, type PtyExit } from "./shell.js";
 
 const windows = process.platform === "win32";
 function apiFor(t: TestContext) {
@@ -122,4 +122,97 @@ test("reports signal numbers from the executing operating system", { skip: windo
   assert.equal(result.exitCode, null);
   assert.equal(result.signal, "SIGUSR1");
   assert.equal(result.signalNumber, os.constants.signals.SIGUSR1);
+});
+
+/** Collect PTY output locally, as a remote caller's sink would. */
+function ptySink(stall = false) {
+  let output = "";
+  let changed = () => {};
+  let finish!: (result: PtyExit) => void;
+  const exited = new Promise<PtyExit>((resolve) => { finish = resolve; });
+  const decoder = new TextDecoder();
+  return {
+    exited,
+    get output() { return output; },
+    sink: {
+      output(data: Uint8Array) {
+        if (stall) return new Promise<void>(() => {});
+        output += decoder.decode(data, { stream: true });
+        changed();
+      },
+      exit(result: PtyExit) { finish(result); },
+    },
+    waitFor(needle: string) {
+      return new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`Waiting for ${needle}: ${JSON.stringify(output)}`)), 10000);
+        changed = () => { if (output.includes(needle)) { clearTimeout(timer); resolve(); } };
+        changed();
+      });
+    },
+  };
+}
+
+test("PTY sessions run programs on a real terminal with input, size and exit status", { skip: windows }, async (t) => {
+  const collected = ptySink();
+  const pty = apiFor(t).openPty(collected.sink, {
+    command: `tty -s && printf 'IS''TTY '; printf '%s ' "$TERM"; stty size; read -r line; printf 'got:%s\\n' "$line"; exit 7`,
+    cols: 120, rows: 40, term: "vt100",
+  });
+  await collected.waitFor("ISTTY vt100 40 120");
+  pty.write("héllo\r");
+  const result = await collected.exited;
+  assert.match(collected.output, /got:héllo\r\n/);
+  assert.equal(result.exitCode, 7);
+  assert.equal(result.timedOut, false);
+  assert.equal(result.error, null);
+});
+
+test("PTY sessions resize, hang up and time out", { skip: windows }, async (t) => {
+  const api = apiFor(t);
+  const resized = ptySink();
+  const pty = api.openPty(resized.sink, { command: "printf 'READY\\n'; read -r _; stty size; read -r _" });
+  await resized.waitFor("READY");
+  pty.resize(100, 30);
+  pty.write("\r");
+  await resized.waitFor("30 100");
+  pty.close();
+  const hungUp = await resized.exited;
+  assert.ok(hungUp.signal === "SIGHUP" || hungUp.exitCode !== 0, JSON.stringify(hungUp));
+
+  const timed = ptySink();
+  api.openPty(timed.sink, { command: "sleep 10", timeoutMs: 200 });
+  const result = await timed.exited;
+  assert.equal(result.timedOut, true);
+  assert.ok(result.elapsedMs < 8000);
+});
+
+test("PTY sessions end when the caller stops acknowledging output", { skip: windows }, async (t) => {
+  const stalled = ptySink(true);
+  apiFor(t).openPty(stalled.sink, { command: `head -c ${MAX_PTY_BACKLOG_BYTES * 2} /dev/zero | tr '\\0' x; sleep 10` });
+  const result = await stalled.exited;
+  assert.match(result.error ?? "", /backlog/);
+  assert.ok(result.elapsedMs < 8000);
+});
+
+test("PTY sessions validate input and are killed with their shell API", { skip: windows }, async () => {
+  const api = new ShellApi();
+  const collected = ptySink();
+  assert.throws(() => api.openPty(collected.sink, { cols: 0 }), /cols|>=1/);
+  assert.throws(() => api.openPty(collected.sink, { term: "xterm; rm -rf /" }), /terminfo/);
+  assert.throws(() => api.openPty(collected.sink, { command: " " }), /Command/);
+  assert.throws(() => api.openPty(collected.sink, { cwd: "relative" }), /absolute/);
+  assert.throws(() => api.openPty(null as never), /sink/);
+  assert.throws(() => api.openPty(collected.sink, { cwd: path.join(os.tmpdir(), "capnweb-no-such-directory", "absent") }), /ENOENT/);
+  const pty = api.openPty(collected.sink, { command: "printf 'READY\\n'; sleep 10" });
+  await collected.waitFor("READY");
+  assert.throws(() => pty.write("x".repeat(MAX_PTY_INPUT_BYTES + 1)), /at most/);
+  assert.throws(() => pty.resize(80, 1001));
+  api[Symbol.dispose]();
+  const result = await collected.exited;
+  assert.ok(result.elapsedMs < 8000);
+  assert.throws(() => api.openPty(collected.sink), /closed/);
+});
+
+test("PTY sessions are refused on Windows peers", { skip: !windows }, (t) => {
+  assert.throws(() => apiFor(t).openPty(ptySink().sink), /Linux or macOS/);
 });
