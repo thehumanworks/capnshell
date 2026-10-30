@@ -42,7 +42,7 @@ test("CLI syntax errors and removed setup commands exit nonzero without side eff
     ["run", "ws://127.0.0.1:1", "echo bad"],
     ["run", "ws://127.0.0.1:1", "--", "echo", "bad"],
     ["run", "ws://127.0.0.1:1", "--", ""],
-    ["tty", "htop"], ["tty", "--", "echo", "bad"], ["tty", "--cols", "0"],
+    ["tty", "htop"], ["tty", "--", "echo", "bad"], ["tty", "--cols", "0"], ["tty", "--history", "5"],
     ["bundle-mac"], ["install-windows"], ["integration-smoke"], ["windows"], ["wsl"]]) {
     const result = await runCli(args, cwd, false);
     assert.notEqual(result.exitCode, 0, `Expected rejection: ${args.join(" ")}`);

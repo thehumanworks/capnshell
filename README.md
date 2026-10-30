@@ -135,9 +135,34 @@ From a console, `:tty` and `:tty COMMAND` do the same on the selected peer, incl
   printf 'hello\n\x04' | cns tty -- 'cat'
   ```
 
-Over RPC, `ShellApi.openPty(sink, options)` starts the program and returns a `PtySession` stub with `write(data)`, `resize(cols, rows)` and `close()`; disposing the stub also hangs up. The caller passes `sink`, an `RpcTarget` with `output(bytes)` and `exit(result)`, by reference. The executor waits for each `output` acknowledgement before sending more, coalescing reads into messages of up to 64 KiB. Bun cannot pause PTY reads, so a caller that falls more than 8 MiB behind is hung up with an error. Each connection allows four concurrent PTYs; input is limited to 64 KiB per `write`. The daemon proxies both stubs between `attach` and its peers.
+### Rendered screens
 
-Windows peers do not support PTYs yet: Bun's PTY support covers Linux and macOS only.
+Each PTY session renders its output into a headless terminal emulator ([`@xterm/headless`](https://www.npmjs.com/package/@xterm/headless)) on the executing peer, as tmux does for its panes. `--screen` prints what that terminal shows when the program ends, like `tmux capture-pane -p`, instead of the escape sequences that drew it. The renderer only renders; you choose when to look. A program's own exit captures its final screen, and `--timeout` captures a program that keeps running at that moment, then hangs it up:
+
+```sh
+cns tty --screen --cols 120 --rows 40 --timeout 5000 -- 'htop'
+(sleep 1; printf 'ihello\033') | cns tty --screen --timeout 3000 -- 'vim notes.txt'
+cns tty --screen --history 100 -- 'make test'   # include up to 100 scrollback lines
+```
+
+Rows are printed with trailing spaces and the blank rows below the last output removed. With `--screen`, or without a local terminal, the remote screen answers terminal queries such as cursor-position reports. TUIs that wait for such answers, including Claude Code, then draw without a real terminal attached. A program that exits through the alternate screen, as vim does on `:wq`, leaves the normal screen behind; that is what a real terminal shows then, too.
+
+### RPC interface
+
+`ShellApi.openPty(sink, options)` starts the program and returns a `PtySession` stub:
+
+| Method | Purpose |
+| --- | --- |
+| `write(data)` | Send keystrokes or other input, at most 64 KiB per call. |
+| `resize(cols, rows)` | Resize the terminal (1–1000 each). |
+| `capture({ history })` | Render the screen now: `text`, `cols`, `rows`, `cursor`, `alternateScreen` and `title`. Works while the program runs and after it ends, until the session is released. `history` adds up to 1000 scrollback lines. |
+| `close()` | Hang up. |
+
+Releasing (disposing) the stub also hangs up and frees the screen. Options are `command`, `cwd`, `timeoutMs`, `cols`, `rows` and `term`, plus `stream: false` to receive no raw output and `respond: true` to have the screen answer terminal queries.
+
+The caller passes `sink`, an `RpcTarget` with `output(bytes)` and `exit(result)`, by reference. The executor waits for each `output` acknowledgement before sending more, coalescing reads into messages of up to 64 KiB. Bun cannot pause PTY reads, so a caller that falls more than 8 MiB behind is hung up with an error. Each connection allows four PTY sessions until they are released. The daemon proxies both stubs between `attach` and its peers.
+
+Windows peers do not support PTYs yet. Bun implements `Bun.Terminal` on Windows through ConPTY, but `cns` has not been adapted to it or tested on Windows. ConPTY differs from POSIX PTYs in how it signals, echoes and translates input.
 
 ## Background operation
 
@@ -206,4 +231,4 @@ bun test --timeout 30000 ./src
 bun run test:compiled
 ```
 
-Tests exercise multiple bidirectional peers, target selection, disconnect isolation, reverse calls during one-shot commands and PTY sessions, output/exit-status handling, PTY input, sizing, hang-up, timeouts and flow control, PTY proxying through the daemon, process cleanup, connection limits, daemon attachment and startup races. The compiled suite additionally tests the executable outside its checkout without a JavaScript runtime on `PATH`.
+Tests exercise multiple bidirectional peers, target selection, disconnect isolation, reverse calls during one-shot commands and PTY sessions, output/exit-status handling, PTY input, sizing, hang-up, timeouts and flow control, rendered screens and scrollback, PTY proxying through the daemon, process cleanup, connection limits, daemon attachment and startup races. The compiled suite additionally tests the executable outside its checkout without a JavaScript runtime on `PATH`.

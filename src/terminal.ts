@@ -1,14 +1,21 @@
 import { RpcTarget } from "capnweb";
-import { MAX_PTY_INPUT_BYTES, type PtyExit, type PtyOptions, type PtySink } from "./shell.js";
+import { MAX_PTY_INPUT_BYTES, type CaptureOptions, type PtyExit, type PtyOptions, type PtyScreen, type PtySink } from "./shell.js";
 
 /** The caller's view of a remote PtySession stub. */
 export interface RemotePty {
   write(data: Uint8Array): unknown;
   resize(cols: number, rows: number): unknown;
+  capture(options?: CaptureOptions): Promise<PtyScreen & { [Symbol.dispose]?(): void }>;
   onRpcBroken?(callback: (error: unknown) => void): void;
   [Symbol.dispose](): void;
 }
 export type OpenPty = (sink: PtySink, options: PtyOptions) => Promise<RemotePty>;
+
+export interface AttachOptions {
+  signal?: AbortSignal;
+  /** Print nothing while it runs; return the rendered screen from when it ended. */
+  screen?: CaptureOptions;
+}
 
 /** Receives remote output by reference. Acknowledging after the local write is the flow control. */
 class OutputSink extends RpcTarget implements PtySink {
@@ -30,9 +37,12 @@ class OutputSink extends RpcTarget implements PtySink {
  * input is forwarded verbatim; its end is not translated into a keystroke, because
  * Ctrl-D would also quit TUIs started with stdin closed.
  */
-export async function attachTerminal(open: OpenPty, options: PtyOptions, signal?: AbortSignal): Promise<PtyExit> {
+export async function attachTerminal(open: OpenPty, options: PtyOptions, { signal, screen }: AttachOptions = {}): Promise<{ exit: PtyExit; screen?: PtyScreen }> {
   const input = process.stdin;
   const interactive = !!(input.isTTY && process.stdout.isTTY);
+  // A local terminal answers queries such as cursor-position reports only when it
+  // both displays the output and types the replies; otherwise the remote screen must.
+  const remote = { stream: !screen, respond: !!screen || !interactive };
   const fixedSize = options.cols !== undefined || options.rows !== undefined;
   const size = () => ({
     cols: options.cols ?? (process.stdout.isTTY ? process.stdout.columns : undefined) ?? 80,
@@ -47,7 +57,7 @@ export async function attachTerminal(open: OpenPty, options: PtyOptions, signal?
   const sink = new OutputSink(exited);
   let pty: RemotePty;
   try {
-    pty = await open(sink, { ...options, ...size() });
+    pty = await open(sink, { ...remote, ...options, ...size() });
   } catch (error) {
     signal?.removeEventListener("abort", abort);
     throw error;
@@ -82,7 +92,11 @@ export async function attachTerminal(open: OpenPty, options: PtyOptions, signal?
   if (process.stdout.isTTY && !fixedSize) process.stdout.on("resize", onResize);
   input.resume();
   try {
-    return await result;
+    const exit = await result;
+    if (!screen) return { exit };
+    const captured = await pty.capture(screen);
+    try { return { exit, screen: structuredClone({ ...captured }) }; }
+    finally { captured[Symbol.dispose]?.(); }
   } finally {
     ended = true;
     signal?.removeEventListener("abort", abort);

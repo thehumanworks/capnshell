@@ -197,11 +197,16 @@ test("tty opens a login shell or one quoted command with optional terminal setti
   assert.equal(config.command, command);
   assert.deepEqual([config.cwd, config.timeoutMs, config.cols, config.rows, config.term], ["/srv", 1000, 120, 40, "screen-256color"]);
   assert.equal(parseOptions(["tty", "--", "htop"]).command, "htop");
+  assert.equal(parseOptions(["tty", "--", "htop"]).screen, undefined);
+  assert.deepEqual(parseOptions(["tty", "--screen", "--", "htop"]).screen, { history: 0 });
+  assert.deepEqual(parseOptions(["tty", "--screen", "--history", "1000"]).screen, { history: 1000 });
   assert.equal(parseOptions(["tty", "ws://[::1]:47381"]).command, undefined);
   assert.equal(parseOptions(["tty", "--", "htop"], { CNS_PORT: "47382", CNS_CWD: "/srv" }).url, "ws://127.0.0.1:47382");
   for (const args of [
     ["tty", "htop"], ["tty", "ws://localhost", "htop"], ["tty", "--"], ["tty", "--", " "],
     ["tty", "--", "echo", "ok"], ["tty", "--cols", "0"], ["tty", "--rows", "1001"], ["tty", "--cols", "8x"],
     ["tty", "--term", "xterm 256"], ["tty", "--no-repl"], ["tty", "--timeout", "-1"],
+    ["tty", "--history", "5"], ["tty", "--screen", "--history", "1001"], ["tty", "--screen", "--history", "x"],
+    ["run", "--screen", "--", "echo ok"],
   ]) assert.throws(() => parseOptions(args), `Expected rejection: ${args.join(" ")}`);
 });

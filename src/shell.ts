@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { Terminal as Screen } from "@xterm/headless";
 import { RpcTarget } from "capnweb";
 import treeKill from "tree-kill";
 import { z } from "zod";
@@ -20,6 +21,8 @@ export const MAX_PTY_INPUT_BYTES = 64 * 1024;
 export const MAX_PTY_BACKLOG_BYTES = 8 * 1024 * 1024;
 const PTY_CHUNK_BYTES = 64 * 1024;
 const MAX_PTYS = 4;
+/** Lines of scrollback each PTY's screen keeps for capture(). */
+export const MAX_SCREEN_HISTORY = 1000;
 
 const commandSchema = z.string().max(8192, "Command must be at most 8192 characters.")
   .refine((value) => value.trim().length > 0, "Command must be nonempty.");
@@ -36,8 +39,20 @@ const ptyOptionsSchema = optionsSchema.extend({
   cols: dimension.default(80),
   rows: dimension.default(24),
   term: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/, "term must be a terminfo name.").default("xterm-256color"),
+  /** Push raw output to the sink. Disable when the caller only reads the screen. */
+  stream: z.boolean().default(true),
+  /**
+   * Answer terminal queries (cursor position, device attributes) from the screen.
+   * Enable when no real terminal receives the output to answer them.
+   */
+  respond: z.boolean().default(false),
 });
 export type PtyOptions = z.input<typeof ptyOptionsSchema>;
+const captureOptionsSchema = z.strictObject({
+  /** Scrollback lines to include above the visible screen. */
+  history: z.int().min(0).max(MAX_SCREEN_HISTORY).default(0),
+});
+export type CaptureOptions = z.input<typeof captureOptionsSchema>;
 const ptyInputSchema = z.union([z.string(), z.instanceof(Uint8Array)])
   .refine((data) => Buffer.byteLength(data) <= MAX_PTY_INPUT_BYTES, `PTY input must be at most ${MAX_PTY_INPUT_BYTES} bytes per write.`);
 export interface ShellInfo {
@@ -60,6 +75,18 @@ export interface RunResult {
   elapsedMs: number;
 }
 
+/** The rendered terminal, as `tmux capture-pane -p` prints it. */
+export interface PtyScreen {
+  /** One line per row, trailing spaces removed, joined with \n. */
+  text: string;
+  cols: number;
+  rows: number;
+  /** Zero-based cursor position on the visible screen. */
+  cursor: { x: number; y: number };
+  /** True while a full-screen program uses the alternate screen. */
+  alternateScreen: boolean;
+  title: string;
+}
 export interface PtyExit {
   exitCode: number | null;
   signal: string | null;
@@ -108,24 +135,40 @@ export class PtySession extends RpcTarget {
   #pump?: Promise<void>;
   #error: string | null = null;
   #ended = false;
+  #released = false;
   #killTimer?: ReturnType<typeof setTimeout>;
+  // The renderer only renders: it tracks the screen for whenever a caller asks.
+  #screen: Screen;
+  #title = "";
+  #stream: boolean;
+  #onRelease: (session: PtySession) => void;
 
-  constructor(sink: SinkStub, options: z.output<typeof ptyOptionsSchema>, onEnd: (session: PtySession) => void) {
+  constructor(sink: SinkStub, options: z.output<typeof ptyOptionsSchema>, onRelease: (session: PtySession) => void) {
     super();
-    const { command, cwd, cols, rows, term, timeoutMs } = options;
+    const { command, cwd, cols, rows, term, timeoutMs, stream, respond } = options;
+    this.#stream = stream;
+    this.#onRelease = onRelease;
+    this.#screen = new Screen({ cols, rows, scrollback: MAX_SCREEN_HISTORY, allowProposedApi: true });
+    this.#screen.onTitleChange((title) => { this.#title = title; });
+    if (respond) this.#screen.onData((reply) => { if (!this.#ended && !this.#terminal.closed) this.#terminal.write(reply); });
     let eof!: () => void;
     const drained = new Promise<void>((resolve) => { eof = resolve; });
     const shell = process.env.SHELL && path.isAbsolute(process.env.SHELL) && existsSync(process.env.SHELL) ? process.env.SHELL : bash;
     const started = Date.now();
-    this.#process = Bun.spawn(command === undefined ? [shell, "-l"] : [bash, "--noprofile", "--norc", "-c", command], {
-      cwd,
-      env: { ...process.env, TERM: term },
-      terminal: {
-        cols, rows, name: term,
-        data: (_terminal, data) => this.#push(data.slice()),
-        exit: () => eof(),
-      },
-    });
+    try {
+      this.#process = Bun.spawn(command === undefined ? [shell, "-l"] : [bash, "--noprofile", "--norc", "-c", command], {
+        cwd,
+        env: { ...process.env, TERM: term },
+        terminal: {
+          cols, rows, name: term,
+          data: (_terminal, data) => this.#push(data.slice()),
+          exit: () => eof(),
+        },
+      });
+    } catch (error) {
+      this.#screen.dispose();
+      throw error;
+    }
     this.#terminal = this.#process.terminal!;
     // Parameters are released after the call returns; keep our own reference.
     this.#sink = sink.dup?.() ?? sink;
@@ -141,7 +184,7 @@ export class PtySession extends RpcTarget {
       await Promise.race([drained, new Promise((resolve) => setTimeout(resolve, 250))]);
       this.#ended = true;
       this.#terminal.close();
-      onEnd(this);
+      this.#settle();
       // A stalled caller may never acknowledge its pending output.
       if (!this.#error) await this.#pump;
       const code = this.#process.signalCode;
@@ -166,13 +209,53 @@ export class PtySession extends RpcTarget {
   resize(cols: number, rows: number): void {
     dimension.parse(cols);
     dimension.parse(rows);
-    if (!this.#ended && !this.#terminal.closed) this.#terminal.resize(cols, rows);
+    if (!this.#ended && !this.#terminal.closed) {
+      this.#terminal.resize(cols, rows);
+      this.#screen.resize(cols, rows);
+    }
+  }
+
+  /**
+   * Render the screen now. Works while the program runs and after it exits, until
+   * the session is released; the last screen is kept from the moment it ended or
+   * was hung up.
+   */
+  async capture(options: CaptureOptions = {}): Promise<PtyScreen> {
+    const { history } = captureOptionsSchema.parse(options);
+    if (this.#released) throw new Error("This PTY session has been released.");
+    // Writes are parsed asynchronously; wait for everything received so far.
+    await new Promise<void>((resolve) => this.#screen.write("", resolve));
+    if (this.#released) throw new Error("This PTY session has been released.");
+    const buffer = this.#screen.buffer.active;
+    const lines: string[] = [];
+    for (let y = Math.max(0, buffer.viewportY - history); y < buffer.viewportY + this.#screen.rows; y++) {
+      // trimRight keeps spaces a program wrote explicitly, as many TUIs do to clear rows.
+      lines.push(buffer.getLine(y)?.translateToString(true).replace(/ +$/, "") ?? "");
+    }
+    return {
+      text: lines.join("\n"),
+      cols: this.#screen.cols, rows: this.#screen.rows,
+      cursor: { x: buffer.cursorX, y: buffer.cursorY },
+      alternateScreen: buffer.type === "alternate",
+      title: this.#title,
+    };
   }
 
   /** Hang up, as when a terminal window closes. The sink still receives exit(). */
   close(): void { this.#hangUp(); }
 
-  [Symbol.dispose]() { this.#hangUp(); }
+  /** Releasing the session hangs up and frees its screen. */
+  [Symbol.dispose]() {
+    this.#released = true;
+    this.#hangUp();
+    this.#settle();
+  }
+
+  #settle() {
+    if (!this.#ended || !this.#released) return;
+    this.#screen.dispose();
+    this.#onRelease(this);
+  }
 
   #hangUp(error?: string) {
     if (error && !this.#error) this.#error = error;
@@ -186,6 +269,8 @@ export class PtySession extends RpcTarget {
 
   #push(data: Uint8Array) {
     if (this.#error) return;
+    this.#screen.write(data);
+    if (!this.#stream) return;
     this.#queue.push(data);
     this.#queued += data.length;
     if (this.#queued > MAX_PTY_BACKLOG_BYTES) {
@@ -318,15 +403,17 @@ export class ShellApi extends RpcTarget {
   /**
    * Start a program on a pseudo-terminal so interactive CLIs and TUIs render. Output
    * and the final status are pushed to the caller's sink; the returned session takes
-   * input, resizes and hangs up. Disposing the session also hangs up.
+   * input, resizes, renders its screen on request and hangs up. Release the session
+   * when done with it: that also hangs up and frees its screen.
    */
   openPty(sink: PtySink, options: PtyOptions = {}): PtySession {
     if (this.#closed) throw new Error("This shell session is closed.");
     if (process.platform === "win32") throw new Error("PTY sessions require a Linux or macOS peer.");
     if (!sink || (typeof sink !== "object" && typeof sink !== "function")) throw new Error("A PTY sink is required.");
     const parsed = ptyOptionsSchema.parse(options);
-    if (this.#ptys.size >= MAX_PTYS) throw new Error("Too many simultaneous PTY sessions.");
-    const session = new PtySession(sink, parsed, (ended) => this.#ptys.delete(ended));
+    // Sessions count until released, because their screens remain capturable.
+    if (this.#ptys.size >= MAX_PTYS) throw new Error("Too many PTY sessions; release finished ones first.");
+    const session = new PtySession(sink, parsed, (released) => this.#ptys.delete(released));
     this.#ptys.add(session);
     return session;
   }
@@ -335,6 +422,6 @@ export class ShellApi extends RpcTarget {
     if (this.#closed) return;
     this.#closed = true;
     for (const child of this.#children) killTree(child);
-    for (const pty of this.#ptys) pty.close();
+    for (const pty of this.#ptys) pty[Symbol.dispose]();
   }
 }

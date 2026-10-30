@@ -3,7 +3,7 @@ import { mkdtemp, realpath, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
-import { MAX_OUTPUT_BYTES, MAX_PTY_BACKLOG_BYTES, MAX_PTY_INPUT_BYTES, MAX_TIMEOUT_MS, ShellApi, type PtyExit } from "./shell.js";
+import { MAX_OUTPUT_BYTES, MAX_PTY_BACKLOG_BYTES, MAX_PTY_INPUT_BYTES, MAX_SCREEN_HISTORY, MAX_TIMEOUT_MS, ShellApi, type PtyExit } from "./shell.js";
 
 const windows = process.platform === "win32";
 function apiFor(t: TestContext) {
@@ -127,6 +127,7 @@ test("reports signal numbers from the executing operating system", { skip: windo
 /** Collect PTY output locally, as a remote caller's sink would. */
 function ptySink(stall = false) {
   let output = "";
+  let chunks = 0;
   let changed = () => {};
   let finish!: (result: PtyExit) => void;
   const exited = new Promise<PtyExit>((resolve) => { finish = resolve; });
@@ -134,9 +135,11 @@ function ptySink(stall = false) {
   return {
     exited,
     get output() { return output; },
+    get chunks() { return chunks; },
     sink: {
       output(data: Uint8Array) {
         if (stall) return new Promise<void>(() => {});
+        chunks++;
         output += decoder.decode(data, { stream: true });
         changed();
       },
@@ -211,6 +214,85 @@ test("PTY sessions validate input and are killed with their shell API", { skip: 
   const result = await collected.exited;
   assert.ok(result.elapsedMs < 8000);
   assert.throws(() => api.openPty(collected.sink), /closed/);
+});
+
+async function eventually<T>(read: () => Promise<T>, accept: (value: T) => boolean): Promise<T> {
+  for (const deadline = Date.now() + 10000; ;) {
+    const value = await read();
+    if (accept(value) || Date.now() > deadline) return value;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+test("PTY screens render on request while running, in the alternate screen and after exit", { skip: windows }, async (t) => {
+  const api = apiFor(t);
+  const collected = ptySink();
+  const pty = api.openPty(collected.sink, {
+    cols: 30, rows: 5,
+    command: `printf '\\033]2;my title\\007main 漢字\\r\\n'; read -r _; printf '\\033[?1049h\\033[2J\\033[3;5Hfull screen'; read -r _; printf '\\033[?1049l'; printf 'done   \\r\\n'`,
+  });
+  const main = await eventually(() => pty.capture(), (screen) => screen.text.startsWith("main"));
+  assert.equal(main.text, "main 漢字\n\n\n\n");
+  assert.deepEqual([main.cols, main.rows, main.cursor, main.alternateScreen, main.title], [30, 5, { x: 0, y: 1 }, false, "my title"]);
+  pty.write("\r");
+  const full = await eventually(() => pty.capture(), (screen) => screen.alternateScreen && screen.text.includes("full"));
+  assert.equal(full.text, "\n\n    full screen\n\n");
+  assert.deepEqual(full.cursor, { x: 15, y: 2 });
+  pty.write("\r");
+  assert.equal((await collected.exited).exitCode, 0);
+  const after = await pty.capture();
+  assert.equal(after.alternateScreen, false);
+  assert.match(after.text, /^main 漢字\n\n?done\n/);
+  pty[Symbol.dispose]();
+  await assert.rejects(pty.capture(), /released/);
+});
+
+test("PTY screens keep scrollback, track resizes and can answer terminal queries", { skip: windows }, async (t) => {
+  const api = apiFor(t);
+  const history = ptySink();
+  const scrolled = api.openPty(history.sink, { command: "seq 1 8", rows: 3, cols: 10, stream: false });
+  await history.exited;
+  assert.equal(history.chunks, 0, "stream: false sends no output");
+  assert.equal((await scrolled.capture()).text, "7\n8\n");
+  assert.equal((await scrolled.capture({ history: 2 })).text, "5\n6\n7\n8\n");
+  assert.equal((await scrolled.capture({ history: MAX_SCREEN_HISTORY })).text, "1\n2\n3\n4\n5\n6\n7\n8\n");
+  await assert.rejects(scrolled.capture({ history: MAX_SCREEN_HISTORY + 1 }));
+  await assert.rejects(scrolled.capture({ extra: true } as never));
+  scrolled[Symbol.dispose]();
+
+  // Without a terminal attached, a cursor-position query is answered by the screen.
+  const query = "printf 'abc\\033[6n'; IFS= read -rs -d R reply; printf ' reply=%s' \"${reply#*[}\"";
+  const answered = ptySink();
+  const pty = api.openPty(answered.sink, { command: query, respond: true, cols: 40, rows: 4 });
+  await answered.exited;
+  assert.match(answered.output, /reply=1;4/);
+  pty.resize(20, 2);
+  assert.deepEqual([(await pty.capture()).cols, (await pty.capture()).rows], [40, 4], "resizing after exit has no effect");
+  pty[Symbol.dispose]();
+
+  const running = ptySink();
+  const live = api.openPty(running.sink, { command: "printf READY; read -r _", cols: 40, rows: 4 });
+  await running.waitFor("READY");
+  live.resize(50, 6);
+  const resized = await live.capture();
+  assert.deepEqual([resized.cols, resized.rows], [50, 6]);
+  live[Symbol.dispose]();
+  assert.equal((await running.exited).timedOut, false);
+});
+
+test("released PTY sessions free their slot; unreleased ones keep it", { skip: windows }, async (t) => {
+  const api = apiFor(t);
+  const sessions = [];
+  for (let index = 0; index < 4; index++) {
+    const collected = ptySink();
+    sessions.push(api.openPty(collected.sink, { command: "true" }));
+    await collected.exited;
+  }
+  assert.throws(() => api.openPty(ptySink().sink, { command: "true" }), /release/);
+  sessions[0]![Symbol.dispose]();
+  const collected = ptySink();
+  api.openPty(collected.sink, { command: "true" });
+  await collected.exited;
 });
 
 test("PTY sessions are refused on Windows peers", { skip: !windows }, (t) => {

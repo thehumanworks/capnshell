@@ -131,9 +131,11 @@ test("daemon starts, attaches bidirectionally, survives detach, rejects duplicat
       // The terminal buffers input until the program reads it.
       await pty.write(new TextEncoder().encode("ok\r"));
       const result = await sink.exited;
-      pty[Symbol.dispose]();
       assert.match(sink.text, /VIA_DAEMON:ok/);
       assert.equal(result.exitCode, 3);
+      const screen = await pty.capture();
+      pty[Symbol.dispose]();
+      assert.match(screen.text, /^ok\nVIA_DAEMON:ok/);
     }
   } finally { connection.close(); }
   const stopped = launch(t, ["stop", "--state", statePath]);

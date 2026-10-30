@@ -192,6 +192,16 @@ test("tty runs programs on a remote terminal with piped input and returns their 
   const timed = launchCli(t, ["tty", url, "--timeout", "100", "--", "sleep 60"]);
   assert.equal(await timed.exited, 124);
   assert.match(timed.stderr, /timed out/);
+
+  // --screen prints the rendered terminal, not the escape sequences that drew it.
+  const drawn = "printf '\\033[?1049h\\033[2J\\033[2;3Hdrawn\\033[1;1Htop'; sleep 60";
+  const screen = launchCli(t, ["tty", url, "--screen", "--cols", "20", "--rows", "4", "--timeout", "1000", "--", drawn]);
+  assert.equal(await screen.exited, 124, screen.output);
+  assert.equal(screen.stdout, "top\n  drawn\n");
+  const history = launchCli(t, ["tty", url, "--screen", "--rows", "3", "--history", "2", "--", "seq 1 8; exit 4"]);
+  assert.equal(await history.exited, 4, history.output);
+  assert.equal(history.stdout, "5\n6\n7\n8\n");
+  assert.equal(history.stderr, "");
   assert.equal(listener.closed, false);
 });
 

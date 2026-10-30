@@ -51,8 +51,8 @@ export function openConsole(controller: PeerController, onQuit: () => void) {
     const keypress = process.stdin.listeners("keypress") as ((...args: unknown[]) => void)[];
     for (const listener of keypress) process.stdin.off("keypress", listener);
     try {
-      const result = await attachTerminal((sink, ptyOptions) => controller.openPty(id, sink, ptyOptions),
-        { ...options, command }, cancelled.signal);
+      const { exit: result } = await attachTerminal((sink, ptyOptions) => controller.openPty(id, sink, ptyOptions),
+        { ...options, command }, { signal: cancelled.signal });
       if (result.error) console.error(`Error: ${result.error}`);
       console.log(`\r\n[exit=${result.exitCode ?? result.signal ?? "unknown"}; ${result.elapsedMs} ms${result.timedOut ? "; TIMED OUT" : ""}]`);
     } finally {

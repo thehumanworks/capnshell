@@ -136,9 +136,11 @@ export async function startPeer(config: PeerConfig): Promise<void> {
         announce(`Connected to ${describe(session)} [${session.info.platform} / ${session.info.shell}].`);
         if (config.mode === "connect") {
           if (config.role === "tty") {
-            const { command, cwd, timeoutMs, cols, rows, term } = config;
-            const result = await attachTerminal((sink, options) => controller.openPty(id, sink, options),
-              { command, cwd, timeoutMs, cols, rows, term }, cancelled.signal);
+            const { command, cwd, timeoutMs, cols, rows, term, screen } = config;
+            const { exit: result, screen: captured } = await attachTerminal((sink, options) => controller.openPty(id, sink, options),
+              { command, cwd, timeoutMs, cols, rows, term }, { signal: cancelled.signal, screen });
+            // Like tmux capture-pane, but without the blank rows below the last output.
+            if (captured) process.stdout.write(captured.text.replace(/\n+$/, "") + "\n");
             if (result.error) console.error(`cns: ${result.error}`);
             if (result.timedOut) console.error("cns: command timed out");
             await stop(commandExitCode(result));
