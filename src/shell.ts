@@ -106,6 +106,30 @@ export interface PtySink {
 }
 type SinkStub = PtySink & { dup?(): SinkStub; [Symbol.dispose]?(): void };
 
+const powershell = () => path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+
+/** Run a command in Windows PowerShell with its quoting and Unicode intact. */
+function powershellArgs(command: string, interactive: boolean): string[] {
+  // Base64 preserves quoting/Unicode. Use -Command, not -EncodedCommand:
+  // Windows PowerShell 5 serializes stderr as CLIXML with -EncodedCommand.
+  const preamble = "$ProgressPreference = 'SilentlyContinue'; $OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false);\n";
+  const encoded = Buffer.from(preamble + command, "utf16le").toString("base64");
+  const script = `& ([ScriptBlock]::Create([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${encoded}'))))`;
+  return interactive
+    ? ["-NoLogo", "-NoProfile", "-Command", script]
+    : ["-NoLogo", "-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-Command", script];
+}
+
+/** The program a PTY runs: the user's interactive shell, or one command in the platform's shell. */
+function ptyProgram(command: string | undefined): string[] {
+  if (process.platform === "win32") {
+    return command === undefined ? [powershell(), "-NoLogo"] : [powershell(), ...powershellArgs(command, true)];
+  }
+  if (command !== undefined) return [bash, "--noprofile", "--norc", "-c", command];
+  const shell = process.env.SHELL && path.isAbsolute(process.env.SHELL) && existsSync(process.env.SHELL) ? process.env.SHELL : bash;
+  return [shell, "-l"];
+}
+
 function signalGroup(pid: number, signal: NodeJS.Signals): void {
   try { process.kill(-pid, signal); } catch { /* The group has already exited. */ }
 }
@@ -136,6 +160,7 @@ export class PtySession extends RpcTarget {
   #error: string | null = null;
   #ended = false;
   #released = false;
+  #hungUp = false;
   #killTimer?: ReturnType<typeof setTimeout>;
   // The renderer only renders: it tracks the screen for whenever a caller asks.
   #screen: Screen;
@@ -153,10 +178,9 @@ export class PtySession extends RpcTarget {
     if (respond) this.#screen.onData((reply) => { if (!this.#ended && !this.#terminal.closed) this.#terminal.write(reply); });
     let eof!: () => void;
     const drained = new Promise<void>((resolve) => { eof = resolve; });
-    const shell = process.env.SHELL && path.isAbsolute(process.env.SHELL) && existsSync(process.env.SHELL) ? process.env.SHELL : bash;
     const started = Date.now();
     try {
-      this.#process = Bun.spawn(command === undefined ? [shell, "-l"] : [bash, "--noprofile", "--norc", "-c", command], {
+      this.#process = Bun.spawn(ptyProgram(command), {
         cwd,
         env: { ...process.env, TERM: term },
         terminal: {
@@ -259,7 +283,14 @@ export class PtySession extends RpcTarget {
 
   #hangUp(error?: string) {
     if (error && !this.#error) this.#error = error;
-    if (this.#ended || this.#killTimer) return;
+    if (this.#ended || this.#hungUp) return;
+    this.#hungUp = true;
+    if (process.platform === "win32") {
+      // ConPTY has no hang-up signal, and closing it can block until its programs
+      // exit on Windows before 11 24H2. End the process tree first.
+      treeKill(this.#process.pid, "SIGKILL", () => { if (!this.#terminal.closed) this.#terminal.close(); });
+      return;
+    }
     // A PTY's process group is its session leader's. Jobs started by an interactive
     // shell receive SIGHUP from the shell and the closing terminal.
     signalGroup(this.#process.pid, "SIGHUP");
@@ -336,17 +367,8 @@ export class ShellApi extends RpcTarget {
     if (this.#children.size >= 4) throw new Error("Too many simultaneous commands.");
 
     const windows = process.platform === "win32";
-    const executable = windows
-      ? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
-      : bash;
-    // Base64 preserves quoting/Unicode. Use -Command, not -EncodedCommand:
-    // Windows PowerShell 5 serializes stderr as CLIXML with -EncodedCommand.
-    const preamble = "$ProgressPreference = 'SilentlyContinue'; $OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false);\n";
-    const encoded = Buffer.from(preamble + command, "utf16le").toString("base64");
-    const powershellCommand = `& ([ScriptBlock]::Create([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${encoded}'))))`;
-    const args = windows
-      ? ["-NoLogo", "-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-Command", powershellCommand]
-      : ["--noprofile", "--norc", "-c", command];
+    const executable = windows ? powershell() : bash;
+    const args = windows ? powershellArgs(command, false) : ["--noprofile", "--norc", "-c", command];
     const started = Date.now();
     const child = spawn(executable, args, {
       cwd,
@@ -408,7 +430,6 @@ export class ShellApi extends RpcTarget {
    */
   openPty(sink: PtySink, options: PtyOptions = {}): PtySession {
     if (this.#closed) throw new Error("This shell session is closed.");
-    if (process.platform === "win32") throw new Error("PTY sessions require a Linux or macOS peer.");
     if (!sink || (typeof sink !== "object" && typeof sink !== "function")) throw new Error("A PTY sink is required.");
     const parsed = ptyOptionsSchema.parse(options);
     // Sessions count until released, because their screens remain capturable.

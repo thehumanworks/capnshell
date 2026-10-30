@@ -116,10 +116,10 @@ The listener allows up to 32 connections and four concurrent commands per connec
 
 ## Interactive terminals (PTY)
 
-`tty` runs a program on a pseudo-terminal on a Linux or macOS peer, so interactive CLIs and full-screen TUIs such as `vim`, `top` or Claude Code render and take keyboard input:
+`tty` runs a program on a pseudo-terminal on the peer, so interactive CLIs and full-screen TUIs such as `vim`, `top` or Claude Code render and take keyboard input:
 
 ```sh
-cns tty                                   # the remote user's login shell ($SHELL -l, else Bash)
+cns tty                                   # the remote user's login shell ($SHELL -l, else Bash; PowerShell on Windows)
 cns tty --cwd /srv/app -- 'claude'        # one command, with the run quoting rules
 cns tty ws://192.168.1.10:47381 -- 'htop'
 ```
@@ -162,7 +162,12 @@ Releasing (disposing) the stub also hangs up and frees the screen. Options are `
 
 The caller passes `sink`, an `RpcTarget` with `output(bytes)` and `exit(result)`, by reference. The executor waits for each `output` acknowledgement before sending more, coalescing reads into messages of up to 64 KiB. Bun cannot pause PTY reads, so a caller that falls more than 8 MiB behind is hung up with an error. Each connection allows four PTY sessions until they are released. The daemon proxies both stubs between `attach` and its peers.
 
-Windows peers do not support PTYs yet. Bun implements `Bun.Terminal` on Windows through ConPTY, but `cns` has not been adapted to it or tested on Windows. ConPTY differs from POSIX PTYs in how it signals, echoes and translates input.
+On Windows peers, programs run on a ConPTY in Windows PowerShell, with the same quoting as `run`. **This path is untested.** It compiles, and `src/shell.test.ts` has a Windows-only PTY test, but it has not been run on Windows yet. Expected differences, from [Bun's ConPTY notes](https://bun.com/docs/runtime/child-process#platform-differences):
+
+- Hang-up and `--timeout` kill the program's process tree; Windows has no SIGHUP for programs to handle.
+- ConPTY redraws output itself, so raw output differs from what the program wrote, though rendered screens should match.
+- Ctrl-C may not interrupt programs, because the system console host does not always turn it into an interrupt.
+- Mouse input needs Windows 11 or Server 2022.
 
 ## Background operation
 

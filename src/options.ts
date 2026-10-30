@@ -94,7 +94,7 @@ export function addPeerCommands(program: Command, run: (config: PeerConfig) => v
     listen: "Listen for peers (macOS, Linux or Windows)",
     run: "Execute one shell command on a peer and exit with its status",
     connect: "Connect to a ws:// or wss:// peer",
-    tty: "Open an interactive terminal (PTY) on a Linux or macOS peer",
+    tty: "Open an interactive terminal (PTY) on a peer",
   };
   for (const role of roles) {
     const command = program.command(role).description(descriptions[role])
@@ -119,7 +119,7 @@ export function addPeerCommands(program: Command, run: (config: PeerConfig) => v
         .option("--term <name>", "TERM for the remote program (default: xterm-256color)")
         .option("--screen", "Print the rendered screen when the program ends instead of its raw output")
         .option("--history <lines>", `With --screen, include up to ${MAX_SCREEN_HISTORY} scrollback lines`)
-        .addHelpText("after", "\nWithout a command, starts the remote user's login shell. Otherwise pass exactly one quoted\nshell string after --. A local terminal is switched to raw mode, so keys such as Ctrl-C go to\nthe remote program. Piped input is forwarded verbatim; send \\x04 yourself for Ctrl-D.\n--screen prints what the terminal shows, like tmux capture-pane; combine it with --timeout to\nsnapshot a program that keeps running.\nExamples: cns tty    cns tty --cwd /srv/app -- 'claude'    printf 'ls\\nexit\\n' | cns tty\n          cns tty --screen --timeout 5000 -- 'htop'");
+        .addHelpText("after", "\nWithout a command, starts the remote user's login shell (PowerShell on Windows). Otherwise pass\nexactly one quoted string after -- in the remote shell's syntax. A local terminal is switched to raw mode, so keys such as Ctrl-C go to\nthe remote program. Piped input is forwarded verbatim; send \\x04 yourself for Ctrl-D.\n--screen prints what the terminal shows, like tmux capture-pane; combine it with --timeout to\nsnapshot a program that keeps running.\nExamples: cns tty    cns tty --cwd /srv/app -- 'claude'    printf 'ls\\nexit\\n' | cns tty\n          cns tty --screen --timeout 5000 -- 'htop'");
     }
     if (role === "run") {
       command.addHelpText("after", "\nPass exactly one quoted shell string after --. Your local shell removes the outer quotes.\nWithout a URL, use --bind/--port, then CNS_BIND/CNS_PORT, then 127.0.0.1:47381.\nAn explicit URL overrides endpoint environment variables; do not combine it with --bind/--port.\nExample: cns run -- 'printf \"hello\\n\"'");

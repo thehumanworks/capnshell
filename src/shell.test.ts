@@ -295,6 +295,25 @@ test("released PTY sessions free their slot; unreleased ones keep it", { skip: w
   await collected.exited;
 });
 
-test("PTY sessions are refused on Windows peers", { skip: !windows }, (t) => {
-  assert.throws(() => apiFor(t).openPty(ptySink().sink), /Linux or macOS/);
+// ConPTY: no termios, no signals and no CR-to-LF translation of input.
+test("Windows PTY sessions run PowerShell on a ConPTY with input, size, screen and timeout", { skip: !windows }, async (t) => {
+  const api = apiFor(t);
+  const collected = ptySink();
+  const pty = api.openPty(collected.sink, {
+    cols: 100, rows: 30,
+    command: "[Console]::Write('READY ' + [Console]::WindowWidth + 'x' + [Console]::WindowHeight); $line = [Console]::ReadLine(); [Console]::Write('got:' + $line); exit 7",
+  });
+  await collected.waitFor("READY 100x30");
+  pty.write("héllo\r\n");
+  const result = await collected.exited;
+  assert.match(collected.output, /got:héllo/);
+  assert.equal(result.exitCode, 7);
+  assert.match((await pty.capture()).text, /got:héllo/);
+  pty[Symbol.dispose]();
+
+  const timed = ptySink();
+  api.openPty(timed.sink, { command: "Start-Sleep -Seconds 10", timeoutMs: 500 });
+  const timedOut = await timed.exited;
+  assert.equal(timedOut.timedOut, true);
+  assert.ok(timedOut.elapsedMs < 8000);
 });
