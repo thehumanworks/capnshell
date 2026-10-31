@@ -218,7 +218,7 @@ File methods take absolute paths on the executing peer and reject with its syste
 | `access(path, { write })` | Resolves if the path is readable, and writable with `write: true`. |
 | `readdir(path)` | Up to 10,000 entries, each `{ name, kind }`; links are not followed. |
 | `mkdir(path)` | Creates the directory and missing parents. |
-| `glob(pattern, cwd, { ignore, limit })` | Up to 10,000 absolute paths of files and links under `cwd` whose relative path matches a glob, hidden ones included, links not followed. Directories matched by an ignore pattern ending in `/**` are not entered. |
+| `glob(pattern, cwd, { ignore, limit, directories })` | Up to 10,000 absolute paths of files and links under `cwd` whose relative path matches a glob, hidden ones included, links not followed; with `directories: true`, matching directories too, ending in a separator. Directories matched by an ignore pattern ending in `/**` are not entered. |
 | `readFile(path, { offset, length })` | `{ data, size, eof }`: up to 1 MiB from `offset`; read larger files in several calls. |
 | `writeFile(path, data)` | Replaces a file's contents with up to 4 MiB in place, as a local write does: links are followed and the file keeps its inode, owner and permissions. The data arrives whole before anything is written. Parent directories are not created. |
 
