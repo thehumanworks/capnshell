@@ -462,6 +462,36 @@ test("each process holds a bounded number of named sessions until they are kille
   api.startPtySession("extra", { command: "true" });
 });
 
+test("Windows named sessions outlive connections, take keys, attach and are killed", { skip: !windows }, async (t) => {
+  const { connect } = registryFor(t);
+  const first = connect();
+  const session = first.startPtySession("win", {
+    cols: 80, rows: 10,
+    command: "[Console]::WriteLine('ready'); while ($true) { $line = [Console]::ReadLine(); [Console]::WriteLine('got:' + $line); if ($line -eq 'quit') { exit 6 } }",
+  });
+  assert.equal((await session.wait({ text: "ready", timeoutMs: 20000 })).matched, true);
+  first[Symbol.dispose]();
+  const second = connect();
+  const win = second.ptySession("win");
+  win.keys(["héllo", "Enter"]);
+  assert.equal((await win.wait({ text: "got:héllo", timeoutMs: 20000 })).matched, true);
+  const viewer = ptySink();
+  win.attach(viewer.sink);
+  await viewer.waitFor("got:h");
+  win.keys(["quit", "Enter"]);
+  assert.equal((await viewer.exited).exitCode, 6);
+  assert.equal(second.ptySessions()[0]?.running, false);
+  assert.equal((await win.kill()).exitCode, 6);
+
+  // Killing a running session ends its process tree.
+  const sleeper = second.startPtySession("sleeper", { command: "Start-Sleep -Seconds 60" });
+  await new Promise((resolve) => setTimeout(resolve, 1000));
+  const started = Date.now();
+  await sleeper.kill();
+  assert.ok(Date.now() - started < 8000);
+  assert.deepEqual(second.ptySessions(), []);
+});
+
 // ConPTY: no termios, no signals and no CR-to-LF translation of input.
 test("Windows PTY sessions run PowerShell on a ConPTY with input, size, screen and timeout", { skip: !windows }, async (t) => {
   const api = apiFor(t);

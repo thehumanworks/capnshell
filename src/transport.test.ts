@@ -205,7 +205,7 @@ test("tty runs programs on a remote terminal with piped input and returns their 
   assert.equal(listener.closed, false);
 });
 
-test("named tty sessions persist across CLI calls for keys, screens, attach and kill", { timeout: 60000, skip: process.platform === "win32" }, async (t) => {
+test("named tty sessions persist across CLI calls for keys, screens, attach and kill", { timeout: 60000 }, async (t) => {
   const port = await unusedPort();
   const url = `ws://[::1]:${port}`;
   const listener = launchCli(t, ["listen", "--bind", "::1", "--port", port, "--no-repl"]);
@@ -216,7 +216,9 @@ test("named tty sessions persist across CLI calls for keys, screens, attach and 
     const code = await command.exited;
     return { code, stdout: command.stdout, stderr: command.stderr };
   };
-  const program = "printf 'ready\\n'; while IFS= read -r line; do printf 'got:%s\\n' \"$line\"; [ \"$line\" = quit ] && exit 6; done";
+  const program = process.platform === "win32"
+    ? "[Console]::WriteLine('ready'); while ($true) { $line = [Console]::ReadLine(); [Console]::WriteLine('got:' + $line); if ($line -eq 'quit') { exit 6 } }"
+    : "printf 'ready\\n'; while IFS= read -r line; do printf 'got:%s\\n' \"$line\"; [ \"$line\" = quit ] && exit 6; done";
   assert.deepEqual(await cli("tty", url, "--name", "app", "--cols", "40", "--rows", "6", "--", program), { code: 0, stdout: "", stderr: "" });
   assert.deepEqual(await cli("screen", url, "app", "--until", "ready"), { code: 0, stdout: "ready\n", stderr: "" });
   assert.deepEqual(await cli("keys", url, "app", "hello there", "Enter"), { code: 0, stdout: "", stderr: "" });
@@ -230,7 +232,7 @@ test("named tty sessions persist across CLI calls for keys, screens, attach and 
   const listed = await cli("sessions", url, "--json");
   const [info] = JSON.parse(listed.stdout);
   assert.deepEqual([info.name, info.running, info.cols, info.rows, info.viewers], ["app", true, 40, 6, 0]);
-  assert.match((await cli("sessions", url)).stdout, /^app {2}running {2}40x6 {2}0 attached {2}printf 'ready/);
+  assert.ok((await cli("sessions", url)).stdout.startsWith(`app  running  40x6  0 attached  ${program.slice(0, 20)}`));
   assert.equal((await cli("tty", url, "--name", "app", "--", "true")).code, 1);
 
   // Attaching without a terminal redraws the screen and streams until the program exits.

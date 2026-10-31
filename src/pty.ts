@@ -7,6 +7,7 @@ import { RpcTarget } from "capnweb";
 import treeKill from "tree-kill";
 import { z } from "zod";
 import { encodeKeys, MAX_KEYS } from "./keys.js";
+import { redraw } from "./redraw.js";
 import { bash, commandSchema, MAX_TIMEOUT_MS, optionsSchema, powershell, powershellArgs } from "./platform.js";
 
 export const MAX_PTY_INPUT_BYTES = 64 * 1024;
@@ -321,7 +322,7 @@ class Pty {
       // replay holds exactly the output received before this viewer was added.
       this.#screen.write("", () => {
         if (!viewer.gone) {
-          const data = encoder.encode(this.#replay());
+          const data = encoder.encode(redraw(this.#screen, this.#serializer));
           viewer.queue.unshift(data);
           viewer.queued += data.length;
           viewer.paused = false;
@@ -397,14 +398,6 @@ class Pty {
       alternateScreen: buffer.type === "alternate",
       title: this.#title,
     };
-  }
-
-  /** Escape sequences that redraw this screen and its input modes on a cleared terminal. */
-  #replay(): string {
-    // xterm keeps cursor visibility internal; the serializer does not restore it.
-    const core = (this.#screen as unknown as { _core?: { coreService?: { isCursorHidden?: boolean } } })._core;
-    const hidden = core?.coreService?.isCursorHidden ? "\x1b[?25l" : "";
-    return "\x1b[0m\x1b[H\x1b[2J" + this.#serializer.serialize({ scrollback: 0 }) + hidden;
   }
 
   #push(data: Uint8Array) {

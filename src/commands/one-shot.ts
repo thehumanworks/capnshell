@@ -51,12 +51,16 @@ export async function runOneShot(config: PeerConfig, controller: PeerController,
       }
       if (name) {
         const result = await attachSession(controller, id, name, { cols, rows, signal });
-        if (result.exit) return commandExitCode(result.exit);
+        if (result.exit) {
+          // Leaving the alternate screen hid the final screen; cns screen NAME still shows it.
+          if (process.stdout.isTTY) console.error(`[${name} ${describeExit(result.exit)}]`);
+          return commandExitCode(result.exit);
+        }
         if (result.detached) {
           console.error(`cns: ${result.detached}`);
           return 1;
         }
-        if (process.stdout.isTTY) process.stderr.write(`\n[detached from ${name}]\n`);
+        if (process.stdout.isTTY) console.error(`[detached from ${name}]`);
         return 0;
       }
       const result = await attachTerminal((sink, options) => controller.openPty(id, sink, options),

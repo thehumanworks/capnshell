@@ -66,7 +66,7 @@ export function openConsole(controller: PeerController, onQuit: () => void) {
           { ...options, command: target.command }, { signal: cancelled.signal });
       const result = outcome.exit;
       if (!result) {
-        console.log(`\r\n[detached from ${target.session}${"detached" in outcome && outcome.detached ? `: ${outcome.detached}` : ""}]`);
+        console.log(`[detached from ${target.session}${"detached" in outcome && outcome.detached ? `: ${outcome.detached}` : ""}]`);
         return;
       }
       if (result.error) console.error(`Error: ${result.error}`);
