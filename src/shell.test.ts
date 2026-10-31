@@ -271,12 +271,15 @@ test("file operations describe, list, create, glob, read and replace files with 
   assert.equal((await stat(target)).ino, inode);
   if (!windows) {
     assert.equal((await stat(target)).mode & 0o777, 0o640);
-    const link = path.join(dir, "two-link.ts");
-    await symlink(target, link);
+    const linked = path.join(dir, "linked.txt");
+    const link = path.join(dir, "link.txt");
+    await writeFile(linked, "before");
+    await symlink(linked, link);
     await api.writeFile(link, new TextEncoder().encode("through the link"));
     assert.equal((await lstat(link)).isSymbolicLink(), true);
-    assert.equal(await readFile(target, "utf8"), "through the link");
+    assert.equal(await readFile(linked, "utf8"), "through the link");
     await rm(link);
+    await rm(linked);
   }
   await assert.rejects(api.writeFile(dir, new Uint8Array(1)), { code: "EISDIR" });
   await assert.rejects(api.writeFile(path.join(dir, "nowhere", "x"), new Uint8Array(1)), { code: "ENOENT" });
