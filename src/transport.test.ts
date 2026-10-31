@@ -180,7 +180,7 @@ test("tty runs programs on a remote terminal with piped input and returns their 
   // Reverse calls keep working while the forward PTY is live.
   await listener.send(":use p1\n:info", `"pid": ${tty.child.pid}`);
   // Without a local terminal the console cannot hand its keyboard to a PTY.
-  await listener.send(":tty", ":tty requires an interactive local terminal");
+  await listener.send(":tty", ":tty and :attach require an interactive local terminal");
   tty.child.stdin.write("héllo\r");
   assert.equal(await tty.exited, 5, tty.output);
   // The terminal echoes input wherever it arrives, so check each fact separately.
@@ -202,6 +202,56 @@ test("tty runs programs on a remote terminal with piped input and returns their 
   assert.equal(await history.exited, 4, history.output);
   assert.equal(history.stdout, "5\n6\n7\n8\n");
   assert.equal(history.stderr, "");
+  assert.equal(listener.closed, false);
+});
+
+test("named tty sessions persist across CLI calls for keys, screens, attach and kill", { timeout: 60000 }, async (t) => {
+  const port = await unusedPort();
+  const url = `ws://[::1]:${port}`;
+  const listener = launchCli(t, ["listen", "--bind", "::1", "--port", port, "--no-repl"]);
+  await listener.waitFor("listening at");
+  const cli = async (...args: string[]) => {
+    const command = launchCli(t, args);
+    command.child.stdin.end();
+    const code = await command.exited;
+    return { code, stdout: command.stdout, stderr: command.stderr };
+  };
+  const program = process.platform === "win32"
+    ? "[Console]::WriteLine('ready'); while ($true) { $line = [Console]::ReadLine(); [Console]::WriteLine('got:' + $line); if ($line -eq 'quit') { exit 6 } }"
+    : "printf 'ready\\n'; while IFS= read -r line; do printf 'got:%s\\n' \"$line\"; [ \"$line\" = quit ] && exit 6; done";
+  assert.deepEqual(await cli("tty", url, "--name", "app", "--cols", "40", "--rows", "6", "--", program), { code: 0, stdout: "", stderr: "" });
+  assert.deepEqual(await cli("screen", url, "app", "--until", "ready"), { code: 0, stdout: "ready\n", stderr: "" });
+  assert.deepEqual(await cli("keys", url, "app", "hello there", "Enter"), { code: 0, stdout: "", stderr: "" });
+  const shown = await cli("screen", url, "app", "--until", "got:hello there");
+  assert.equal(shown.code, 0, shown.stderr);
+  assert.match(shown.stdout, /got:hello there\n$/);
+  const timedOut = await cli("screen", url, "app", "--until", "absent", "--timeout", "200");
+  assert.equal(timedOut.code, 124);
+  assert.match(timedOut.stderr, /timed out waiting/);
+  assert.match(timedOut.stdout, /got:hello there/);
+  const listed = await cli("sessions", url, "--json");
+  const [info] = JSON.parse(listed.stdout);
+  assert.deepEqual([info.name, info.running, info.cols, info.rows, info.viewers], ["app", true, 40, 6, 0]);
+  assert.ok((await cli("sessions", url)).stdout.startsWith(`app  running  40x6  0 attached  ${program.slice(0, 20)}`));
+  assert.equal((await cli("tty", url, "--name", "app", "--", "true")).code, 1);
+
+  // Attaching without a terminal redraws the screen and streams until the program exits.
+  // It does not resize a session that others may share.
+  const attached = launchCli(t, ["tty", url, "--attach", "app"]);
+  await attached.waitFor("got:hello there");
+  attached.child.stdin.write("quit\r");
+  assert.equal(await attached.exited, 6, attached.output);
+  assert.match(attached.stdout, /got:quit/);
+  assert.match((await cli("sessions", url)).stdout, /^app {2}exited 6 {2}40x6 /);
+  const ended = await cli("screen", url, "app", "--until", "absent");
+  assert.equal(ended.code, 1);
+  assert.match(ended.stderr, /ended before the text appeared/);
+
+  assert.deepEqual(await cli("kill", url, "app"), { code: 0, stdout: "", stderr: "" });
+  assert.deepEqual(await cli("sessions", url), { code: 0, stdout: "", stderr: "" });
+  const missing = await cli("keys", url, "app", "Enter");
+  assert.equal(missing.code, 1);
+  assert.equal(missing.stderr, "No PTY session named app.\n");
   assert.equal(listener.closed, false);
 });
 

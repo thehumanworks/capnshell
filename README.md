@@ -35,6 +35,12 @@ Use an address reachable from the other machine. This does not configure routing
 | `connect <url> --no-repl` | Connect and expose local execution without a console. |
 | `run [url] -- '<command>'` | Execute one shell command and exit with its status. |
 | `tty [url] [-- '<command>']` | Open an interactive terminal (PTY) running a login shell or one command. |
+| `tty [url] --name NAME [-- '<command>']` | Start a named PTY session in the background. |
+| `tty [url] --attach NAME` | Attach to a named session; Ctrl-] detaches. |
+| `sessions [url]` | List a peer's named sessions. |
+| `keys [url] NAME KEY...` | Send keys or text to a named session. |
+| `screen [url] NAME` | Print a named session's screen, optionally once it shows some text. |
+| `kill [url] NAME` | End a named session and remove it. |
 | `attach` | Open a console for the local daemon. |
 | `stop` | Stop the local daemon and its sessions. |
 
@@ -64,6 +70,8 @@ The console automatically selects the initial sole peer. When several peers are 
 | `:cwd [PATH]` | Show/set its working directory; use an absolute remote path without quotes. |
 | `:timeout [MS]` | Show/set its deadline; `0` disables it (the default). |
 | `:tty [COMMAND]` | Open an interactive terminal on it: its login shell, or `COMMAND`. Returns to the prompt when the program exits. |
+| `:sessions` | List its named PTY sessions. |
+| `:attach NAME` | Attach to one of them; Ctrl-] returns to the prompt and leaves it running. |
 | `:help` | Show prompt help. |
 | `:quit` | Exit this CLI; from `attach`, detach the console. |
 
@@ -147,6 +155,29 @@ cns tty --screen --history 100 -- 'make test'   # include up to 100 scrollback l
 
 Rows are printed with trailing spaces and the blank rows below the last output removed. With `--screen`, or without a local terminal, the remote screen answers terminal queries such as cursor-position reports. TUIs that wait for such answers, including Claude Code, then draw without a real terminal attached. A program that exits through the alternate screen, as vim does on `:wq`, leaves the normal screen behind; that is what a real terminal shows then, too.
 
+### Named sessions
+
+A named session keeps running between commands, so an agent can work with a TUI in steps, as with `tmux send-keys` and `capture-pane`:
+
+```sh
+cns tty --name claude --cwd /srv/app -- 'claude'   # start in the background; prints nothing
+cns screen claude --until 'trust this folder'       # wait for the prompt, then print the screen
+cns keys claude Down                                 # move to "Yes, I trust this folder"
+cns screen claude --until '❯ Yes'                    # confirm the key landed before pressing Enter
+cns keys claude Enter
+cns keys claude 'fix the failing tests' Enter
+cns screen claude --history 50
+cns keys claude C-c
+cns sessions                                         # name, status, size, viewers, command
+cns kill claude
+```
+
+- **Lifetime:** sessions live in the `cns` process running the program, the listener or the connected peer, not in a connection. They survive the commands and connections that use them and end when killed or when that process stops. Nothing is written to disk. Each process holds up to 16 named sessions, running or finished. A finished session keeps its final screen and exit status until it is killed. `--timeout` on `tty --name` limits the session's lifetime.
+- **`keys`** takes tmux-style key names: `Enter`, `Tab`, `BTab`, `Escape`, `Space`, `BSpace`, `Up`, `Down`, `Left`, `Right`, `Home`, `End`, `PageUp`, `PageDown`, `Insert`, `Delete`, `F1`–`F12`, with `C-`, `M-` and `S-` prefixes such as `C-c` or `C-Left`. Other arguments are typed as text; `--literal` types every argument as text. The executing peer encodes keys, so arrow keys follow the program's cursor-key mode.
+- **`screen`** prints the current screen like `tty --screen`. `--until TEXT` first waits for the screen to show TEXT, checking after every chunk of output. It exits 0 when the text appears, 1 if the program ends first and 124 after `--timeout` (default 30000 ms; 0 waits indefinitely). It prints the screen in each case. The renderer does not decide when a program is finished; `--until` is a convenience over it. To confirm that a key took effect, wait for the screen it should produce rather than sleeping.
+- **`tty --attach NAME`** shows a session in your terminal, on its alternate screen as tmux does: detaching or the program's exit returns your terminal to what it showed before. It redraws the current screen, then streams live output and sends your keys. When the program switches between its normal and alternate screens, as vim does, `cns` redraws from its own copy of the session's screen instead of letting your terminal switch. As in tmux, lines that scroll by while attached are not added to your terminal's scrollback; `cns screen NAME --history N` has them. Ctrl-] detaches and leaves the program running; exiting the program ends the attach with its status. Attaching from a terminal resizes the session to that terminal, as in tmux. Several viewers can attach at once. Without a local terminal, `--attach` streams raw output and forwards stdin, without detach key or resize.
+- **Terminal queries** are answered by the session's screen unless an attached terminal answers them, so programs keep drawing with no one attached.
+
 ### RPC interface
 
 `ShellApi.openPty(sink, options)` starts the program and returns a `PtySession` stub:
@@ -154,15 +185,27 @@ Rows are printed with trailing spaces and the blank rows below the last output r
 | Method | Purpose |
 | --- | --- |
 | `write(data)` | Send keystrokes or other input, at most 64 KiB per call. |
+| `keys(keys, { literal })` | Send tmux-style key names and text, as `cns keys` does. |
 | `resize(cols, rows)` | Resize the terminal (1–1000 each). |
 | `capture({ history })` | Render the screen now: `text`, `cols`, `rows`, `cursor`, `alternateScreen` and `title`. Works while the program runs and after it ends, until the session is released. `history` adds up to 1000 scrollback lines. |
+| `wait({ text, timeoutMs, history })` | Resolve with `{ matched, running, screen }` once the screen shows `text`, the program ends or `timeoutMs` passes (0, the default, has no deadline). |
 | `close()` | Hang up. |
 
 Releasing (disposing) the stub also hangs up and frees the screen. Options are `command`, `cwd`, `timeoutMs`, `cols`, `rows` and `term`, plus `stream: false` to receive no raw output and `respond: true` to have the screen answer terminal queries.
 
-The caller passes `sink`, an `RpcTarget` with `output(bytes)` and `exit(result)`, by reference. The executor waits for each `output` acknowledgement before sending more, coalescing reads into messages of up to 64 KiB. Bun cannot pause PTY reads, so a caller that falls more than 8 MiB behind is hung up with an error. Each connection allows four PTY sessions until they are released. The daemon proxies both stubs between `attach` and its peers.
+Named sessions use `ShellApi.startPtySession(name, options)` and `ShellApi.ptySession(name)`, which return a `NamedPty` handle, and `ShellApi.ptySessions()`, which lists them. A handle has `write`, `keys`, `resize`, `capture` and `wait`, plus:
 
-On Windows peers, programs run on a ConPTY in Windows PowerShell, with the same quoting as `run`. **This path is untested.** It compiles, and `src/shell.test.ts` has a Windows-only PTY test, but it has not been run on Windows yet. Expected differences, from [Bun's ConPTY notes](https://bun.com/docs/runtime/child-process#platform-differences):
+| Method | Purpose |
+| --- | --- |
+| `info()` | Name, command, cwd, pid, size, title, start time, `running`, `exit` and the number of viewers. |
+| `attach(sink, { cols, rows, answers })` | Stream the session to `sink`, starting with a redraw of the screen. `cols`/`rows` resize the session first. `answers: true` means the caller's terminal answers terminal queries. Returns a `PtyAttachment` with the same controls; releasing it detaches. |
+| `kill()` | Hang up, remove the session and resolve with how it ended. |
+
+Releasing a handle leaves its session running. A handle only reaches the session it was issued for, never a later one that reuses the name. A viewer that stops acknowledging output is detached, and its sink's optional `detached(reason)` is called; the program keeps running.
+
+The caller passes `sink`, an `RpcTarget` with `output(bytes)` and `exit(result)`, by reference. The executor waits for each `output` acknowledgement before sending more, coalescing reads into messages of up to 64 KiB. Bun cannot pause PTY reads, so a caller that falls more than 8 MiB behind is hung up with an error. Each connection allows four unnamed PTY sessions until they are released. The daemon proxies all of these stubs between `attach` and its peers.
+
+On Windows peers, programs run on a ConPTY in Windows PowerShell, with the same quoting as `run`. **This path is untested.** It compiles, and `src/shell.test.ts` has a Windows-only PTY test, but it has not been run on Windows yet. The manually triggered `Windows` GitHub Actions workflow (`.github/workflows/windows.yml`) runs both test suites on `windows-latest`, including Windows versions of the named-session tests. Expected differences, from [Bun's ConPTY notes](https://bun.com/docs/runtime/child-process#platform-differences):
 
 - Hang-up and `--timeout` kill the program's process tree; Windows has no SIGHUP for programs to handle.
 - ConPTY redraws output itself, so raw output differs from what the program wrote, though rendered screens should match.
@@ -236,4 +279,4 @@ bun test --timeout 30000 ./src
 bun run test:compiled
 ```
 
-Tests exercise multiple bidirectional peers, target selection, disconnect isolation, reverse calls during one-shot commands and PTY sessions, output/exit-status handling, PTY input, sizing, hang-up, timeouts and flow control, rendered screens and scrollback, PTY proxying through the daemon, process cleanup, connection limits, daemon attachment and startup races. The compiled suite additionally tests the executable outside its checkout without a JavaScript runtime on `PATH`.
+Tests exercise multiple bidirectional peers, target selection, disconnect isolation, reverse calls during one-shot commands and PTY sessions, output/exit-status handling, PTY input, sizing, hang-up, timeouts and flow control, rendered screens and scrollback, named sessions across connections and CLI calls (keys, waits, attach redraws, detach, kill and limits), PTY proxying through the daemon, process cleanup, connection limits, daemon attachment and startup races. The compiled suite additionally tests the executable outside its checkout without a JavaScript runtime on `PATH`.
