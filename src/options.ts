@@ -75,7 +75,7 @@ export function isLoopback(host: string): boolean {
   return unwrapped === "::1" || (isIP(unwrapped) === 4 && unwrapped.startsWith("127."));
 }
 
-const endpointUrl = (bind: string, port: number) => `ws://${isIP(bind) === 6 ? `[${bind}]` : bind}:${port}`;
+export const endpointUrl = (bind: string, port: number) => `ws://${isIP(bind) === 6 ? `[${bind}]` : bind}:${port}`;
 
 function peerUrl(destination: string): string {
   const parsed = new URL(destination);

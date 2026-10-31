@@ -4,8 +4,16 @@
   "private": true,
   "type": "module",
   "description": "Bidirectional remote shells for Linux, macOS and Windows.",
+  "keywords": [
+    "pi-package"
+  ],
   "bin": {
     "cns": "src/cli.ts"
+  },
+  "pi": {
+    "extensions": [
+      "./pi/index.ts"
+    ]
   },
   "scripts": {
     "build": "bun build --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig --define CAPNWEB_COMPILED=true --outfile dist/cns src/cli.ts",
@@ -13,8 +21,8 @@
     "start": "bun src/cli.ts",
     "listen": "bun src/cli.ts listen",
     "connect": "bun src/cli.ts connect",
-    "test": "bun test --timeout 30000 ./src",
-    "test:compiled": "bun run build && CAPNWEB_TEST_BINARY=1 bun test --timeout 30000 ./src"
+    "test": "bun test --timeout 30000 ./src ./pi",
+    "test:compiled": "bun run build && CAPNWEB_TEST_BINARY=1 bun test --timeout 30000 ./src ./pi"
   },
   "engines": {
     "bun": ">=1.4.2"
@@ -28,11 +36,30 @@
     "tree-kill": "1.2.2",
     "zod": "4.6.7"
   },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
+  },
   "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "@earendil-works/pi-tui": "1.4.0",
     "@modelcontextprotocol/client": "2.4.0",
     "@types/bun": "^1.4.4",
     "@types/node": "^26.6.6",
     "execa": "10.2.1",
+    "typebox": "1.3.27",
     "typescript": "7.0.2"
   },
   "packageManager": "bun@1.4.2"
