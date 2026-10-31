@@ -91,18 +91,36 @@ export async function makeDirectory(directory: string): Promise<void> {
   await mkdir(pathSchema.parse(directory), { recursive: true });
 }
 
-/** Files under `cwd` matching `pattern`, as absolute paths. Hidden files are included; symbolic links are not followed. */
+/**
+ * Files and symbolic links under `cwd` whose path relative to it matches `pattern`,
+ * as absolute paths. Hidden entries are included and links are not followed. A
+ * directory is not entered when an ignore pattern ending in `/**` covers all of it,
+ * as one ignoring every node_modules directory does; unreadable directories below `cwd` are skipped.
+ */
 export async function globFiles(pattern: string, cwd: string, options: GlobOptions = {}): Promise<string[]> {
   const root = pathSchema.parse(cwd);
   const { ignore, limit } = globOptionsSchema.parse(options);
   const glob = new Bun.Glob(globPatternSchema.parse(pattern));
   const ignored = ignore.map((entry) => new Bun.Glob(entry));
+  const pruned = ignore.filter((entry) => entry.endsWith("/**")).map((entry) => new Bun.Glob(entry.slice(0, -3)));
   const results: string[] = [];
-  for await (const relative of glob.scan({ cwd: root, dot: true, onlyFiles: true, followSymlinks: false })) {
-    const normalized = relative.split(path.sep).join("/");
-    if (ignored.some((entry) => entry.match(normalized))) continue;
-    results.push(path.join(root, relative));
-    if (results.length >= limit) break;
+  const pending = [""];
+  for (let next = pending.shift(); next !== undefined && results.length < limit; next = pending.shift()) {
+    let entries;
+    try { entries = await readdir(path.join(root, next), { withFileTypes: true }); }
+    catch (error) {
+      if (next === "") throw error;
+      continue;
+    }
+    for (const entry of entries) {
+      const relative = next ? `${next}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) {
+        if (!pruned.some((directory) => directory.match(relative))) pending.push(relative);
+      } else if ((entry.isFile() || entry.isSymbolicLink()) && glob.match(relative) && !ignored.some((match) => match.match(relative))) {
+        results.push(path.join(root, relative));
+        if (results.length >= limit) break;
+      }
+    }
   }
   return results;
 }

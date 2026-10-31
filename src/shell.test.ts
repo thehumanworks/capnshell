@@ -245,8 +245,11 @@ test("file operations describe, list, create, glob, read and replace files with 
   if (!windows) assert.equal(entries.find((entry) => entry.name === "link.ts")?.kind, "symlink");
 
   const found = await api.glob("**/*.ts", dir);
-  assert.deepEqual(found.map((found) => path.relative(dir, found)).sort(), [path.join("a", "b", "one.ts"), "two.ts"].sort());
-  assert.deepEqual(await api.glob("**/*.ts", dir, { ignore: ["a/**"] }), [path.join(dir, "two.ts")]);
+  assert.deepEqual(found.map((found) => path.relative(dir, found)).sort(),
+    [path.join("a", "b", "one.ts"), "two.ts", ...windows ? [] : ["link.ts"]].sort());
+  assert.deepEqual(await api.glob("**/*.ts", dir, { ignore: ["a/**", "link.ts"] }), [path.join(dir, "two.ts")]);
+  assert.deepEqual(await api.glob("*.ts", path.join(dir, "a")), []);
+  assert.deepEqual(await api.glob("b/*.ts", path.join(dir, "a")), [path.join(nested, "one.ts")]);
   assert.equal((await api.glob("**/*", dir, { limit: 1 })).length, 1);
   assert.deepEqual(await api.glob("**/*.txt", dir), [path.join(dir, ".hidden.txt")]);
 
