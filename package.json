@@ -20,6 +20,8 @@
     "bun": ">=1.4.2"
   },
   "dependencies": {
+    "@xterm/addon-serialize": "0.14.0",
+    "@xterm/headless": "6.0.0",
     "capnweb": "0.12.0",
     "commander": "14.0.3",
     "tree-kill": "1.2.2",

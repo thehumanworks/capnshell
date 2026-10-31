@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { CommanderError } from "commander";
 import { createCli } from "./cli-program.js";
+import { errorMessage } from "./errors.js";
 
 try {
   await createCli().parseAsync(process.argv);
@@ -9,7 +10,7 @@ try {
     // Commander already emitted help or the parsing error.
     process.exitCode = error.exitCode;
   } else {
-    console.error(error instanceof Error ? error.message : String(error));
+    console.error(errorMessage(error));
     process.exitCode = 1;
   }
 }

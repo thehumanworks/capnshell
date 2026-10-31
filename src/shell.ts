@@ -1,26 +1,23 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import os from "node:os";
-import path from "node:path";
 import { RpcTarget } from "capnweb";
 import treeKill from "tree-kill";
-import { z } from "zod";
+import { bash, commandSchema, optionsSchema, powershell, powershellArgs, type RunOptions } from "./platform.js";
+import {
+  MAX_PTYS, NamedPty, openUnnamedPty, ptyOptionsSchema, PtyRegistry,
+  type PtyOptions, type PtySession, type PtySessionInfo, type PtySessionOptions, type PtySink,
+} from "./pty.js";
 
-// Nix supplies an absolute Bash path without changing the commands’ PATH.
-declare const CAPNWEB_DEFAULT_BASH: string;
-const bash = typeof CAPNWEB_DEFAULT_BASH === "string" ? CAPNWEB_DEFAULT_BASH : "bash";
+export { MAX_TIMEOUT_MS, type RunOptions } from "./platform.js";
+export {
+  MAX_NAMED_PTYS, MAX_PTY_BACKLOG_BYTES, MAX_PTY_INPUT_BYTES, MAX_SCREEN_HISTORY, sessionNameSchema,
+  type AttachOptions, type CaptureOptions, type KeysOptions, type PtyExit, type PtyOptions, type PtyScreen,
+  type PtySessionInfo, type PtySessionOptions, type PtySink, type PtyWait, type WaitOptions,
+  NamedPty, PtyAttachment, PtyRegistry, PtySession,
+} from "./pty.js";
 
 export const MAX_OUTPUT_BYTES = 1024 * 1024;
-// Largest delay supported by Node timers without overflowing. Zero means no deadline.
-export const MAX_TIMEOUT_MS = 2_147_483_647;
 
-const commandSchema = z.string().max(8192, "Command must be at most 8192 characters.")
-  .refine((value) => value.trim().length > 0, "Command must be nonempty.");
-const optionsSchema = z.strictObject({
-  timeoutMs: z.int().min(0).max(MAX_TIMEOUT_MS).default(0),
-  cwd: z.string().refine(path.isAbsolute, "cwd must be an absolute path on the executing peer.")
-    .default(() => os.homedir()),
-});
-export type RunOptions = z.input<typeof optionsSchema>;
 export interface ShellInfo {
   platform: NodeJS.Platform;
   name: string;
@@ -59,7 +56,15 @@ function killTree(child: ChildProcess): void {
 // Only these prototype methods are exported. Internal state uses JS #private fields.
 export class ShellApi extends RpcTarget {
   #children = new Set<ChildProcess>();
+  #ptys = new Set<PtySession>();
+  #registry: PtyRegistry;
   #closed = false;
+
+  /** Named PTY sessions live in the registry, shared by this process's connections. */
+  constructor(registry = new PtyRegistry()) {
+    super();
+    this.#registry = registry;
+  }
 
   info(): ShellInfo {
     return {
@@ -81,17 +86,8 @@ export class ShellApi extends RpcTarget {
     if (this.#children.size >= 4) throw new Error("Too many simultaneous commands.");
 
     const windows = process.platform === "win32";
-    const executable = windows
-      ? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
-      : bash;
-    // Base64 preserves quoting/Unicode. Use -Command, not -EncodedCommand:
-    // Windows PowerShell 5 serializes stderr as CLIXML with -EncodedCommand.
-    const preamble = "$ProgressPreference = 'SilentlyContinue'; $OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false);\n";
-    const encoded = Buffer.from(preamble + command, "utf16le").toString("base64");
-    const powershellCommand = `& ([ScriptBlock]::Create([Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('${encoded}'))))`;
-    const args = windows
-      ? ["-NoLogo", "-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-Command", powershellCommand]
-      : ["--noprofile", "--norc", "-c", command];
+    const executable = windows ? powershell() : bash;
+    const args = windows ? powershellArgs(command, false) : ["--noprofile", "--norc", "-c", command];
     const started = Date.now();
     const child = spawn(executable, args, {
       cwd,
@@ -145,9 +141,47 @@ export class ShellApi extends RpcTarget {
     });
   }
 
+  /**
+   * Start a program on a pseudo-terminal so interactive CLIs and TUIs render. Output
+   * and the final status are pushed to the caller's sink; the returned session takes
+   * input, resizes, renders its screen on request and hangs up. Release the session
+   * when done with it: that also hangs up and frees its screen.
+   */
+  openPty(sink: PtySink, options: PtyOptions = {}): PtySession {
+    if (this.#closed) throw new Error("This shell session is closed.");
+    if (!sink || (typeof sink !== "object" && typeof sink !== "function")) throw new Error("A PTY sink is required.");
+    const parsed = ptyOptionsSchema.parse(options);
+    // Sessions count until released, because their screens remain capturable.
+    if (this.#ptys.size >= MAX_PTYS) throw new Error("Too many PTY sessions; release finished ones first.");
+    const session = openUnnamedPty(sink, parsed, (released) => this.#ptys.delete(released));
+    this.#ptys.add(session);
+    return session;
+  }
+
+  /**
+   * Start a named PTY session without a viewer. It belongs to this process rather
+   * than the connection, so later connections can reach it with ptySession(name).
+   */
+  startPtySession(name: string, options: PtySessionOptions = {}): NamedPty {
+    if (this.#closed) throw new Error("This shell session is closed.");
+    return new NamedPty(this.#registry, name, this.#registry.start(name, options));
+  }
+
+  /** A handle on a named session. Releasing the handle leaves the session running. */
+  ptySession(name: string): NamedPty {
+    if (this.#closed) throw new Error("This shell session is closed.");
+    return new NamedPty(this.#registry, name, this.#registry.get(name));
+  }
+
+  ptySessions(): PtySessionInfo[] {
+    if (this.#closed) throw new Error("This shell session is closed.");
+    return this.#registry.list();
+  }
+
   [Symbol.dispose]() {
     if (this.#closed) return;
     this.#closed = true;
     for (const child of this.#children) killTree(child);
+    for (const pty of this.#ptys) pty[Symbol.dispose]();
   }
 }
