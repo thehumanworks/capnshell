@@ -30,6 +30,16 @@ interface Session {
   info?: ShellInfo;
 }
 
+/** A fork of a peer's shell, or undefined when the peer's cns predates ShellApi.fork. */
+export async function forkShell(remote: RpcStub<ShellApi>): Promise<RpcStub<ShellApi> | undefined> {
+  try {
+    return await remote.fork() as RpcStub<ShellApi>;
+  } catch (error) {
+    if (error instanceof TypeError && error.message === "'fork' is not a function.") return undefined;
+    throw error;
+  }
+}
+
 export async function startPeer(config: PeerConfig): Promise<void> {
   const daemonChild = process.env.CNS_DAEMON_CHILD === "1";
   delete process.env.CNS_DAEMON_CHILD;
@@ -100,9 +110,24 @@ export async function startPeer(config: PeerConfig): Promise<void> {
       return [...sessions.values()].flatMap(({ id, info }) => info ? [{ id, info: { ...info } }] : []);
     },
     async info(id) { return { ...requireSession(id).info! }; },
-    async run(id, command, options) {
+    async run(id, command, options, signal) {
       // Capture the session once; its ID is never reused, even after disconnect.
-      return await plain(requireSession(id).remote.run(command, options));
+      const { remote } = requireSession(id);
+      if (!signal) return await plain(remote.run(command, options));
+      signal.throwIfAborted();
+      const shell = await forkShell(remote);
+      if (!shell) return await plain(remote.run(command, options));
+      // Releasing the fork makes the peer kill the command.
+      const release = () => shell[Symbol.dispose]();
+      signal.addEventListener("abort", release, { once: true });
+      try {
+        // The signal may have fired while the fork was on its way.
+        signal.throwIfAborted();
+        return await plain(shell.run(command, options));
+      } finally {
+        signal.removeEventListener("abort", release);
+        release();
+      }
     },
     async openPty(id, sink, options) {
       return await requireSession(id).remote.openPty(sink, options);

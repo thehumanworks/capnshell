@@ -17,7 +17,7 @@ function printScreen(screen: PtyScreen) {
   process.stdout.write(screen.text.replace(/\n+$/, "") + "\n");
 }
 
-export function describeExit(exit: PtyExit): string {
+export function describeExit(exit: Pick<PtyExit, "exitCode" | "signal" | "timedOut">): string {
   if (exit.timedOut) return "timed out";
   if (exit.exitCode !== null) return `exited ${exit.exitCode}`;
   return exit.signal ? `killed by ${exit.signal}` : "ended";

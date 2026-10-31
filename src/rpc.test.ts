@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { newBunWebSocketRpcSession, newWebSocketRpcSession, type BunWebSocketTransport, type RpcStub } from "capnweb";
-import { ShellApi, type RunResult } from "./shell.js";
+import { newBunWebSocketRpcSession, newMessagePortRpcSession, newWebSocketRpcSession, RpcTarget, type BunWebSocketTransport, type RpcStub } from "capnweb";
+import { forkShell } from "./commands/peer.js";
+import { localShellInfo, ShellApi, type RunResult } from "./shell.js";
 
 // Model an untrusted caller, not the typed client contract. Runtime validation
 // must reject malformed values even when the other peer is not TypeScript.
@@ -57,5 +58,26 @@ test("Cap’n Web validates untrusted calls and keeps the bidirectional session 
       assert.equal(result.stdout, "still-connected");
       assert.equal(result.exitCode, 0);
     } finally { result[Symbol.dispose](); }
+  }
+});
+
+test("forkShell forks a current peer's shell and recognises an older peer without fork", async (t) => {
+  class OlderShell extends RpcTarget { info() { return localShellInfo(); } }
+  for (const [label, target] of [["current", new ShellApi()], ["older", new OlderShell()]] as const) {
+    const { port1, port2 } = new MessageChannel();
+    t.after(() => { port1.close(); port2.close(); });
+    newMessagePortRpcSession(port1, target);
+    using remote = newMessagePortRpcSession<ShellApi>(port2);
+    const fork = await forkShell(remote);
+    if (label === "older") {
+      assert.equal(fork, undefined);
+      continue;
+    }
+    assert.ok(fork);
+    try {
+      const result = await fork.run(process.platform === "win32" ? "[Console]::Write('forked')" : "printf forked");
+      assert.equal(result.stdout, "forked");
+    } finally { fork[Symbol.dispose](); }
+    (target as ShellApi)[Symbol.dispose]();
   }
 });

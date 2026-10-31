@@ -272,18 +272,26 @@ class Pty {
     return this.#render(history);
   }
 
-  /** Wait until the screen shows some text, checking after every chunk of output. */
-  async wait(options: WaitOptions): Promise<PtyWait> {
+  /**
+   * Wait until the screen shows some text, checking after every chunk of output.
+   * Aborting `released` ends the wait when nobody is left to receive its result.
+   */
+  async wait(options: WaitOptions, released?: AbortSignal): Promise<PtyWait> {
     const { text, timeoutMs, history } = waitOptionsSchema.parse(options);
     await this.#flush();
     const screen = this.#render(history);
     if (screen.text.includes(text)) return { matched: true, running: !this.#exit, screen };
     if (this.#exit) return { matched: false, running: false, screen };
+    if (released?.aborted) throw new Error("This PTY session handle has been released.");
     if (this.#waiters.size >= MAX_WAITERS) throw new Error("Too many callers are waiting on this PTY session.");
     return await new Promise<PtyWait>((resolve, reject) => {
-      const finish = (result: PtyWait) => {
+      const settle = () => {
         clearTimeout(timer);
+        released?.removeEventListener("abort", onRelease);
         this.#waiters.delete(waiter);
+      };
+      const finish = (result: PtyWait) => {
+        settle();
         resolve(result);
       };
       const waiter: Waiter = {
@@ -293,12 +301,13 @@ class Pty {
           else if (this.#exit) finish({ matched: false, running: false, screen: current });
         },
         abort: (error) => {
-          clearTimeout(timer);
-          this.#waiters.delete(waiter);
+          settle();
           reject(error);
         },
       };
+      const onRelease = () => waiter.abort(new Error("This PTY session handle has been released."));
       const timer = timeoutMs > 0 ? setTimeout(() => finish({ matched: false, running: !this.#exit, screen: this.#render(history) }), timeoutMs) : undefined;
+      released?.addEventListener("abort", onRelease, { once: true });
       this.#waiters.add(waiter);
     });
   }
@@ -470,6 +479,7 @@ class Pty {
 /** Input, size and screen controls shared by every handle on a PTY. */
 class PtyControls extends RpcTarget {
   #pty: () => Pty;
+  #handle = new AbortController();
   constructor(pty: () => Pty) {
     super();
     this.#pty = pty;
@@ -482,7 +492,12 @@ class PtyControls extends RpcTarget {
   /** Render the screen now, while the program runs or after it ends. */
   async capture(options: CaptureOptions = {}): Promise<PtyScreen> { return await this.#pty().capture(options); }
   /** Wait until the screen shows some text, the deadline passes or the program ends. */
-  async wait(options: WaitOptions): Promise<PtyWait> { return await this.#pty().wait(options); }
+  async wait(options: WaitOptions): Promise<PtyWait> { return await this.#pty().wait(options, this.#handle.signal); }
+  /**
+   * Cap'n Web calls this once the caller releases the handle or disconnects. Its
+   * waits end then rather than holding one of the session's few waiter slots.
+   */
+  [Symbol.dispose]() { this.#handle.abort(); }
 }
 
 /** An unnamed PTY, owned by the caller that opened it. */
@@ -499,6 +514,7 @@ export class PtySession extends PtyControls {
   close(): void { this.#pty.hangUp(); }
   /** Releasing the session hangs up and frees its screen once the program has ended. */
   [Symbol.dispose]() {
+    super[Symbol.dispose]();
     if (this.#released) return;
     this.#released = true;
     this.#pty.dispose();
@@ -517,7 +533,10 @@ export class PtyAttachment extends PtyControls {
     this.#viewer = viewer;
   }
   detach(): void { this.#pty.unview(this.#viewer); }
-  [Symbol.dispose]() { this.detach(); }
+  [Symbol.dispose]() {
+    super[Symbol.dispose]();
+    this.detach();
+  }
 }
 
 /** A handle on a named session. Releasing the handle leaves the session running. */

@@ -5,7 +5,7 @@ import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { Terminal as Screen } from "@xterm/headless";
 import {
-  MAX_NAMED_PTYS, MAX_OUTPUT_BYTES, MAX_PTY_BACKLOG_BYTES, MAX_PTY_INPUT_BYTES, MAX_SCREEN_HISTORY, MAX_TIMEOUT_MS, PtyRegistry, ShellApi, type PtyExit,
+  MAX_FORKS, MAX_NAMED_PTYS, MAX_OUTPUT_BYTES, MAX_PTY_BACKLOG_BYTES, MAX_PTY_INPUT_BYTES, MAX_SCREEN_HISTORY, MAX_TIMEOUT_MS, PtyRegistry, ShellApi, type PtyExit,
 } from "./shell.js";
 
 const windows = process.platform === "win32";
@@ -131,6 +131,28 @@ test("disposal kills in-flight commands and disallows new ones", async () => {
   await assert.rejects(api.run("echo test"), /closed/);
 });
 
+
+test("releasing a fork kills its commands only, and closing the shell closes its forks", async () => {
+  const api = new ShellApi();
+  const sleep = windows ? "Start-Sleep -Seconds 10" : "sleep 10";
+  const fork = api.fork();
+  assert.throws(() => fork.fork(), /cannot fork/);
+  const [forked, own] = [fork.run(sleep), api.run(windows ? "Start-Sleep -Milliseconds 300; [Console]::Write('kept')" : "sleep 0.3; printf kept")];
+  fork[Symbol.dispose]();
+  assert.ok((await forked).elapsedMs < 8000);
+  await assert.rejects(fork.run("echo test"), /closed/);
+  assert.equal((await own).stdout, "kept");
+
+  const forks = Array.from({ length: MAX_FORKS }, () => api.fork());
+  assert.throws(() => api.fork(), /Too many forked shells/);
+  forks.pop()![Symbol.dispose]();
+  const last = api.fork();
+  const pending = last.run(sleep);
+  api[Symbol.dispose]();
+  assert.ok((await pending).elapsedMs < 8000);
+  await assert.rejects(forks[0]!.run("echo test"), /closed/);
+  assert.throws(() => api.fork(), /closed/);
+});
 
 test("reports signal numbers from the executing operating system", { skip: windows }, async (t) => {
   const result = await apiFor(t).run("kill -USR1 $$");

@@ -8,15 +8,15 @@ const roles = ["listen", "connect", "run", "tty", "sessions", "keys", "screen", 
 /** Commands that address one named PTY session. */
 const sessionRoles = new Set<PeerRole>(["keys", "screen", "kill"]);
 type PeerRole = typeof roles[number];
-const portSchema = z.string().regex(/^\d+$/, "--port requires an integer.")
+const portSchema = (name = "--port") => z.string().regex(/^\d+$/, `${name} requires an integer.`)
   .transform(Number).pipe(z.int().min(1).max(65535));
-const bindSchema = z.string().refine((value) => isIP(value) !== 0,
-  "--bind requires a numeric IPv4 or IPv6 interface address.");
+const bindSchema = (name = "--bind") => z.string().refine((value) => isIP(value) !== 0,
+  `${name} requires a numeric IPv4 or IPv6 interface address.`);
 const dimensionSchema = (name: string) => z.string().regex(/^\d+$/, `${name} requires an integer.`)
   .transform(Number).pipe(z.int().min(1).max(1000));
 const peerOptionsSchema = z.strictObject({
-  bind: bindSchema.default("127.0.0.1"),
-  port: portSchema.default(47381),
+  bind: bindSchema().default("127.0.0.1"),
+  port: portSchema().default(47381),
   repl: z.boolean().default(true),
   allowRemote: z.boolean().default(false),
   daemon: z.boolean().default(false),
@@ -72,6 +72,28 @@ export function isLoopback(host: string): boolean {
   return unwrapped === "::1" || (isIP(unwrapped) === 4 && unwrapped.startsWith("127."));
 }
 
+const endpointUrl = (bind: string, port: number) => `ws://${isIP(bind) === 6 ? `[${bind}]` : bind}:${port}`;
+
+function peerUrl(destination: string): string {
+  const parsed = new URL(destination);
+  if (!["ws:", "wss:"].includes(parsed.protocol) || !parsed.hostname || parsed.username || parsed.password || parsed.hash) {
+    throw new Error("Use a ws:// or wss:// URL without credentials or a fragment.");
+  }
+  return parsed.href;
+}
+
+// Commander handles parsing/help; reject repeats rather than silently using
+// the last value for security-sensitive listener options.
+function rejectRepeatedOptions(command: Command) {
+  const seen = new Set<string>();
+  for (const option of command.options) {
+    command.on(`option:${option.name()}`, () => {
+      if (seen.has(option.name())) throw new Error(`Duplicate option: --${option.name()}`);
+      seen.add(option.name());
+    });
+  }
+}
+
 function resolveOptions(role: PeerRole, command: Command, destination: string | undefined): PeerConfig {
   const mode = role === "listen" ? "listen" : "connect";
   const options = { ...command.opts() };
@@ -97,14 +119,10 @@ function resolveOptions(role: PeerRole, command: Command, destination: string | 
   if (mode === "listen" && !isLoopback(bind) && !allowRemote) {
     throw new Error("A non-loopback listener exposes shell access. Add --allow-remote only for a trusted LAN/VPN test.");
   }
-  let url = `ws://${isIP(bind) === 6 ? `[${bind}]` : bind}:${port}`;
+  let url = endpointUrl(bind, port);
   if (role === "connect" || destination !== undefined) {
     if (!destination) throw new Error(`${role} requires one ws:// or wss:// URL.`);
-    const parsed = new URL(destination);
-    if (!["ws:", "wss:"].includes(parsed.protocol) || !parsed.hostname || parsed.username || parsed.password || parsed.hash) {
-      throw new Error("Use a ws:// or wss:// URL without credentials or a fragment.");
-    }
-    url = parsed.href;
+    url = peerUrl(destination);
   }
   return {
     role, mode, bind, port, url, noRepl: role === "run" || role === "tty" || !repl, daemon, state, cwd, timeoutMs: timeout,
@@ -170,15 +188,7 @@ export function addPeerCommands(program: Command, run: (config: PeerConfig) => v
     if (role === "run") {
       command.addHelpText("after", "\nPass exactly one quoted shell string after --. Your local shell removes the outer quotes.\nWithout a URL, use --bind/--port, then CNS_BIND/CNS_PORT, then 127.0.0.1:47381.\nAn explicit URL overrides endpoint environment variables; do not combine it with --bind/--port.\nExample: cns run -- 'printf \"hello\\n\"'");
     }
-    // Commander handles parsing/help; reject repeats rather than silently using
-    // the last value for security-sensitive listener options.
-    const seen = new Set<string>();
-    for (const option of command.options) {
-      command.on(`option:${option.name()}`, () => {
-        if (seen.has(option.name())) throw new Error(`Duplicate option: --${option.name()}`);
-        seen.add(option.name());
-      });
-    }
+    rejectRepeatedOptions(command);
     if (role === "run") {
       command.usage("[url] [options] -- <command>")
         .argument("[url]").argument("[command]");
@@ -250,5 +260,87 @@ export function parseOptions(argv: string[]): PeerConfig {
   addPeerCommands(program, (parsed) => { config = parsed; });
   program.parse(argv, { from: "user" });
   if (!config) throw new Error("A peer command is required.");
+  return config;
+}
+
+export interface McpConfig {
+  /** The listener whose peer the tools use, unless they use the daemon's peers. */
+  url: string;
+  daemon: boolean;
+  state?: string;
+  cwd?: string;
+  /** Serve Streamable HTTP rather than stdio. */
+  http?: { bind: string; port: number; remote: boolean };
+}
+
+const mcpOptionsSchema = z.strictObject({
+  bind: bindSchema().default("127.0.0.1"),
+  port: portSchema().default(47381),
+  daemon: z.boolean().default(false),
+  state: z.string().min(1).optional(),
+  cwd: z.string().min(1).optional(),
+  http: portSchema("--http").optional(),
+  httpBind: bindSchema("--http-bind").optional(),
+  allowRemote: z.boolean().default(false),
+});
+
+function resolveMcpOptions(command: Command, destination: string | undefined): McpConfig {
+  const options = { ...command.opts() };
+  const endpoint = ["bind", "port"].filter((name) => command.getOptionValueSource(name) === "cli");
+  if (destination !== undefined && options.daemon) throw new Error("Use either a listener URL or --daemon, not both.");
+  if (destination !== undefined || options.daemon) {
+    if (endpoint.length) throw new Error(`Use either ${options.daemon ? "--daemon" : "a URL"} or --${endpoint[0]}, not both.`);
+    // The URL or daemon replaces endpoint defaults, including invalid env values.
+    delete options.bind;
+    delete options.port;
+  }
+  const { bind, port, daemon, state, cwd, http, httpBind, allowRemote } = mcpOptionsSchema.parse(options);
+  if (state !== undefined && !daemon) throw new Error("--state requires --daemon.");
+  if (http === undefined) {
+    if (httpBind !== undefined) throw new Error("--http-bind requires --http.");
+    if (allowRemote) throw new Error("--allow-remote requires --http.");
+  }
+  const address = httpBind ?? "127.0.0.1";
+  if (http !== undefined && !isLoopback(address) && !allowRemote) {
+    throw new Error("A non-loopback MCP endpoint exposes shell access. Add --allow-remote only for a trusted LAN/VPN.");
+  }
+  return {
+    url: destination !== undefined ? peerUrl(destination) : endpointUrl(bind, port), daemon, state, cwd,
+    http: http === undefined ? undefined : { bind: address, port: http, remote: !isLoopback(address) },
+  };
+}
+
+export function addMcpCommand(program: Command, run: (config: McpConfig) => void | Promise<void>): void {
+  const command = program.command("mcp")
+    .description("Serve MCP tools that run commands and terminal sessions on peers")
+    .usage("[url] [options]")
+    .argument("[url]", "ws:// or wss:// URL of the listener to use")
+    .addOption(new Option("--bind <address>", "Numeric listener address (default: 127.0.0.1)").env("CNS_BIND"))
+    .addOption(new Option("--port <port>", "Listener TCP port (default: 47381)").env("CNS_PORT"))
+    .option("--daemon", "Use the peers connected to the local daemon instead of a listener")
+    .option("--state <path>", "With --daemon, its state file")
+    .addOption(new Option("--cwd <path>", "Absolute working directory on peers for calls that do not name one").env("CNS_CWD"))
+    .option("--http <port>", "Serve Streamable HTTP at http://127.0.0.1:PORT/mcp instead of stdio")
+    .option("--http-bind <address>", "Numeric interface address for --http (default: 127.0.0.1)")
+    .option("--allow-remote", "Explicitly allow a non-loopback --http-bind")
+    .addHelpText("after", `
+By default an MCP client starts cns mcp and talks to it over stdin and stdout. The tools run
+commands on the listener at the URL, else --bind/--port, CNS_BIND/CNS_PORT or 127.0.0.1:47381,
+connecting for each call. With --daemon they use the peers connected to cns listen --daemon.
+--http clients must send Authorization: Bearer TOKEN. TOKEN is CNS_MCP_TOKEN, at least 32
+characters, or else a random token printed at startup. Browser origins are refused.
+Clients get shell access as the peers' users: connect only clients you would trust with it.
+Examples: cns mcp    cns mcp ws://build-box:47381    cns mcp --daemon --cwd /srv/app
+          CNS_MCP_TOKEN=$(openssl rand -hex 32) cns mcp --http 47382`);
+  rejectRepeatedOptions(command);
+  command.action((url: string | undefined) => run(resolveMcpOptions(command, url)));
+}
+
+export function parseMcpOptions(argv: string[]): McpConfig {
+  const program = new Command().exitOverride().configureOutput({ writeOut: () => {}, writeErr: () => {} });
+  let config: McpConfig | undefined;
+  addMcpCommand(program, (parsed) => { config = parsed; });
+  program.parse(["mcp", ...argv], { from: "user" });
+  if (!config) throw new Error("The mcp command did not run.");
   return config;
 }

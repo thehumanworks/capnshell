@@ -17,6 +17,8 @@ export {
 } from "./pty.js";
 
 export const MAX_OUTPUT_BYTES = 1024 * 1024;
+/** Forks per shell that have not been released. */
+export const MAX_FORKS = 32;
 
 export interface ShellInfo {
   platform: NodeJS.Platform;
@@ -54,11 +56,26 @@ function killTree(child: ChildProcess): void {
 }
 
 // Only these prototype methods are exported. Internal state uses JS #private fields.
+/** This machine, as a peer's handshake describes it. */
+export function localShellInfo(): ShellInfo {
+  return {
+    platform: process.platform,
+    name: process.platform === "win32" ? "windows" : process.platform === "darwin" ? "mac" : process.env.WSL_DISTRO_NAME ? "wsl" : process.platform,
+    shell: process.platform === "win32" ? "PowerShell" : "Bash",
+    hostname: os.hostname(),
+    cwd: os.homedir(),
+    pid: process.pid,
+  };
+}
+
 export class ShellApi extends RpcTarget {
   #children = new Set<ChildProcess>();
   #ptys = new Set<PtySession>();
+  #forks = new Set<ShellApi>();
   #registry: PtyRegistry;
   #closed = false;
+  /** Set on forks, which close with their parent and cannot fork again. */
+  #onClose?: () => void;
 
   /** Named PTY sessions live in the registry, shared by this process's connections. */
   constructor(registry = new PtyRegistry()) {
@@ -66,16 +83,7 @@ export class ShellApi extends RpcTarget {
     this.#registry = registry;
   }
 
-  info(): ShellInfo {
-    return {
-      platform: process.platform,
-      name: process.platform === "win32" ? "windows" : process.platform === "darwin" ? "mac" : process.env.WSL_DISTRO_NAME ? "wsl" : process.platform,
-      shell: process.platform === "win32" ? "PowerShell" : "Bash",
-      hostname: os.hostname(),
-      cwd: os.homedir(),
-      pid: process.pid,
-    };
-  }
+  info(): ShellInfo { return localShellInfo(); }
 
   async run(command: string, options: RunOptions = {}): Promise<RunResult> {
     if (this.#closed) throw new Error("This shell session is closed.");
@@ -178,10 +186,28 @@ export class ShellApi extends RpcTarget {
     return this.#registry.list();
   }
 
+  /**
+   * Another shell on this peer with its own command limit, sharing its named sessions.
+   * Releasing the fork kills the commands it started and closes its unnamed PTYs, so a
+   * caller can cancel a run without closing the connection.
+   */
+  fork(): ShellApi {
+    if (this.#closed) throw new Error("This shell session is closed.");
+    // One level only, so MAX_FORKS bounds what a connection can hold.
+    if (this.#onClose) throw new Error("A forked shell cannot fork; fork the original shell.");
+    if (this.#forks.size >= MAX_FORKS) throw new Error("Too many forked shells; release some first.");
+    const fork = new ShellApi(this.#registry);
+    fork.#onClose = () => this.#forks.delete(fork);
+    this.#forks.add(fork);
+    return fork;
+  }
+
   [Symbol.dispose]() {
     if (this.#closed) return;
     this.#closed = true;
     for (const child of this.#children) killTree(child);
     for (const pty of this.#ptys) pty[Symbol.dispose]();
+    for (const fork of this.#forks) fork[Symbol.dispose]();
+    this.#onClose?.();
   }
 }

@@ -17,9 +17,10 @@ export function cliInvocation(args: string[]): { file: string; args: string[] } 
   };
 }
 
-export async function unusedPort(): Promise<string> {
+/** A port that is free on `host`, which should be the address the test then binds. */
+export async function unusedPort(host = "::1"): Promise<string> {
   const probe = net.createServer();
-  probe.listen(0, "::1");
+  probe.listen(0, host);
   await once(probe, "listening");
   const address = probe.address();
   if (!address || typeof address === "string") throw new Error("Missing probe address");

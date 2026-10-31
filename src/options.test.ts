@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isLoopback, parseOptions as parsePeerOptions } from "./options.js";
+import { isLoopback, parseMcpOptions, parseOptions as parsePeerOptions } from "./options.js";
 
 // Exercise Commander's real environment handling without inheriting user defaults
 // or leaking an individual test's environment to other tests.
-function parseOptions(argv: string[], env: NodeJS.ProcessEnv = {}) {
+function withEnvironment<T>(env: NodeJS.ProcessEnv, parse: () => T): T {
   const names = ["CNS_BIND", "CNS_PORT", "CNS_CWD"];
   const saved = names.map((name) => process.env[name]);
   try {
@@ -12,7 +12,7 @@ function parseOptions(argv: string[], env: NodeJS.ProcessEnv = {}) {
       if (env[name] === undefined) delete process.env[name];
       else process.env[name] = env[name];
     }
-    return parsePeerOptions(argv);
+    return parse();
   } finally {
     names.forEach((name, index) => {
       if (saved[index] === undefined) delete process.env[name];
@@ -20,6 +20,34 @@ function parseOptions(argv: string[], env: NodeJS.ProcessEnv = {}) {
     });
   }
 }
+
+const parseOptions = (argv: string[], env: NodeJS.ProcessEnv = {}) => withEnvironment(env, () => parsePeerOptions(argv));
+const parseMcp = (argv: string[], env: NodeJS.ProcessEnv = {}) => withEnvironment(env, () => parseMcpOptions(argv));
+
+test("mcp serves stdio for a local listener by default", () => {
+  assert.deepEqual(parseMcp([]), { url: "ws://127.0.0.1:47381", daemon: false, state: undefined, cwd: undefined, http: undefined });
+  assert.equal(parseMcp([], { CNS_BIND: "::1", CNS_PORT: "4000", CNS_CWD: "/srv" }).url, "ws://[::1]:4000");
+  assert.equal(parseMcp([], { CNS_CWD: "/srv" }).cwd, "/srv");
+  assert.equal(parseMcp(["wss://example.test/rpc"], { CNS_PORT: "not a port" }).url, "wss://example.test/rpc");
+  assert.deepEqual(parseMcp(["--daemon", "--state", "/tmp/d.json"], { CNS_PORT: "4000" }), {
+    url: "ws://127.0.0.1:47381", daemon: true, state: "/tmp/d.json", cwd: undefined, http: undefined,
+  });
+});
+
+test("mcp serves HTTP on loopback unless remote access is explicit", () => {
+  assert.deepEqual(parseMcp(["--http", "47382"]).http, { bind: "127.0.0.1", port: 47382, remote: false });
+  assert.deepEqual(parseMcp(["--http", "47382", "--http-bind", "::1"]).http, { bind: "::1", port: 47382, remote: false });
+  assert.throws(() => parseMcp(["--http", "47382", "--http-bind", "0.0.0.0"]), /--allow-remote/);
+  assert.deepEqual(parseMcp(["--http", "47382", "--http-bind", "0.0.0.0", "--allow-remote"]).http, { bind: "0.0.0.0", port: 47382, remote: true });
+});
+
+test("mcp rejects conflicting or incomplete options", () => {
+  for (const argv of [
+    ["ws://example.test", "--daemon"], ["ws://example.test", "--port", "1"], ["--daemon", "--bind", "::1"],
+    ["--state", "/tmp/d.json"], ["--http-bind", "::1"], ["--allow-remote"], ["--http", "0"], ["--http", "http"],
+    ["--http", "1", "--http", "2"], ["http://example.test"], ["ws://user:pass@example.test"], ["--http", "1", "--http-bind", "localhost"],
+  ]) assert.throws(() => parseMcp(argv), `Expected rejection: ${argv.join(" ")}`);
+});
 
 test("a listener defaults to loopback", () => {
   const config = parseOptions(["listen"]);

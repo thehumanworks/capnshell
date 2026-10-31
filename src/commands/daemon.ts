@@ -45,6 +45,7 @@ async function removeOwnedState(file: string, token: string): Promise<void> {
 class ControlApi extends RpcTarget {
   #controller: PeerController;
   #stop: () => void;
+  #closed = new AbortController();
   constructor(controller: PeerController, stop: () => void) {
     super();
     this.#controller = controller;
@@ -52,7 +53,12 @@ class ControlApi extends RpcTarget {
   }
   peers() { return this.#controller.peers(); }
   info(id: string) { return this.#controller.info(id); }
+  /** Pending commands keep running when an attached console detaches. */
   run(id: string, command: string, options: RunOptions = {}) { return this.#controller.run(id, command, options); }
+  /** Like run, but the peer kills the command if this control connection closes first. */
+  runWhileConnected(id: string, command: string, options: RunOptions = {}) {
+    return this.#controller.run(id, command, options, this.#closed.signal);
+  }
   /** The attached console's sink and the peer's session stub are proxied by reference. */
   openPty(id: string, sink: PtySink, options: PtyOptions = {}) { return this.#controller.openPty(id, sink, options); }
   ptySessions(id: string) { return this.#controller.ptySessions(id); }
@@ -63,6 +69,8 @@ class ControlApi extends RpcTarget {
     // Let Cap'n Web send the successful result before closing the transport.
     setTimeout(this.#stop, 25);
   }
+  /** Cap'n Web calls this when the control connection ends. */
+  [Symbol.dispose]() { this.#closed.abort(new Error("The control connection closed.")); }
 }
 
 export async function serveControl(controller: PeerController, stop: () => void, statePath?: string): Promise<() => Promise<void>> {

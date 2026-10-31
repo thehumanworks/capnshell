@@ -10,7 +10,8 @@ export interface PeerSummary { id: string; info: ShellInfo }
 export interface PeerController {
   peers(): Promise<PeerSummary[]>;
   info(id: string): Promise<ShellInfo>;
-  run(id: string, command: string, options: RunOptions): Promise<RunResult>;
+  /** Aborting `signal` kills the command, unless the peer's cns predates ShellApi.fork. */
+  run(id: string, command: string, options: RunOptions, signal?: AbortSignal): Promise<RunResult>;
   openPty(id: string, sink: PtySink, options: PtyOptions): Promise<RemotePty>;
   ptySessions(id: string): Promise<PtySessionInfo[]>;
   startPtySession(id: string, name: string, options: PtySessionOptions): Promise<PtySessionInfo>;

@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { addPeerCommands } from "./options.js";
+import { addMcpCommand, addPeerCommands } from "./options.js";
 
 export function createCli(): Command {
   const program = new Command()
@@ -15,6 +15,10 @@ export function createCli(): Command {
       const { startPeer } = await import("./commands/peer.js");
       await startPeer(config);
     }
+  });
+  addMcpCommand(program, async (config) => {
+    const { startMcp } = await import("./commands/mcp.js");
+    await startMcp(config);
   });
   program.command("attach")
     .description("Attach an interactive console to a local daemon")
