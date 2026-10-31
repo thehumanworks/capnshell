@@ -17,6 +17,7 @@
   },
   "scripts": {
     "build": "bun build --compile --no-compile-autoload-dotenv --no-compile-autoload-bunfig --define CAPNWEB_COMPILED=true --outfile dist/cns src/cli.ts",
+    "build:pi": "bun scripts/build-pi-package.ts",
     "typecheck": "bun node_modules/typescript/bin/tsc --noEmit",
     "start": "bun src/cli.ts",
     "listen": "bun src/cli.ts listen",

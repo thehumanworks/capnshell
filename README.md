@@ -288,34 +288,19 @@ The server speaks MCP 2026-07-28 and serves 2025-era clients too. Over HTTP, a 2
 
 ## Pi extension
 
-The Pi extension in `pi/` runs [Pi](https://pi.dev)'s own tools on a cns host: while Pi is attached to a host, `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls` and the user's `!`/`!!` commands work on that host's files and shell instead of Pi's machine. It replaces those tools under their own names, so prompts, rendering and the session's active tools stay as they are, and it adds no command-running tool of its own.
+The Pi extension in `pi/` runs [Pi](https://pi.dev)'s own tools on a cns host: while Pi is attached, `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls` and `!` commands work on that host's files and shell. `/cns listen` (or `CNS_LISTEN=1`) lets hosts connect to Pi's machine, and `/cns attach HOST` sends the tools there. Nothing falls back to Pi's machine when a host goes away. [pi/README.md](pi/README.md) documents its use; it is also the npm package's README.
 
 ```sh
-pi install git:github.com/thehumanworks/capnshell   # or: pi -e /path/to/capnshell/pi/index.ts
+pi install npm:@nothumanwork/pi-cns
 ```
 
-| Command | Purpose |
-| --- | --- |
-| `/cns listen` | Start this machine's cns daemon, or use the one running, so peers can connect: `cns connect ws://THIS_MACHINE:47381`. |
-| `/cns status` | The daemon, its peers and where the tools run. |
-| `/cns attach HOST [DIRECTORY]` | Run the tools on `HOST`: a daemon peer (`p1`), a listener (`host[:port]`) or a `ws://`/`wss://` URL. `DIRECTORY` is absolute or relative to the host's home, which is the default. |
-| `/cns detach` | Run the tools on Pi's machine again. |
-| `/cns run HOST COMMAND` | Run one command on `HOST` and add its output, fenced and labelled with the host and directory, to the conversation. |
+The npm package is self-contained: the extension bundled for Pi on Node.js or Bun, cns bundled as `cns.js`, and Bun for each platform as an optional dependency, of which npm installs only this machine's. Bun runs `cns.js` without reading `.env` or `bunfig.toml` from Pi's working directory.
 
-The model gets a `cns` tool with `status`, `attach` and `detach`, to attach to a host the user names. Flags do the same when Pi starts: `--cns-listen`, `--cns-attach HOST` with `--cns-cwd DIRECTORY`, and `--cns-bin PATH` for the `cns` executable that runs the daemon (else `CNS_BIN`, else `cns` on `PATH`, else this checkout's source with Bun). While attached, the footer shows the host and its directory, the system prompt tells the model where the tools run and that `~` is the host's home, and commands get the host's environment: nothing from Pi's environment, such as its `PI_*` session variables, is forwarded.
-
-Attaching never falls back to Pi's machine. When the host's connection breaks, every tool call and `!` command fails until `/cns attach` or `/cns detach`. If `--cns-attach` fails at startup, nothing runs until then either. A session remembers its host: resumed, forked or reloaded, it attaches to it again, checking that it is still the same machine by hostname, and otherwise runs nothing until the user chooses.
-
-`/cns listen` listens on `CNS_BIND` and `CNS_PORT`, by default **every interface** (`0.0.0.0`) on port 47381, with no authentication: anyone who can reach that port can run commands and read and write files on Pi's machine as you, as with `cns listen --allow-remote`. Set `CNS_BIND=127.0.0.1`, or use it only on a trusted LAN or VPN. Every Pi session and `cns attach` on the machine share one daemon (`~/.cns/daemon.json`); concurrent `/cns listen` calls start only one. The daemon keeps running after Pi exits, and `cns stop` stops it for all of them. A daemon already running with other settings is used as it is, with a note. Pi's own connections to listeners are one-way: a listener Pi attaches to cannot run commands on Pi's machine.
-
-The tools keep Pi's behaviour, with these differences on a host:
-
-- `grep` runs the host's ripgrep with the arguments Pi uses, and fails if the host has no `rg`.
-- `find` skips `node_modules` and `.git` instead of following `.gitignore`, as Pi does whenever `find` uses custom operations.
-- `read` and `edit` read files of up to 32 MiB, and `write` and `edit` write up to 4 MiB, in place. The edit preview is not shown before an edit runs; its result shows the diff.
-- `bash` keeps a long command's full output on Pi's machine, and `read` opens that file there. Commands longer than 8,192 characters are uploaded to `~/.cns/scripts` (readable only by the host's user) and remove themselves as they start.
-
-Hosts must be Linux or macOS, and Pi on Windows cannot attach. Pi uses the first extension's tool of each name, so cns refuses to attach when another extension that provides these tools, such as pi-remote, loads before it. `!` commands go to whichever extension claims them first.
+```sh
+bun run build:pi                  # dist/pi-package
+cd dist/pi-package && npm publish
+pi -e ./pi/index.ts               # or run the extension from this checkout, with cns or bun on PATH
+```
 
 ## Build and distribute
 
@@ -373,4 +358,4 @@ bun run test
 bun run test:compiled
 ```
 
-Tests exercise multiple bidirectional peers, target selection, disconnect isolation, reverse calls during one-shot commands and PTY sessions, output/exit-status handling, PTY input, sizing, hang-up, timeouts and flow control, rendered screens and scrollback, named sessions across connections and CLI calls (keys, waits, attach redraws, detach, kill and limits), PTY proxying through the daemon, streaming commands with flow control and cancellation (also through the daemon), file operations and their validation, one-way peers refusing every reverse call, process cleanup, connection limits, daemon attachment, startup races and stale-state recovery. MCP tests drive `cns mcp` with the official SDK client over stdio and HTTP, in both protocol eras: every tool, tool errors, cancellation and disconnects killing commands and freeing screen waits, 2025-era session limits, HTTP authentication, origin and host checks, calls beyond Bun's idle timeout with progress, daemon peer selection and the refusal of reverse calls. The Pi extension tests run Pi's agent sessions with a scripted model against real listeners and the daemon: each tool and `!` on a host, results matching Pi's local tools for `grep`, `find`, `ls` and `read`, images, aborts and timeouts stopping the host's command, long commands, sessions sharing one daemon and attaching to its peers, lost hosts and failed startup attachments blocking every tool, and continued sessions attaching again. The compiled suite additionally tests the executable outside its checkout without a JavaScript runtime on `PATH`.
+Tests exercise multiple bidirectional peers, target selection, disconnect isolation, reverse calls during one-shot commands and PTY sessions, output/exit-status handling, PTY input, sizing, hang-up, timeouts and flow control, rendered screens and scrollback, named sessions across connections and CLI calls (keys, waits, attach redraws, detach, kill and limits), PTY proxying through the daemon, streaming commands with flow control and cancellation (also through the daemon), file operations and their validation, one-way peers refusing every reverse call, process cleanup, connection limits, daemon attachment, startup races and stale-state recovery. MCP tests drive `cns mcp` with the official SDK client over stdio and HTTP, in both protocol eras: every tool, tool errors, cancellation and disconnects killing commands and freeing screen waits, 2025-era session limits, HTTP authentication, origin and host checks, calls beyond Bun's idle timeout with progress, daemon peer selection and the refusal of reverse calls. The Pi extension tests run Pi's agent sessions with a scripted model against real listeners and the daemon: each tool and `!` on a host, results matching Pi's local tools for `grep`, `find`, `ls` and `read`, images, aborts and timeouts stopping the host's command, long commands, sessions sharing one daemon and attaching to its peers, `CNS_LISTEN`, `/cns stop`, lost hosts and failed startup attachments blocking every tool, and continued sessions attaching again. The package tests build the npm package, install it beside a Bun package, and drive it in Pi processes in RPC mode, on Node and with the installed `pi` when there is one, with neither `bun` nor `cns` on `PATH` and hostile `.env` and `bunfig.toml` files where the daemon would read them. The compiled suite additionally tests the executable outside its checkout without a JavaScript runtime on `PATH`.

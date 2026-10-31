@@ -6,7 +6,9 @@ import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import { Type, type TUnsafe } from "typebox";
 import { CONNECT_MS } from "../src/connect.js";
 import { errorMessage } from "../src/errors.js";
-import { cnsInvocation, findDaemon, listen, listenSettings, type Invocation, type Listener } from "./daemon.js";
+import { stopDaemon } from "../src/commands/daemon.js";
+import { findDaemon, listen, listenAtStartup, listenSettings, type Listener } from "./daemon.js";
+import { cnsInvocation, type Invocation } from "./program.js";
 import { connectPeer, connectUrl, lostMessage, type Host } from "./host.js";
 import { parseTarget, targetLabel, type Target } from "./target.js";
 import { registerTools, SHADOWED_TOOLS } from "./tools.js";
@@ -27,6 +29,7 @@ const USAGE = [
   "/cns attach HOST [DIRECTORY]: run Pi's tools and ! commands on HOST (p1, host[:port] or ws://...)",
   "/cns detach: run them on this machine again",
   "/cns run HOST COMMAND: run one command on HOST and show its output",
+  "/cns stop: stop this machine's cns daemon, for every Pi session and console using it",
 ].join("\n");
 
 interface Entry { host: string | null; hostname?: string; cwd?: string }
@@ -34,9 +37,9 @@ interface Entry { host: string | null; hostname?: string; cwd?: string }
 export interface CnsOptions {
   /** The daemon's state file; by default ~/.cns/daemon.json, as cns uses. */
   statePath?: string;
-  /** Environment for CNS_BIND, CNS_PORT, CNS_BIN and PATH; by default this process's. */
+  /** Environment for CNS_LISTEN, CNS_BIND, CNS_PORT, CNS_BIN and PATH; by default this process's. */
   env?: NodeJS.ProcessEnv;
-  /** How to run cns for the daemon; by default --cns-bin, CNS_BIN or cns on PATH. */
+  /** How to run cns for the daemon; by default as cnsInvocation finds it. */
   invocation?: Invocation;
 }
 
@@ -116,24 +119,45 @@ export function createCnsExtension(options: CnsOptions = {}) {
       showStatus();
     }
 
-    function startListening(): Promise<string> {
+    /** Listen, and say how: `news` is false when this only found the daemon again with the settings asked for. */
+    function startListening(): Promise<{ text: string; news: boolean }> {
       return serially(async () => {
-        if (listener) return `Already listening on ${address(listener.status)} (cns daemon, pid ${listener.status.pid}).`;
+        if (listener) return { text: `Already listening on ${address(listener.status)} (cns daemon, pid ${listener.status.pid}).`, news: false };
         const settings = listenSettings(env, options.statePath);
         const flag = pi.getFlag("cns-bin");
         const next = await listen(settings, () => options.invocation ?? cnsInvocation(typeof flag === "string" ? flag : undefined, env));
         useListener(next);
         const { status } = next;
+        const mismatched = !next.started && (status.bind !== settings.bind || status.port !== settings.port);
         const lines = [next.started
-          ? `Started the cns daemon (pid ${status.pid}), listening on ${address(status)}. It keeps running after Pi exits; stop it with cns stop.${next.log ? ` Log: ${next.log}` : ""}`
+          ? `Started the cns daemon (pid ${status.pid}), listening on ${address(status)}. It keeps running after Pi exits; stop it with /cns stop.${next.log ? ` Log: ${next.log}` : ""}`
           : `Using the cns daemon already running (pid ${status.pid}), listening on ${address(status)}, with ${plural(status.peers, "peer")}. Other Pi sessions and cns attach share it.`];
-        if (!next.started && (status.bind !== settings.bind || status.port !== settings.port)) {
-          lines.push(`It was started with other settings than ${settings.bind}:${settings.port}; stop it with cns stop to start one with these.`);
+        if (mismatched) {
+          lines.push(`It was started with other settings than ${settings.bind}:${settings.port}; stop it with /cns stop to start one with these.`);
         }
         if (status.oneWay) lines.push("It runs with --one-way: its peers cannot run commands on this machine.");
         else if (status.remote) lines.push(`WARNING: no authentication. Anyone who can reach ${address(status)} can run commands and read and write files on this machine as you. Use it only on a trusted LAN or VPN.`);
         lines.push("Peers connect with: cns connect ws://THIS_MACHINE:" + status.port + ". Then /cns attach p1.");
-        return lines.join("\n");
+        return { text: lines.join("\n"), news: next.started || mismatched };
+      });
+    }
+
+    /** Stop the shared daemon. Its peers disconnect, so a host attached through it is lost. */
+    function stopListening(): Promise<string> {
+      return serially(async () => {
+        const current = listener;
+        // Forget the daemon first, so its connection breaking is not reported as a surprise.
+        listener = undefined;
+        peers = undefined;
+        clearInterval(refresh);
+        current?.control.close();
+        showStatus();
+        try {
+          return `Stopped the cns daemon (pid ${await stopDaemon(options.statePath)}).`;
+        } catch (error) {
+          if (error instanceof Error && "code" in error && error.code === "ENOENT") return "No cns daemon is running.";
+          throw error;
+        }
       });
     }
 
@@ -267,15 +291,15 @@ export function createCnsExtension(options: CnsOptions = {}) {
       }
     }
 
-    pi.registerFlag("cns-listen", { type: "boolean", description: "Start this machine's cns daemon, or use the running one, when Pi starts" });
+    pi.registerFlag("cns-listen", { type: "boolean", description: "Start this machine's cns daemon, or use the running one, when Pi starts (or set CNS_LISTEN=1)" });
     pi.registerFlag("cns-attach", { type: "string", description: "Run Pi's tools on a cns host from the start: p1, host[:port] or ws://..." });
     pi.registerFlag("cns-cwd", { type: "string", description: "With --cns-attach, the working directory on the host (default: its home)" });
-    pi.registerFlag("cns-bin", { type: "string", description: "The cns executable that runs the daemon (default: CNS_BIN, then cns on PATH)" });
+    pi.registerFlag("cns-bin", { type: "string", description: "The cns executable that runs the daemon (default: CNS_BIN, then the package's own cns)" });
 
     pi.registerCommand("cns", {
       description: "Cap'n Shell: listen for peers, attach Pi's tools to a host, run a command there",
       getArgumentCompletions(prefix): AutocompleteItem[] | null {
-        const words = ["listen", "status", "attach", "detach", "run"];
+        const words = ["listen", "status", "attach", "detach", "run", "stop"];
         if (prefix.includes(" ")) return null;
         const items = words.filter((word) => word.startsWith(prefix)).map((word) => ({ value: word, label: word }));
         return items.length ? items : null;
@@ -287,10 +311,13 @@ export function createCnsExtension(options: CnsOptions = {}) {
         try {
           switch (subcommand) {
             case "listen":
-              ctx.ui.notify(await startListening(), "info");
+              ctx.ui.notify((await startListening()).text, "info");
               break;
             case "status":
               ctx.ui.notify(await statusText(), "info");
+              break;
+            case "stop":
+              ctx.ui.notify(await stopListening(), "info");
               break;
             case "attach": {
               if (!rest[0]) throw new Error("Usage: /cns attach HOST [DIRECTORY]");
@@ -358,15 +385,20 @@ export function createCnsExtension(options: CnsOptions = {}) {
       },
     });
 
-    pi.on("session_start", async (_event, ctx) => {
+    pi.on("session_start", async (event, ctx) => {
       ui = ctx.ui;
       const entries = ctx.sessionManager.getBranch()
         .flatMap((entry) => entry.type === "custom" && entry.customType === ENTRY ? [entry.data as Entry] : []);
       previous = entries.map((entry) => entry?.host).filter((label): label is string => typeof label === "string").at(-1);
       const last = entries.at(-1);
-      if (pi.getFlag("cns-listen") === true) {
-        try { ctx.ui.notify(await startListening(), "info"); }
-        catch (error) { ctx.ui.notify(`cns: cannot listen: ${errorMessage(error)}`, "error"); }
+      try {
+        if (pi.getFlag("cns-listen") === true || listenAtStartup(env)) {
+          const { text, news } = await startListening();
+          // A replaced or reloaded session finding the daemon again needs only the status line.
+          if (event.reason === "startup" || news) ctx.ui.notify(text, "info");
+        }
+      } catch (error) {
+        ctx.ui.notify(`cns: cannot listen: ${errorMessage(error)}`, "error");
       }
       const requested = pi.getFlag("cns-attach");
       if (typeof requested === "string" && requested.trim()) {

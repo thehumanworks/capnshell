@@ -2,8 +2,7 @@ import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { newWebSocketRpcSession, RpcTarget, type RpcStub } from "capnweb";
 import type { ControlConnection } from "../src/commands/daemon.js";
-import { forkShell } from "../src/commands/peer.js";
-import { closeSocket, openSocket } from "../src/connect.js";
+import { closeSocket, forkShell, openSocket } from "../src/connect.js";
 import { errorMessage } from "../src/errors.js";
 import { RefusingShell } from "../src/refusing-shell.js";
 import {
@@ -350,7 +349,7 @@ export async function connectPeer(control: ControlConnection, target: Extract<Ta
   try { shell = await control.controller.shell(target.id); }
   catch (error) {
     if (/is not a function/.test(errorMessage(error))) {
-      throw new Error("The running daemon's cns cannot share a peer's shell; restart it with this version (cns stop, then /cns listen).");
+      throw new Error("The running daemon's cns cannot share a peer's shell; restart it with this version (/cns stop, then /cns listen).");
     }
     throw error;
   }
