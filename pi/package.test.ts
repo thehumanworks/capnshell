@@ -8,7 +8,7 @@ import test, { type TestContext } from "node:test";
 import { buildPiPackage, PACKAGE_NAME } from "../scripts/build-pi-package.js";
 import { connectControl } from "../src/commands/daemon.js";
 import { daemonHome, launchCli, PROJECT_ROOT, unusedPort } from "../src/test-support.js";
-import { BUN_PACKAGES } from "./program.js";
+import { BUN_PACKAGES, BUN_VERSION } from "./program.js";
 
 const posix = process.platform !== "win32";
 const bunPackage = BUN_PACKAGES[`${process.platform}-${process.arch}`]?.[0];
@@ -167,4 +167,9 @@ test("the package names its Bun and only the host's modules", { skip: !bunPackag
   for (const file of manifest.files) await stat(path.join(extension, file));
   const imports = [...(await readFile(path.join(extension, "index.js"), "utf8")).matchAll(/^import\s[^;]*?\bfrom "([^"]+)";$/gm)].map((match) => match[1]!);
   assert.deepEqual([...new Set(imports.filter((name) => !name.startsWith("node:")))].sort(), Object.keys(manifest.peerDependencies).sort());
+});
+
+test("the package ships the Bun version the project declares", async () => {
+  const manifest = JSON.parse(await readFile(path.join(PROJECT_ROOT, "package.json"), "utf8")) as { packageManager: string };
+  assert.equal(`bun@${BUN_VERSION}`, manifest.packageManager);
 });

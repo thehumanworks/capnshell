@@ -306,7 +306,7 @@ pi -e ./pi/index.ts               # or run the extension from this checkout, wit
 
 The compiled executable contains its JavaScript runtime and dependencies. Copy the executable built for the destination OS and architecture to that machine; **Bun, Node.js, source files and `node_modules` are not needed at runtime**. Linux/macOS need Bash and the platform's normal system libraries; Windows uses its built-in Windows PowerShell.
 
-To build from source, install Bun 1.4.2 or newer and run:
+To build from source, install Bun 1.4.4 and run:
 
 ```sh
 bun install --frozen-lockfile --ignore-scripts
