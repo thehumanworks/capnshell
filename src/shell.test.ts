@@ -263,6 +263,8 @@ test("file operations describe, list, create, glob, read and replace files with 
   assert.deepEqual(await api.glob("*.ts", path.join(dir, "a")), []);
   assert.deepEqual(await api.glob("b/*.ts", path.join(dir, "a")), [path.join(nested, "one.ts")]);
   assert.equal((await api.glob("**/*", dir, { limit: 1 })).length, 1);
+  assert.deepEqual(await api.glob("**/b", dir), []);
+  assert.deepEqual(await api.glob("**/b", dir, { directories: true }), [`${nested}${path.sep}`]);
   assert.deepEqual(await api.glob("**/*.txt", dir), [path.join(dir, ".hidden.txt")]);
 
   const chunk = await api.readFile(path.join(nested, "one.ts"));

@@ -20,7 +20,9 @@
     "forceConsistentCasingInFileNames": true
   },
   "include": [
-    "src/**/*.ts"
+    "src/**/*.ts",
+    "pi/**/*.ts",
+    "scripts/**/*.ts"
   ],
   "exclude": [
     "node_modules",

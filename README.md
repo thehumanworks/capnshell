@@ -218,7 +218,7 @@ File methods take absolute paths on the executing peer and reject with its syste
 | `access(path, { write })` | Resolves if the path is readable, and writable with `write: true`. |
 | `readdir(path)` | Up to 10,000 entries, each `{ name, kind }`; links are not followed. |
 | `mkdir(path)` | Creates the directory and missing parents. |
-| `glob(pattern, cwd, { ignore, limit })` | Up to 10,000 absolute paths of files and links under `cwd` whose relative path matches a glob, hidden ones included, links not followed. Directories matched by an ignore pattern ending in `/**` are not entered. |
+| `glob(pattern, cwd, { ignore, limit, directories })` | Up to 10,000 absolute paths of files and links under `cwd` whose relative path matches a glob, hidden ones included, links not followed; with `directories: true`, matching directories too, ending in a separator. Directories matched by an ignore pattern ending in `/**` are not entered. |
 | `readFile(path, { offset, length })` | `{ data, size, eof }`: up to 1 MiB from `offset`; read larger files in several calls. |
 | `writeFile(path, data)` | Replaces a file's contents with up to 4 MiB in place, as a local write does: links are followed and the file keeps its inode, owner and permissions. The data arrives whole before anything is written. Parent directories are not created. |
 
@@ -286,6 +286,22 @@ codex mcp add cns --url http://127.0.0.1:47382/mcp --bearer-token-env-var CNS_MC
 
 The server speaks MCP 2026-07-28 and serves 2025-era clients too. Over HTTP, a 2025-era client gets a protocol session so that its cancellations reach its calls; the server keeps no events for it to resume from, so a dropped response also cancels its call. Up to 64 sessions can be open; past that the longest-idle one is closed, and a session idle for an hour is closed too. The server connects to the listener or daemon for each call and closes the connection when the call ends. Cancelling a call, or a client disconnecting, therefore kills its command and ends its screen wait; named sessions keep running. Through a daemon, cancelling a command needs the daemon and the peer to run a `cns` with this server; with older ones the command runs until it ends. While a long call runs, the server reports elapsed time to clients that ask for progress. Clients impose their own tool-call time limits, for example Codex's 300-second default `tool_timeout_sec`, so pass `until` and `waitMs` rather than waiting indefinitely. A listener sees each call as a short-lived peer, but the MCP server refuses its requests: it never gives a listener a shell on its own machine.
 
+## Pi extension
+
+The Pi extension in `pi/` runs [Pi](https://pi.dev)'s own tools on a cns host: while Pi is attached, `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls` and `!` commands work on that host's files and shell. `/cns listen` (or `CNS_LISTEN=1`) lets hosts connect to Pi's machine, and `/cns attach HOST` sends the tools there. Nothing falls back to Pi's machine when a host goes away. [pi/README.md](pi/README.md) documents its use; it is also the npm package's README.
+
+```sh
+pi install npm:@nothumanwork/pi-cns
+```
+
+The npm package is self-contained: the extension bundled for Pi on Node.js or Bun, cns bundled as `cns.js`, and Bun for each platform as an optional dependency, of which npm installs only this machine's. Bun runs `cns.js` without reading `.env` or `bunfig.toml` from Pi's working directory.
+
+```sh
+bun run build:pi                  # dist/pi-package
+cd dist/pi-package && npm publish
+pi -e ./pi/index.ts               # or run the extension from this checkout, with cns or bun on PATH
+```
+
 ## Build and distribute
 
 The compiled executable contains its JavaScript runtime and dependencies. Copy the executable built for the destination OS and architecture to that machine; **Bun, Node.js, source files and `node_modules` are not needed at runtime**. Linux/macOS need Bash and the platform's normal system libraries; Windows uses its built-in Windows PowerShell.
@@ -338,8 +354,8 @@ Daemon control uses authenticated Cap’n Web RPC on a separate loopback endpoin
 
 ```sh
 bun run typecheck
-bun test --timeout 30000 ./src
+bun run test
 bun run test:compiled
 ```
 
-Tests exercise multiple bidirectional peers, target selection, disconnect isolation, reverse calls during one-shot commands and PTY sessions, output/exit-status handling, PTY input, sizing, hang-up, timeouts and flow control, rendered screens and scrollback, named sessions across connections and CLI calls (keys, waits, attach redraws, detach, kill and limits), PTY proxying through the daemon, streaming commands with flow control and cancellation (also through the daemon), file operations and their validation, one-way peers refusing every reverse call, process cleanup, connection limits, daemon attachment, startup races and stale-state recovery. MCP tests drive `cns mcp` with the official SDK client over stdio and HTTP, in both protocol eras: every tool, tool errors, cancellation and disconnects killing commands and freeing screen waits, 2025-era session limits, HTTP authentication, origin and host checks, calls beyond Bun's idle timeout with progress, daemon peer selection and the refusal of reverse calls. The compiled suite additionally tests the executable outside its checkout without a JavaScript runtime on `PATH`.
+Tests exercise multiple bidirectional peers, target selection, disconnect isolation, reverse calls during one-shot commands and PTY sessions, output/exit-status handling, PTY input, sizing, hang-up, timeouts and flow control, rendered screens and scrollback, named sessions across connections and CLI calls (keys, waits, attach redraws, detach, kill and limits), PTY proxying through the daemon, streaming commands with flow control and cancellation (also through the daemon), file operations and their validation, one-way peers refusing every reverse call, process cleanup, connection limits, daemon attachment, startup races and stale-state recovery. MCP tests drive `cns mcp` with the official SDK client over stdio and HTTP, in both protocol eras: every tool, tool errors, cancellation and disconnects killing commands and freeing screen waits, 2025-era session limits, HTTP authentication, origin and host checks, calls beyond Bun's idle timeout with progress, daemon peer selection and the refusal of reverse calls. The Pi extension tests run Pi's agent sessions with a scripted model against real listeners and the daemon: each tool and `!` on a host, results matching Pi's local tools for `grep`, `find`, `ls` and `read`, images, aborts and timeouts stopping the host's command, long commands, sessions sharing one daemon and attaching to its peers, `CNS_LISTEN`, `/cns stop`, lost hosts and failed startup attachments blocking every tool, and continued sessions attaching again. The package tests build the npm package, install it beside a Bun package, and drive it in Pi processes in RPC mode, on Node and with the installed `pi` when there is one, with neither `bun` nor `cns` on `PATH` and hostile `.env` and `bunfig.toml` files where the daemon would read them. The compiled suite additionally tests the executable outside its checkout without a JavaScript runtime on `PATH`.

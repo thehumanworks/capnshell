@@ -1,9 +1,12 @@
 import { spawn, type SpawnOptionsWithoutStdio } from "node:child_process";
 import { EventEmitter, once } from "node:events";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import type { TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
+import { stopDaemon } from "./commands/daemon.js";
 import { selfInvocation } from "./runtime.js";
 
 export const PROJECT_ROOT = fileURLToPath(new URL("../", import.meta.url));
@@ -15,6 +18,21 @@ export function cliInvocation(args: string[]): { file: string; args: string[] } 
     file: binary === "1" ? path.join(PROJECT_ROOT, "dist", process.platform === "win32" ? "cns.exe" : "cns") : path.resolve(binary),
     args,
   };
+}
+
+/**
+ * A temporary home for a daemon that a test starts, with its state at .cns/daemon.json.
+ * Hooks run in the order they were added, so one hook stops the daemon and then removes
+ * the directory: removing the state file first would leave the daemon running.
+ */
+export async function daemonHome(t: TestContext, prefix = "cns-daemon-"): Promise<{ home: string; statePath: string }> {
+  const home = await realpath(await mkdtemp(path.join(os.tmpdir(), prefix)));
+  const statePath = path.join(home, ".cns", "daemon.json");
+  t.after(async () => {
+    try { await stopDaemon(statePath); } catch { /* Not running. */ }
+    await rm(home, { force: true, recursive: true });
+  });
+  return { home, statePath };
 }
 
 /** A port that is free on `host`, which should be the address the test then binds. */

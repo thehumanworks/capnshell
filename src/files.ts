@@ -24,6 +24,8 @@ const globOptionsSchema = z.strictObject({
   /** Glob patterns, relative to cwd, whose matches are left out. */
   ignore: z.array(z.string().min(1).max(1024)).max(64).default([]),
   limit: z.int().min(1).max(MAX_GLOB_RESULTS).default(MAX_GLOB_RESULTS),
+  /** Include matching directories too, with a trailing slash. */
+  directories: z.boolean().default(false),
 });
 const globPatternSchema = z.string().min(1).max(1024);
 const dataSchema = z.instanceof(Uint8Array, { message: "data must be a Uint8Array." })
@@ -92,19 +94,21 @@ export async function makeDirectory(directory: string): Promise<void> {
 
 /**
  * Files and symbolic links under `cwd` whose path relative to it matches `pattern`,
- * as absolute paths. Hidden entries are included and links are not followed. A
+ * as absolute paths, and with `directories` matching directories with a trailing
+ * separator. Hidden entries are included and links are not followed. A
  * directory is not entered when an ignore pattern ending in `/**` covers all of it,
  * as one ignoring every node_modules directory does; unreadable directories below `cwd` are skipped.
  */
 export async function globFiles(pattern: string, cwd: string, options: GlobOptions = {}): Promise<string[]> {
   const root = pathSchema.parse(cwd);
-  const { ignore, limit } = globOptionsSchema.parse(options);
+  const { ignore, limit, directories } = globOptionsSchema.parse(options);
   const glob = new Bun.Glob(globPatternSchema.parse(pattern));
   const ignored = ignore.map((entry) => new Bun.Glob(entry));
   const pruned = ignore.filter((entry) => entry.endsWith("/**")).map((entry) => new Bun.Glob(entry.slice(0, -3)));
   const results: string[] = [];
   const pending = [""];
-  for (let next = pending.shift(); next !== undefined && results.length < limit; next = pending.shift()) {
+  for (let index = 0; index < pending.length && results.length < limit; index++) {
+    const next = pending[index]!;
     let entries;
     try { entries = await readdir(path.join(root, next), { withFileTypes: true }); }
     catch (error) {
@@ -113,12 +117,15 @@ export async function globFiles(pattern: string, cwd: string, options: GlobOptio
     }
     for (const entry of entries) {
       const relative = next ? `${next}/${entry.name}` : entry.name;
+      const matches = () => glob.match(relative) && !ignored.some((match) => match.match(relative));
       if (entry.isDirectory()) {
-        if (!pruned.some((directory) => directory.match(relative))) pending.push(relative);
-      } else if ((entry.isFile() || entry.isSymbolicLink()) && glob.match(relative) && !ignored.some((match) => match.match(relative))) {
+        if (pruned.some((directory) => directory.match(relative))) continue;
+        pending.push(relative);
+        if (directories && matches()) results.push(`${path.join(root, relative)}${path.sep}`);
+      } else if ((entry.isFile() || entry.isSymbolicLink()) && matches()) {
         results.push(path.join(root, relative));
-        if (results.length >= limit) break;
       }
+      if (results.length >= limit) break;
     }
   }
   return results;
