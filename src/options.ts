@@ -19,6 +19,7 @@ const peerOptionsSchema = z.strictObject({
   port: portSchema().default(47381),
   repl: z.boolean().default(true),
   allowRemote: z.boolean().default(false),
+  oneWay: z.boolean().default(false),
   daemon: z.boolean().default(false),
   state: z.string().min(1).optional(),
   cwd: z.string().min(1).optional(),
@@ -45,6 +46,8 @@ export interface PeerConfig {
   url: string;
   noRepl: boolean;
   remote: boolean;
+  /** Use peers' shells without offering this machine's shell or files to them. */
+  oneWay: boolean;
   daemon: boolean;
   state?: string;
   /** The shell string for run; optional for tty, which otherwise starts a login shell. */
@@ -72,7 +75,7 @@ export function isLoopback(host: string): boolean {
   return unwrapped === "::1" || (isIP(unwrapped) === 4 && unwrapped.startsWith("127."));
 }
 
-const endpointUrl = (bind: string, port: number) => `ws://${isIP(bind) === 6 ? `[${bind}]` : bind}:${port}`;
+export const endpointUrl = (bind: string, port: number) => `ws://${isIP(bind) === 6 ? `[${bind}]` : bind}:${port}`;
 
 function peerUrl(destination: string): string {
   const parsed = new URL(destination);
@@ -106,7 +109,7 @@ function resolveOptions(role: PeerRole, command: Command, destination: string | 
       delete options[name];
     }
   }
-  const { bind, port, repl, allowRemote, daemon, state, cwd, timeout, cols, rows, term, screen, history, name, attach, literal, until, json } = peerOptionsSchema.parse(options);
+  const { bind, port, repl, allowRemote, oneWay, daemon, state, cwd, timeout, cols, rows, term, screen, history, name, attach, literal, until, json } = peerOptionsSchema.parse(options);
   if (role === "tty") {
     if (history !== undefined && !screen) throw new Error("--history requires --screen.");
     if (name !== undefined && attach !== undefined) throw new Error("Use either --name to start a session or --attach to join one, not both.");
@@ -125,7 +128,7 @@ function resolveOptions(role: PeerRole, command: Command, destination: string | 
     url = peerUrl(destination);
   }
   return {
-    role, mode, bind, port, url, noRepl: role === "run" || role === "tty" || !repl, daemon, state, cwd, timeoutMs: timeout,
+    role, mode, bind, port, url, noRepl: role === "run" || role === "tty" || !repl, oneWay, daemon, state, cwd, timeoutMs: timeout,
     cols, rows, term, screen: screen || role === "screen" ? { history: history ?? 0 } : undefined,
     name: name ?? attach, attach: attach !== undefined, literal, until, json,
     remote: mode === "listen" ? !isLoopback(bind) : !isLoopback(new URL(url).hostname),
@@ -147,7 +150,10 @@ export function addPeerCommands(program: Command, run: (config: PeerConfig) => v
   for (const role of roles) {
     const command = program.command(role).description(descriptions[role])
       .addHelpText("after", "\nNo authentication. Remote mode is only for a temporary trusted LAN/private VPN test.");
-    if (role === "listen" || role === "connect") command.option("--no-repl", "Disable the interactive command prompt");
+    if (role === "listen" || role === "connect") {
+      command.option("--no-repl", "Disable the interactive command prompt")
+        .option("--one-way", "Use peers' shells without offering this machine's shell or files to them");
+    }
     if (role === "sessions" || sessionRoles.has(role)) {
       command.addHelpText("after", "\nNamed sessions live in the peer's cns process: they survive this command and reconnects,\nand end when they are killed or that process stops. Start one with cns tty --name NAME.");
     }

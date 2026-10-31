@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { newBunWebSocketRpcSession, newMessagePortRpcSession, newWebSocketRpcSession, RpcTarget, type BunWebSocketTransport, type RpcStub } from "capnweb";
-import { forkShell } from "./commands/peer.js";
+import { forkShell } from "./connect.js";
+import { RefusingShell } from "./refusing-shell.js";
 import { localShellInfo, ShellApi, type RunResult } from "./shell.js";
 
 // Model an untrusted caller, not the typed client contract. Runtime validation
@@ -58,6 +59,20 @@ test("Cap’n Web validates untrusted calls and keeps the bidirectional session 
       assert.equal(result.stdout, "still-connected");
       assert.equal(result.exitCode, 0);
     } finally { result[Symbol.dispose](); }
+  }
+});
+
+test("RefusingShell answers info() and refuses every other ShellApi method over RPC", async (t) => {
+  const { port1, port2 } = new MessageChannel();
+  t.after(() => { port1.close(); port2.close(); });
+  newMessagePortRpcSession(port1, new RefusingShell());
+  using remote = newMessagePortRpcSession<ShellApi>(port2);
+  assert.equal((await remote.info()).pid, process.pid);
+  const methods = Object.getOwnPropertyNames(ShellApi.prototype).filter((name) => name !== "constructor" && name !== "info");
+  assert.ok(methods.includes("run") && methods.includes("readFile") && methods.includes("exec"));
+  for (const name of methods) {
+    await assert.rejects(async () => { await (remote as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>)[name]!("/tmp"); },
+      new RegExp(RefusingShell.refusal.replace(/[.;]/g, "\\$&")), `${name} must be refused`);
   }
 });
 

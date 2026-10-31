@@ -10,7 +10,8 @@ export function createCli(): Command {
   addPeerCommands(program, async (config) => {
     if (config.daemon) {
       const { startDaemon } = await import("./commands/daemon.js");
-      await startDaemon(config);
+      const daemon = await startDaemon(config);
+      console.log(`Daemon listening at ${daemon.url}. State: ${daemon.state}\nLog: ${daemon.log}`);
     } else {
       const { startPeer } = await import("./commands/peer.js");
       await startPeer(config);
@@ -33,6 +34,7 @@ export function createCli(): Command {
     .action(async (options: { state?: string }) => {
       const { stopDaemon } = await import("./commands/daemon.js");
       await stopDaemon(options.state);
+      console.log("Daemon stopped.");
     });
   return program;
 }

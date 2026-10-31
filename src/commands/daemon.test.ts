@@ -5,11 +5,13 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
+import { spawn } from "node:child_process";
 import { RpcTarget } from "capnweb";
-import { ShellApi, type PtyExit } from "../shell.js";
+import { ShellApi, type ExecSink, type PtyExit } from "../shell.js";
 import { launchCli as launch } from "../test-support.js";
 import { plain } from "../terminal.js";
-import { connectControl, serveControl } from "./daemon.js";
+import { connectControl, removeStaleState } from "./daemon.js";
+import { serveControl } from "./daemon-server.js";
 
 async function temporaryState(t: TestContext): Promise<string> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "cns-daemon-"));
@@ -24,6 +26,28 @@ class CollectingSink extends RpcTarget {
   exited = new Promise<PtyExit>((resolve) => { this.#finish = resolve; });
   output(data: Uint8Array) { this.text += new TextDecoder().decode(data); }
   exit(result: PtyExit) { this.#finish(result); }
+}
+
+/** Records a command's output as exec streams it through the daemon. */
+class CollectingExecSink extends RpcTarget implements ExecSink {
+  text = "";
+  #waiters: { needle: string; resolve(): void }[] = [];
+  output(_stream: "stdout" | "stderr", data: Uint8Array) {
+    this.text += new TextDecoder().decode(data);
+    this.#waiters = this.#waiters.filter((waiter) => {
+      if (!this.text.includes(waiter.needle)) return true;
+      waiter.resolve();
+      return false;
+    });
+  }
+  waitFor(needle: string) {
+    if (this.text.includes(needle)) return Promise.resolve();
+    return new Promise<void>((resolve) => { this.#waiters.push({ needle, resolve }); });
+  }
+}
+
+function alive(pid: number) {
+  try { process.kill(pid, 0); return true; } catch { return false; }
 }
 
 async function unusedPort(): Promise<string> {
@@ -48,8 +72,9 @@ test("local control authenticates before upgrade and exclusively owns private st
     async ptySessions() { throw new Error("unused"); },
     async startPtySession() { throw new Error("unused"); },
     async ptySession() { throw new Error("unused"); },
+    async shell() { throw new Error("unused"); },
   };
-  const cleanup = await serveControl(controller, () => {}, statePath);
+  const cleanup = await serveControl(controller, () => {}, statePath, { url: "ws://127.0.0.1:47381", bind: "127.0.0.1", port: 47381, remote: false, oneWay: false });
   t.after(cleanup);
   const state = JSON.parse(await readFile(statePath, "utf8"));
   if (process.platform !== "win32") assert.equal((await stat(statePath)).mode & 0o777, 0o600);
@@ -80,6 +105,7 @@ test("control cleanup never removes another daemon's state", async (t) => {
     async ptySessions() { throw new Error("unused"); },
     async startPtySession() { throw new Error("unused"); },
     async ptySession() { throw new Error("unused"); },
+    async shell() { throw new Error("unused"); },
   }, () => {}, statePath);
   const replacement = { ...JSON.parse(await readFile(statePath, "utf8")), token: "f".repeat(64) };
   await writeFile(statePath, JSON.stringify(replacement));
@@ -132,7 +158,44 @@ test("daemon starts, attaches bidirectionally, survives detach, rejects duplicat
   const connection = await connectControl(statePath);
   try {
     assert.equal((await connection.controller.peers()).length, 1);
+    // status() tells a client that found the state file what the daemon listens on.
+    const status = await plain(connection.remote.status());
+    assert.equal(status.pid, state.pid);
+    assert.deepEqual([status.url, status.bind, status.remote, status.peers], [url, "127.0.0.1", false, 1]);
+    assert.ok(status.startedAt <= Date.now());
+    // shell(id) forks the peer's whole ShellApi through the daemon: commands and files alike.
+    const shell = await connection.controller.shell("p1");
+    try {
+      const forked = await plain(shell.run(process.platform === "win32" ? "[Console]::Write('SHELL_VIA_DAEMON')" : "printf SHELL_VIA_DAEMON"));
+      assert.equal(forked.stdout, "SHELL_VIA_DAEMON");
+      const file = path.join(path.dirname(statePath), "via-daemon.txt");
+      await shell.writeFile(file, new TextEncoder().encode("files via daemon"));
+      const chunk = await plain(shell.readFile(file));
+      assert.equal(new TextDecoder().decode(chunk.data), "files via daemon");
+      assert.equal((await plain(shell.stat(file))).kind, "file");
+      assert.ok((await plain(shell.readdir(path.dirname(statePath)))).some((entry) => entry.name === "via-daemon.txt"));
+    } finally { shell[Symbol.dispose](); }
     if (process.platform !== "win32") {
+      // exec streams through the daemon, and releasing the fork kills the command.
+      const streaming = await connection.controller.shell("p1");
+      const streamed = new CollectingExecSink();
+      const execution = streaming.exec(streamed, "printf 'pid=%s;' \"$$\"; printf STREAMED; exec sleep 30");
+      await streamed.waitFor("STREAMED");
+      const pid = Number(/pid=(\d+);/.exec(streamed.text)?.[1]);
+      assert.ok(alive(pid));
+      streaming[Symbol.dispose]();
+      // The killed command reports its signal, unless the released fork rejects the call first.
+      const outcome = await Promise.resolve(execution).then((result) => result, (error: unknown) => error);
+      if (!(outcome instanceof Error)) assert.notEqual((outcome as { signal: unknown }).signal, null);
+      const deadline = Date.now() + 5000;
+      while (alive(pid) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+      assert.equal(alive(pid), false, "releasing the fork must kill the command");
+      const finished = await connection.controller.shell("p1");
+      try {
+        const done = new CollectingExecSink();
+        const result = await plain(finished.exec(done, "printf one; printf two >&2; exit 6"));
+        assert.deepEqual([done.text, result.exitCode], ["onetwo", 6]);
+      } finally { finished[Symbol.dispose](); }
       // The attached client's sink and the peer's session are both proxied by the daemon.
       const sink = new CollectingSink();
       const pty = await connection.controller.openPty("p1", sink, { command: "read -r line; printf 'VIA_DAEMON:%s' \"$line\"; exit 3" });
@@ -169,6 +232,35 @@ test("daemon starts, attaches bidirectionally, survives detach, rejects duplicat
   assert.equal(await peer.exited, 0, peer.output);
 });
 
+
+test("stale state is removed only once its daemon's process is gone", { timeout: 15000 }, async (t) => {
+  const statePath = await temporaryState(t);
+  // A process that has exited, and a port nothing answers on.
+  const child = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+  await once(child, "exit");
+  const port = Number(await unusedPort());
+  const write = (pid: number) => writeFile(statePath, JSON.stringify({ version: 1, pid, port, token: "a".repeat(64) }), { mode: 0o600 });
+  assert.equal(await removeStaleState(statePath), false, "no state file");
+  await write(process.pid);
+  assert.equal(await removeStaleState(statePath), false, "the recorded process still runs");
+  assert.ok(await stat(statePath));
+  await writeFile(statePath, "{", { mode: 0o600 });
+  assert.equal(await removeStaleState(statePath), false, "a file being written is left alone");
+  await write(child.pid!);
+  assert.equal(await removeStaleState(statePath), true);
+  await assert.rejects(() => stat(statePath), { code: "ENOENT" });
+
+  // listen --daemon recovers from a crashed daemon's state by itself.
+  await write(child.pid!);
+  const started = launch(t, ["listen", "--daemon", "--one-way", "--state", statePath, "--port", await unusedPort()]);
+  assert.equal(await started.exited, 0, started.output);
+  const connection = await connectControl(statePath);
+  try {
+    const status = await plain(connection.remote.status());
+    assert.equal(status.oneWay, true);
+    await connection.remote.stop();
+  } finally { connection.close(); }
+});
 
 test("daemon startup reports a listener failure and leaves no state", { timeout: 15000 }, async (t) => {
   const statePath = await temporaryState(t);

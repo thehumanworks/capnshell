@@ -265,3 +265,20 @@ test("run and interactive connect report unreachable listeners as failure", { ti
   assert.match(run.stderr, /connect|WebSocket|closed/i);
   assert.match(interactive.stderr, /connect|WebSocket|closed/i);
 });
+
+test("a one-way listener uses its peers' shells and refuses theirs", { timeout: 30000 }, async (t) => {
+  const port = await unusedPort();
+  const url = `ws://[::1]:${port}`;
+  const listener = launchCli(t, ["listen", "--one-way", "--bind", "::1", "--port", port], { env: { CNS_TEST_PEER: "LISTENER_ONLY" } });
+  await listener.waitFor("listening at");
+  assert.match(listener.output, /One-way: peers cannot run commands or read files here/);
+  const peer = launchCli(t, ["connect", url], { env: { CNS_TEST_PEER: "PEER_ONLY" } });
+  await peer.waitFor("Type a shell command");
+  await listener.waitFor("p1");
+  await listener.send(environment, "PEER_ONLY");
+  // The handshake still works, so the peer sees who it is connected to.
+  await peer.send(":info", `"pid": ${listener.child.pid}`);
+  const refused = await peer.send(environment, "does not run commands");
+  assert.doesNotMatch(refused, /LISTENER_ONLY/);
+  await listener.send(print("LISTENER_STILL_WORKS"), "LISTENER_STILL_WORKS");
+});
