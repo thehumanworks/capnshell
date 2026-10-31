@@ -215,6 +215,18 @@ test("exec kills the command when the sink fails, and times out like run", { ski
   await assert.rejects(api.exec(sink, ""), /Command/);
 });
 
+test("releasing a shell settles exec while its sink has not answered", { skip: windows }, async () => {
+  const api = new ShellApi();
+  const stalled: ExecSink = { output: () => new Promise<void>(() => {}) };
+  const pending = api.exec(stalled, "printf output; sleep 30");
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  const started = Date.now();
+  api[Symbol.dispose]();
+  const result = await pending;
+  assert.ok(Date.now() - started < 8000);
+  assert.ok(result.signal !== null || result.exitCode !== 0);
+});
+
 test("file operations describe, list, create, glob, read and replace files with validation", async (t) => {
   const api = apiFor(t);
   const dir = await temporaryDirectory(t);

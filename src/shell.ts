@@ -92,6 +92,7 @@ export class ShellApi extends RpcTarget {
   #forks = new Set<ShellApi>();
   #registry: PtyRegistry;
   #closed = false;
+  #released = Promise.withResolvers<void>();
   /** Set on forks, which close with their parent and cannot fork again. */
   #onClose?: () => void;
 
@@ -176,6 +177,8 @@ export class ShellApi extends RpcTarget {
    * in chunks of up to MAX_EXEC_CHUNK_BYTES, without an output cap. Each `output`
    * call is awaited before more is read, so a slow caller slows the command rather
    * than growing this process's memory. A sink that fails kills the command.
+   * Releasing the shell kills the command and settles the call even while the
+   * sink has not acknowledged output.
    */
   async exec(sink: ExecSink, command: string, options: RunOptions = {}): Promise<ExecResult> {
     if (!sink || (typeof sink !== "object" && typeof sink !== "function")) throw new Error("An exec sink is required.");
@@ -206,7 +209,8 @@ export class ShellApi extends RpcTarget {
     child.stdout.on("data", (data: Buffer) => forward("stdout", data));
     child.stderr.on("data", (data: Buffer) => forward("stderr", data));
     const result = await ended;
-    await pending;
+    // A released shell's caller is gone: do not wait on its sink.
+    await Promise.race([pending, this.#released.promise]);
     if (failure !== undefined) throw failure;
     return result;
   }
@@ -246,7 +250,7 @@ export class ShellApi extends RpcTarget {
     return readFileChunk(path, options);
   }
 
-  /** Replace a file's contents atomically with up to MAX_WRITE_BYTES. */
+  /** Replace a file's contents in place, through links, with up to MAX_WRITE_BYTES. */
   async writeFile(path: string, data: Uint8Array) {
     if (this.#closed) throw new Error("This shell session is closed.");
     return writeWholeFile(path, data);
@@ -308,6 +312,7 @@ export class ShellApi extends RpcTarget {
   [Symbol.dispose]() {
     if (this.#closed) return;
     this.#closed = true;
+    this.#released.resolve();
     for (const child of this.#children) killTree(child);
     for (const pty of this.#ptys) pty[Symbol.dispose]();
     for (const fork of this.#forks) fork[Symbol.dispose]();
