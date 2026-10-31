@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readdir, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, readdir, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
@@ -261,16 +261,25 @@ test("file operations describe, list, create, glob, read and replace files with 
   assert.deepEqual([beyond.data.byteLength, beyond.eof], [0, true]);
   await assert.rejects(api.readFile(dir), { code: "EISDIR" });
 
-  // Replacing keeps the permission bits and never leaves a temporary file behind.
+  // Writing replaces the contents in place, as a local write does: the file keeps
+  // its inode and permissions, and a link is followed rather than replaced.
   const target = path.join(dir, "two.ts");
   if (!windows) await chmod(target, 0o640);
+  const inode = (await stat(target)).ino;
   await api.writeFile(target, new TextEncoder().encode("replaced"));
   assert.equal(await readFile(target, "utf8"), "replaced");
-  if (!windows) assert.equal((await stat(target)).mode & 0o777, 0o640);
-  assert.ok((await readdir(dir)).every((name) => !name.endsWith(".tmp")));
+  assert.equal((await stat(target)).ino, inode);
+  if (!windows) {
+    assert.equal((await stat(target)).mode & 0o777, 0o640);
+    const link = path.join(dir, "two-link.ts");
+    await symlink(target, link);
+    await api.writeFile(link, new TextEncoder().encode("through the link"));
+    assert.equal((await lstat(link)).isSymbolicLink(), true);
+    assert.equal(await readFile(target, "utf8"), "through the link");
+    await rm(link);
+  }
   await assert.rejects(api.writeFile(dir, new Uint8Array(1)), { code: "EISDIR" });
   await assert.rejects(api.writeFile(path.join(dir, "nowhere", "x"), new Uint8Array(1)), { code: "ENOENT" });
-  assert.ok((await readdir(dir)).every((name) => !name.endsWith(".tmp")));
 
   // Untrusted callers: relative paths, oversized requests and wrong types are rejected before any I/O.
   for (const relative of ["relative/path", "", "./x"]) {

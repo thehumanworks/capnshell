@@ -1,6 +1,5 @@
-import { randomBytes } from "node:crypto";
 import { constants } from "node:fs";
-import { access, chmod, lstat, mkdir, open, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, open, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 
@@ -149,28 +148,11 @@ export async function readFileChunk(file: string, options: ReadFileOptions = {})
 }
 
 /**
- * Replace a file's contents in one step: the data is written to a sibling temporary
- * file, which then replaces the file, so a failure never leaves a partial file. An
- * existing file keeps its permission bits. Parent directories are not created.
+ * Replace a file's contents with up to MAX_WRITE_BYTES, in place, as a local
+ * writeFile does: links are followed and the file keeps its inode, owner and
+ * permissions; a new file gets the default permissions. The data arrives whole
+ * before anything is written, so a broken connection never leaves part of it.
  */
 export async function writeWholeFile(file: string, data: Uint8Array): Promise<void> {
-  const target = pathSchema.parse(file);
-  const bytes = dataSchema.parse(data);
-  let mode: number | undefined;
-  try {
-    const existing = await stat(target);
-    if (existing.isDirectory()) throw Object.assign(new Error(`EISDIR: illegal operation on a directory, open ${target}`), { code: "EISDIR" });
-    mode = existing.mode & 0o7777;
-  } catch (error) {
-    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
-  }
-  const temporary = path.join(path.dirname(target), `.${path.basename(target)}.cns-${randomBytes(6).toString("hex")}.tmp`);
-  try {
-    await writeFile(temporary, bytes, { flag: "wx", mode: mode ?? 0o644 });
-    if (mode !== undefined) await chmod(temporary, mode);
-    await rename(temporary, target);
-  } catch (error) {
-    await unlink(temporary).catch(() => {});
-    throw error;
-  }
+  await writeFile(pathSchema.parse(file), dataSchema.parse(data));
 }
