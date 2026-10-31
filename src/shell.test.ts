@@ -1,12 +1,34 @@
 import assert from "node:assert/strict";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { Terminal as Screen } from "@xterm/headless";
 import {
-  MAX_FORKS, MAX_NAMED_PTYS, MAX_OUTPUT_BYTES, MAX_PTY_BACKLOG_BYTES, MAX_PTY_INPUT_BYTES, MAX_SCREEN_HISTORY, MAX_TIMEOUT_MS, PtyRegistry, ShellApi, type PtyExit,
+  MAX_EXEC_CHUNK_BYTES, MAX_FILE_CHUNK_BYTES, MAX_FORKS, MAX_NAMED_PTYS, MAX_OUTPUT_BYTES, MAX_PTY_BACKLOG_BYTES, MAX_PTY_INPUT_BYTES, MAX_SCREEN_HISTORY,
+  MAX_TIMEOUT_MS, MAX_WRITE_BYTES, PtyRegistry, ShellApi, type ExecSink, type PtyExit,
 } from "./shell.js";
+
+async function temporaryDirectory(t: TestContext): Promise<string> {
+  const dir = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-files-")));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  return dir;
+}
+
+/** Records exec output in order and can delay acknowledgements to exercise flow control. */
+class RecordingSink implements ExecSink {
+  chunks: { stream: "stdout" | "stderr"; data: Uint8Array }[] = [];
+  delayMs = 0;
+  failAfter = Infinity;
+  async output(stream: "stdout" | "stderr", data: Uint8Array) {
+    if (this.chunks.length >= this.failAfter) throw new Error("sink gave up");
+    this.chunks.push({ stream, data: data.slice() });
+    if (this.delayMs) await new Promise((resolve) => setTimeout(resolve, this.delayMs));
+  }
+  text(stream?: "stdout" | "stderr") {
+    return new TextDecoder().decode(Buffer.concat(this.chunks.filter((chunk) => !stream || chunk.stream === stream).map((chunk) => chunk.data)));
+  }
+}
 
 const windows = process.platform === "win32";
 function apiFor(t: TestContext) {
@@ -152,6 +174,120 @@ test("releasing a fork kills its commands only, and closing the shell closes its
   assert.ok((await pending).elapsedMs < 8000);
   await assert.rejects(forks[0]!.run("echo test"), /closed/);
   assert.throws(() => api.fork(), /closed/);
+});
+
+test("exec streams stdout and stderr in order, chunked, with the exit status", async (t) => {
+  const sink = new RecordingSink();
+  const result = await apiFor(t).exec(sink, windows
+    ? "[Console]::Write('one'); [Console]::Error.Write('two'); [Console]::Write('three'); exit 5"
+    : "printf one; printf two >&2; printf three; exit 5");
+  assert.equal(result.exitCode, 5);
+  assert.equal(result.timedOut, false);
+  assert.equal(sink.text("stdout"), "onethree");
+  assert.equal(sink.text("stderr"), "two");
+  assert.ok(sink.chunks.every((chunk) => chunk.data.byteLength <= MAX_EXEC_CHUNK_BYTES));
+  assert.ok(!("stdout" in result), "exec leaves the output to the sink");
+});
+
+test("exec has no output cap, splits large writes and waits for each acknowledgement", { skip: windows }, async (t) => {
+  const count = MAX_OUTPUT_BYTES + 4096;
+  const sink = new RecordingSink();
+  sink.delayMs = 1;
+  const result = await apiFor(t).exec(sink, `head -c ${count} /dev/zero | tr '\\0' x`);
+  assert.equal(result.exitCode, 0);
+  assert.equal(Buffer.byteLength(sink.text()), count);
+  assert.ok(sink.chunks.length > 1);
+  assert.ok(sink.chunks.every((chunk) => chunk.data.byteLength <= MAX_EXEC_CHUNK_BYTES));
+});
+
+test("exec kills the command when the sink fails, and times out like run", { skip: windows }, async (t) => {
+  const api = apiFor(t);
+  const failing = new RecordingSink();
+  failing.failAfter = 1;
+  const started = Date.now();
+  await assert.rejects(api.exec(failing, "while :; do printf line; sleep 0.05; done"), /sink gave up/);
+  assert.ok(Date.now() - started < 8000);
+  const sink = new RecordingSink();
+  const result = await api.exec(sink, "printf started; sleep 10", { timeoutMs: 200 });
+  assert.equal(result.timedOut, true);
+  assert.equal(sink.text(), "started");
+  await assert.rejects(async () => { await api.exec(undefined as unknown as ExecSink, "true"); }, /sink is required/);
+  await assert.rejects(api.exec(sink, ""), /Command/);
+});
+
+test("file operations describe, list, create, glob, read and replace files with validation", async (t) => {
+  const api = apiFor(t);
+  const dir = await temporaryDirectory(t);
+  const nested = path.join(dir, "a", "b");
+  await api.mkdir(nested);
+  assert.equal((await stat(nested)).isDirectory(), true);
+  await api.writeFile(path.join(nested, "one.ts"), new TextEncoder().encode("export const one = 1;\n"));
+  await api.writeFile(path.join(dir, ".hidden.txt"), new TextEncoder().encode("dot"));
+  await api.writeFile(path.join(dir, "two.ts"), new Uint8Array());
+  if (!windows) await symlink(path.join(dir, "two.ts"), path.join(dir, "link.ts"));
+  if (!windows) await symlink(path.join(dir, "missing"), path.join(dir, "dangling"));
+
+  const file = await api.stat(path.join(nested, "one.ts"));
+  assert.deepEqual([file.kind, file.symlink, file.size], ["file", false, 22]);
+  assert.equal((await api.stat(dir)).kind, "directory");
+  if (!windows) {
+    assert.deepEqual([(await api.stat(path.join(dir, "link.ts"))).kind, (await api.stat(path.join(dir, "link.ts"))).symlink], ["file", true]);
+    assert.equal((await api.stat(path.join(dir, "dangling"))).kind, "symlink");
+  }
+  await assert.rejects(api.stat(path.join(dir, "nope")), { code: "ENOENT" });
+  await api.access(path.join(nested, "one.ts"));
+  await api.access(path.join(nested, "one.ts"), { write: true });
+  await assert.rejects(api.access(path.join(dir, "nope")), { code: "ENOENT" });
+
+  const entries = await api.readdir(dir);
+  assert.deepEqual(entries.filter((entry) => ["a", "two.ts", ".hidden.txt"].includes(entry.name)).map((entry) => [entry.name, entry.kind]).sort(),
+    [[".hidden.txt", "file"], ["a", "directory"], ["two.ts", "file"]]);
+  if (!windows) assert.equal(entries.find((entry) => entry.name === "link.ts")?.kind, "symlink");
+
+  const found = await api.glob("**/*.ts", dir);
+  assert.deepEqual(found.map((found) => path.relative(dir, found)).sort(), [path.join("a", "b", "one.ts"), "two.ts"].sort());
+  assert.deepEqual(await api.glob("**/*.ts", dir, { ignore: ["a/**"] }), [path.join(dir, "two.ts")]);
+  assert.equal((await api.glob("**/*", dir, { limit: 1 })).length, 1);
+  assert.deepEqual(await api.glob("**/*.txt", dir), [path.join(dir, ".hidden.txt")]);
+
+  const chunk = await api.readFile(path.join(nested, "one.ts"));
+  assert.deepEqual([new TextDecoder().decode(chunk.data), chunk.size, chunk.eof], ["export const one = 1;\n", 22, true]);
+  const partial = await api.readFile(path.join(nested, "one.ts"), { offset: 7, length: 5 });
+  assert.deepEqual([new TextDecoder().decode(partial.data), partial.eof], ["const", false]);
+  const beyond = await api.readFile(path.join(nested, "one.ts"), { offset: 100 });
+  assert.deepEqual([beyond.data.byteLength, beyond.eof], [0, true]);
+  await assert.rejects(api.readFile(dir), { code: "EISDIR" });
+
+  // Replacing keeps the permission bits and never leaves a temporary file behind.
+  const target = path.join(dir, "two.ts");
+  if (!windows) await chmod(target, 0o640);
+  await api.writeFile(target, new TextEncoder().encode("replaced"));
+  assert.equal(await readFile(target, "utf8"), "replaced");
+  if (!windows) assert.equal((await stat(target)).mode & 0o777, 0o640);
+  assert.ok((await readdir(dir)).every((name) => !name.endsWith(".tmp")));
+  await assert.rejects(api.writeFile(dir, new Uint8Array(1)), { code: "EISDIR" });
+  await assert.rejects(api.writeFile(path.join(dir, "nowhere", "x"), new Uint8Array(1)), { code: "ENOENT" });
+  assert.ok((await readdir(dir)).every((name) => !name.endsWith(".tmp")));
+
+  // Untrusted callers: relative paths, oversized requests and wrong types are rejected before any I/O.
+  for (const relative of ["relative/path", "", "./x"]) {
+    await assert.rejects(api.stat(relative), /absolute/);
+    await assert.rejects(api.readFile(relative), /absolute/);
+    await assert.rejects(api.writeFile(relative, new Uint8Array()), /absolute/);
+    await assert.rejects(api.readdir(relative), /absolute/);
+    await assert.rejects(api.mkdir(relative), /absolute/);
+    await assert.rejects(api.glob("*", relative), /absolute/);
+  }
+  await assert.rejects(api.readFile(target, { length: MAX_FILE_CHUNK_BYTES + 1 }), /length/);
+  await assert.rejects(api.readFile(target, { offset: -1 }), /offset/);
+  await assert.rejects(api.readFile(target, { extra: true } as never), /extra/);
+  await assert.rejects(api.writeFile(target, new Uint8Array(MAX_WRITE_BYTES + 1)), /at most/);
+  await assert.rejects(api.writeFile(target, "text" as never), /Uint8Array|instance/i);
+  await assert.rejects(api.glob("", dir), /pattern|too_small|>=1|at least/i);
+  assert.equal(await readFile(target, "utf8"), "replaced");
+  api[Symbol.dispose]();
+  await assert.rejects(api.stat(dir), /closed/);
+  await assert.rejects(api.exec(new RecordingSink(), "true"), /closed/);
 });
 
 test("reports signal numbers from the executing operating system", { skip: windows }, async (t) => {

@@ -5,6 +5,7 @@ import { PtyRegistry, ShellApi, type ShellInfo } from "../shell.js";
 import { openConsole, type PeerController } from "../console.js";
 import { errorMessage } from "../errors.js";
 import type { PeerConfig } from "../options.js";
+import { RefusingShell } from "../refusing-shell.js";
 import { plain, type RemoteNamedPty } from "../terminal.js";
 import { serveControl } from "./daemon.js";
 import { runOneShot } from "./one-shot.js";
@@ -24,7 +25,7 @@ interface Session {
   id: string;
   address: string;
   socket: WebSocket | ServerWebSocket<SocketData>;
-  local: ShellApi;
+  local: ShellApi | RefusingShell;
   remote: RpcStub<ShellApi>;
   timer: ReturnType<typeof setTimeout>;
   info?: ShellInfo;
@@ -56,6 +57,8 @@ export async function startPeer(config: PeerConfig): Promise<void> {
   const oneShot = config.role !== "listen" && config.role !== "connect";
   const cancelled = new AbortController();
   const announce = (message: string) => { if (!oneShot) console.log(message); };
+  // What this process offers each peer: its shell, or with --one-way only the handshake.
+  const offer = () => config.oneWay ? new RefusingShell() : new ShellApi(ptys);
 
   function describe(session: Session): string {
     const endpoint = session.info ? `${session.info.hostname} (${session.address})` : session.address;
@@ -140,6 +143,11 @@ export async function startPeer(config: PeerConfig): Promise<void> {
     async ptySession(id, name) {
       return await requireSession(id).remote.ptySession(name) as unknown as RemoteNamedPty;
     },
+    async shell(id) {
+      const shell = await forkShell(requireSession(id).remote);
+      if (!shell) throw new Error(`Peer ${id} runs a cns without fork; update it to use its shell this way.`);
+      return shell;
+    },
   };
 
   function disconnected(session: Session, code = oneShot || !session.info ? 1 : 0) {
@@ -148,7 +156,7 @@ export async function startPeer(config: PeerConfig): Promise<void> {
     if (config.mode === "connect") void stop(code);
   }
 
-  function register(socket: Session["socket"], local: ShellApi, remote: RpcStub<ShellApi>, address: string): Session {
+  function register(socket: Session["socket"], local: Session["local"], remote: RpcStub<ShellApi>, address: string): Session {
     const id = `p${nextId++}`;
     const session: Session = { id, address, socket, local, remote, timer: setTimeout(() => {
       if (!sessions.has(id)) return;
@@ -181,9 +189,11 @@ export async function startPeer(config: PeerConfig): Promise<void> {
 
   try {
     // Machine-readable run output must contain only the remote command's streams.
-    announce(config.remote
-      ? "WARNING: unauthenticated remote shell access. Trusted LAN/VPN only; both peers can execute commands as your user."
-      : "No authentication. Local shell access only.");
+    announce(config.oneWay
+      ? `No authentication. One-way: peers cannot run commands or read files here${config.remote ? "; anyone who can reach this listener can connect" : ""}.`
+      : config.remote
+        ? "WARNING: unauthenticated remote shell access. Trusted LAN/VPN only; both peers can execute commands as your user."
+        : "No authentication. Local shell access only.");
     if (config.mode === "listen") {
       listener = serve<SocketData>({
         hostname: config.bind, port: config.port,
@@ -201,7 +211,7 @@ export async function startPeer(config: PeerConfig): Promise<void> {
           idleTimeout: 0, maxPayloadLength: 8 * 1024 * 1024,
           open(ws) {
             if (stopping) { ws.close(); return; }
-            const local = new ShellApi(ptys);
+            const local = offer();
             const { stub, transport } = newBunWebSocketRpcSession<ShellApi, SocketData>(ws, local);
             ws.data.transport = transport;
             ws.data.session = register(ws, local, stub, ws.data.address);
@@ -214,7 +224,8 @@ export async function startPeer(config: PeerConfig): Promise<void> {
         },
       });
       if (daemonChild) {
-        controlCleanup = await serveControl(controller, () => { void stop(); }, config.state);
+        controlCleanup = await serveControl(controller, () => { void stop(); }, config.state,
+          { url: config.url, bind: config.bind, port: config.port, remote: config.remote, oneWay: config.oneWay });
         if (stopping) { await controlCleanup(); return; }
         process.send?.({ ready: true });
         if (process.connected) process.disconnect?.();
@@ -224,7 +235,7 @@ export async function startPeer(config: PeerConfig): Promise<void> {
       announce(`${label} listening at ${config.url}.`);
     } else {
       const socket = new WebSocket(config.url);
-      const local = new ShellApi(ptys);
+      const local = offer();
       const remote = newWebSocketRpcSession<ShellApi>(socket, local);
       const session = register(socket, local, remote, new URL(config.url).host);
       socket.addEventListener("error", () => {

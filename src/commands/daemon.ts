@@ -9,8 +9,26 @@ import { z } from "zod";
 import { openConsole, type PeerController } from "../console.js";
 import type { PeerConfig } from "../options.js";
 import { selfInvocation } from "../runtime.js";
-import type { PtyOptions, PtySessionOptions, PtySink, RunOptions } from "../shell.js";
+import type { PtyOptions, PtySessionOptions, PtySink, RunOptions, ShellApi } from "../shell.js";
 import { plain, type RemoteNamedPty } from "../terminal.js";
+
+/** The listener a daemon runs, as `status()` reports it. */
+export interface ListenerInfo {
+  url: string;
+  bind: string;
+  port: number;
+  /** The listener accepts connections from other machines. */
+  remote: boolean;
+  /** Peers cannot use this machine's shell or files. */
+  oneWay: boolean;
+}
+export interface DaemonStatus extends ListenerInfo {
+  pid: number;
+  /** Milliseconds since the epoch when the control endpoint started. */
+  startedAt: number;
+  /** Connected peers that completed their handshake. */
+  peers: number;
+}
 
 const stateSchema = z.strictObject({
   version: z.literal(1),
@@ -41,15 +59,56 @@ async function removeOwnedState(file: string, token: string): Promise<void> {
   }
 }
 
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM: it exists but belongs to someone else.
+    return !(error instanceof Error && "code" in error && error.code === "ESRCH");
+  }
+}
+
+/**
+ * Remove the state file of a daemon that crashed: its control endpoint does not
+ * answer and its process no longer exists. A daemon writes its state only once it
+ * answers, so one that is starting is never mistaken for a crashed one; a file
+ * that cannot be parsed yet may be one being written, and is left alone.
+ * Returns whether the file was removed.
+ */
+export async function removeStaleState(statePath?: string): Promise<boolean> {
+  const file = daemonStatePath(statePath);
+  let state: DaemonState;
+  try { state = await readState(file); }
+  catch { return false; }
+  try {
+    (await connectToState(state)).close();
+    return false;
+  } catch {
+    if (processExists(state.pid)) return false;
+  }
+  await removeOwnedState(file, state.token);
+  return true;
+}
+
 /** Only this narrow local control surface is exported over Cap'n Web. */
 class ControlApi extends RpcTarget {
   #controller: PeerController;
   #stop: () => void;
+  #listener: ListenerInfo | undefined;
+  #startedAt: number;
   #closed = new AbortController();
-  constructor(controller: PeerController, stop: () => void) {
+  constructor(controller: PeerController, stop: () => void, listener: ListenerInfo | undefined, startedAt: number) {
     super();
     this.#controller = controller;
     this.#stop = stop;
+    this.#listener = listener;
+    this.#startedAt = startedAt;
+  }
+  /** The daemon's listener and how many peers it has, for clients that found its state file. */
+  async status(): Promise<DaemonStatus> {
+    const peers = (await this.#controller.peers()).length;
+    return { ...(this.#listener ?? { url: "", bind: "", port: 0, remote: false, oneWay: false }), pid: process.pid, startedAt: this.#startedAt, peers };
   }
   peers() { return this.#controller.peers(); }
   info(id: string) { return this.#controller.info(id); }
@@ -65,6 +124,8 @@ class ControlApi extends RpcTarget {
   startPtySession(id: string, name: string, options: PtySessionOptions = {}) { return this.#controller.startPtySession(id, name, options); }
   /** The peer's session handle is proxied by reference. */
   ptySession(id: string, name: string) { return this.#controller.ptySession(id, name); }
+  /** A fork of the peer's whole shell, proxied by reference; releasing it kills its commands. */
+  shell(id: string) { return this.#controller.shell(id); }
   stop() {
     // Let Cap'n Web send the successful result before closing the transport.
     setTimeout(this.#stop, 25);
@@ -73,8 +134,9 @@ class ControlApi extends RpcTarget {
   [Symbol.dispose]() { this.#closed.abort(new Error("The control connection closed.")); }
 }
 
-export async function serveControl(controller: PeerController, stop: () => void, statePath?: string): Promise<() => Promise<void>> {
+export async function serveControl(controller: PeerController, stop: () => void, statePath?: string, listener?: ListenerInfo): Promise<() => Promise<void>> {
   const token = process.env.CNS_DAEMON_TOKEN ?? randomBytes(32).toString("hex");
+  const startedAt = Date.now();
   delete process.env.CNS_DAEMON_TOKEN;
   const file = daemonStatePath(statePath);
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -94,7 +156,7 @@ export async function serveControl(controller: PeerController, stop: () => void,
       idleTimeout: 0,
       maxPayloadLength: 8 * 1024 * 1024,
       open(ws) {
-        ws.data.transport = newBunWebSocketRpcSession(ws, new ControlApi(controller, stop)).transport;
+        ws.data.transport = newBunWebSocketRpcSession(ws, new ControlApi(controller, stop, listener, startedAt)).transport;
       },
       message(ws, message) { ws.data.transport?.dispatchMessage(message); },
       close(ws, code, reason) { ws.data.transport?.dispatchClose(code, reason); },
@@ -114,12 +176,28 @@ export async function serveControl(controller: PeerController, stop: () => void,
   };
 }
 
-export async function startDaemon(config: PeerConfig): Promise<void> {
+/** What `startDaemon` needs of a listen configuration. */
+export type DaemonConfig = Pick<PeerConfig, "bind" | "port" | "url" | "remote" | "state"> & Partial<Pick<PeerConfig, "oneWay">>;
+export interface StartDaemonOptions {
+  /** The executable and arguments that run `cns`; by default, this program. Embedders pass the cns executable. */
+  invocation?: (args: string[]) => { file: string; args: string[] };
+}
+export interface StartedDaemon {
+  url: string;
+  pid: number;
+  /** The private state file, which `attach`, `stop` and embedders use to find the daemon. */
+  state: string;
+  log: string;
+}
+
+/** Start a detached listener and return once it is ready. The state file arbitrates concurrent starts. */
+export async function startDaemon(config: DaemonConfig, options: StartDaemonOptions = {}): Promise<StartedDaemon> {
   const file = daemonStatePath(config.state);
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+  await removeStaleState(file);
   try {
     await lstat(file);
-    throw new Error(`Daemon state already exists at ${file}. Use cns attach or cns stop with this --state path. If the daemon crashed, remove its stale state file first.`);
+    throw new Error(`Daemon state already exists at ${file}. Use cns attach or cns stop with this --state path. If its process is gone but the file remains, remove the file.`);
   } catch (error) {
     if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
   }
@@ -128,7 +206,8 @@ export async function startDaemon(config: PeerConfig): Promise<void> {
   const log = await open(logPath, "wx", 0o600);
   const args = ["listen", "--no-repl", "--state", file, "--bind", config.bind, "--port", String(config.port)];
   if (config.remote) args.push("--allow-remote");
-  const invocation = selfInvocation(args);
+  if (config.oneWay) args.push("--one-way");
+  const invocation = (options.invocation ?? selfInvocation)(args);
   const child = spawn(invocation.file, invocation.args, {
     detached: true,
     windowsHide: true,
@@ -159,7 +238,7 @@ export async function startDaemon(config: PeerConfig): Promise<void> {
     if (state.token !== token || state.pid !== child.pid) throw new Error("Daemon startup state does not match the child process.");
     if (child.connected) child.disconnect();
     child.unref();
-    console.log(`Daemon listening at ${config.url}. State: ${file}\nLog: ${logPath}`);
+    return { url: config.url, pid: child.pid!, state: file, log: logPath };
   } catch (error) {
     if (child.pid && child.exitCode === null && child.signalCode === null) {
       await new Promise<void>((resolve) => {
@@ -178,7 +257,13 @@ export async function connectControl(statePath?: string) {
   return connectToState(await readState(daemonStatePath(statePath)));
 }
 
-async function connectToState(state: DaemonState): Promise<{ controller: PeerController; remote: RpcStub<ControlApi>; close(): void }> {
+export interface ControlConnection {
+  controller: PeerController;
+  remote: RpcStub<ControlApi>;
+  close(): void;
+}
+
+async function connectToState(state: DaemonState): Promise<ControlConnection> {
   const socket = new WebSocket(`ws://127.0.0.1:${state.port}`, { headers: { Authorization: `Bearer ${state.token}` } });
   try {
     await new Promise<void>((resolve, reject) => {
@@ -209,6 +294,7 @@ async function connectToState(state: DaemonState): Promise<{ controller: PeerCon
       ptySessions: (id) => plain(remote.ptySessions(id)),
       startPtySession: (id, name, options) => plain(remote.startPtySession(id, name, options)),
       ptySession: async (id, name) => await remote.ptySession(id, name) as unknown as RemoteNamedPty,
+      shell: async (id) => await remote.shell(id) as unknown as RpcStub<ShellApi>,
     },
     close() {
       remote[Symbol.dispose]();

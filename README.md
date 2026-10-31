@@ -33,6 +33,7 @@ Use an address reachable from the other machine. This does not configure routing
 | `listen --daemon` | Start a background listener. |
 | `connect <url>` | Open a bidirectional connection and interactive console. |
 | `connect <url> --no-repl` | Connect and expose local execution without a console. |
+| `listen --one-way`, `connect <url> --one-way` | Use peers' shells without offering this machine's shell or files to them. |
 | `run [url] -- '<command>'` | Execute one shell command and exit with its status. |
 | `tty [url] [-- '<command>']` | Open an interactive terminal (PTY) running a login shell or one command. |
 | `tty [url] --name NAME [-- '<command>']` | Start a named PTY session in the background. |
@@ -205,7 +206,25 @@ Releasing a handle leaves its session running, and ends its pending `wait` calls
 
 The caller passes `sink`, an `RpcTarget` with `output(bytes)` and `exit(result)`, by reference. The executor waits for each `output` acknowledgement before sending more, coalescing reads into messages of up to 64 KiB. Bun cannot pause PTY reads, so a caller that falls more than 8 MiB behind is hung up with an error. Each connection allows four unnamed PTY sessions until they are released. The daemon proxies all of these stubs between `attach` and its peers.
 
-`ShellApi.fork()` returns another `ShellApi` on the same peer, with its own limit of four commands and the same named sessions. Releasing the fork kills its commands, so a caller can cancel a `run` without closing its connection. Each shell has up to 32 unreleased forks; closing a shell closes them. Daemon control's `runWhileConnected(id, command, options)` uses a fork so the command ends with the control connection, as `cns mcp` needs. Its `run` leaves commands running after an attached console detaches. Peers running a `cns` without `fork` fall back to `run`.
+### Streaming commands and files
+
+`ShellApi.exec(sink, command, options)` runs a command as `run` does, with the same options and limits, but streams its output to `sink.output(stream, bytes)` (`stream` is `"stdout"` or `"stderr"`) in chunks of up to 64 KiB, without an output cap. It waits for each acknowledgement before reading more, so a slow caller slows the command instead of growing the peer's memory; a sink that throws kills the command. It resolves with `exitCode`, `signal`, `signalNumber`, `timedOut` and `elapsedMs`.
+
+File methods take absolute paths on the executing peer and reject with its system errors, such as `ENOENT`:
+
+| Method | Result |
+| --- | --- |
+| `stat(path)` | `kind` (`file`, `directory`, `symlink` for a dangling link, or `other`), `symlink`, `size`, `mtimeMs`, `mode`; links are followed. |
+| `access(path, { write })` | Resolves if the path is readable, and writable with `write: true`. |
+| `readdir(path)` | Up to 10,000 entries, each `{ name, kind }`; links are not followed. |
+| `mkdir(path)` | Creates the directory and missing parents. |
+| `glob(pattern, cwd, { ignore, limit })` | Absolute paths of files under `cwd` matching a glob, hidden files included, links not followed; up to 10,000. |
+| `readFile(path, { offset, length })` | `{ data, size, eof }`: up to 1 MiB from `offset`; read larger files in several calls. |
+| `writeFile(path, data)` | Replaces a file with up to 4 MiB through a temporary sibling, so a failure never leaves a partial file. An existing file keeps its permission bits; parent directories are not created. |
+
+`ShellApi.fork()` returns another `ShellApi` on the same peer, with its own limit of four commands and the same named sessions. Releasing the fork kills its commands, so a caller can cancel a `run` without closing its connection. Each shell has up to 32 unreleased forks; closing a shell closes them. Daemon control's `runWhileConnected(id, command, options)` uses a fork so the command ends with the control connection, as `cns mcp` needs. Its `run` leaves commands running after an attached console detaches. Peers running a `cns` without `fork` fall back to `run`. Daemon control's `shell(id)` returns a fork of a connected peer's whole `ShellApi`, proxied by the daemon, and `status()` reports the daemon's listener (`url`, `bind`, `port`, `remote`, `oneWay`), `pid`, `startedAt` and its number of peers.
+
+A peer started with `--one-way` offers its peers only the handshake's `info()`; every other method is refused. `cns mcp` does the same.
 
 On Windows peers, programs run on a ConPTY in Windows PowerShell, with the same quoting as `run`. **This path is untested.** It compiles, and `src/shell.test.ts` has a Windows-only PTY test, but it has not been run on Windows yet. The manually triggered `Windows` GitHub Actions workflow (`.github/workflows/windows.yml`) runs both test suites on `windows-latest`, including Windows versions of the named-session tests. Expected differences, from [Bun's ConPTY notes](https://bun.com/docs/runtime/child-process#platform-differences):
 
@@ -223,7 +242,7 @@ cns attach
 cns stop
 ```
 
-The daemon is a detached process, not an installed OS service; it does not restart automatically. Its private local state defaults to `~/.cns/daemon.json`. To run separate daemons, use different ports and pass the same custom `--state PATH` to `listen --daemon`, `attach` and `stop`. Startup prints the log location.
+The daemon is a detached process, not an installed OS service; it does not restart automatically. Its private local state defaults to `~/.cns/daemon.json`. To run separate daemons, use different ports and pass the same custom `--state PATH` to `listen --daemon`, `attach` and `stop`. Startup prints the log location. The state file allows one daemon per path: a second `listen --daemon` fails while the first runs. If a daemon crashed, the next `listen --daemon` removes its state once the control endpoint does not answer and its process no longer exists.
 
 Detaching with `:quit` or Ctrl+C leaves the daemon, peer connections and pending commands running. `stop` shuts down the daemon and cleans up its sessions. A foreground listener stops when its console exits or it receives a termination signal. It does not create daemon state.
 
@@ -309,7 +328,7 @@ The default package/app is also available as `cns` (and the legacy flake attribu
 
 ## Security
 
-Peer connections provide **unauthenticated arbitrary command execution in both directions** as the running users. Use only trusted loopback, LAN or private VPN connections, never elevated or exposed to the public internet. Binding outside loopback requires `--allow-remote`. Browser-origin WebSocket requests are rejected; this is not authentication. Built-in listeners use `ws://`; clients can also connect to externally provided `wss://` endpoints.
+Peer connections provide **unauthenticated arbitrary command execution in both directions** as the running users, unless a peer uses `--one-way`: then the other peers cannot run commands or read files on its machine, though anyone who can reach a one-way listener can still connect to it, and it can run commands on them. Use only trusted loopback, LAN or private VPN connections, never elevated or exposed to the public internet. Binding outside loopback requires `--allow-remote`. Browser-origin WebSocket requests are rejected; this is not authentication. Built-in listeners use `ws://`; clients can also connect to externally provided `wss://` endpoints.
 
 Daemon control uses authenticated Cap’n Web RPC on a separate loopback endpoint, with its token in private local state. Keep the state directory private. Peer selection prevents accidental routing; it is not an authorization boundary or sandbox.
 
@@ -323,4 +342,4 @@ bun test --timeout 30000 ./src
 bun run test:compiled
 ```
 
-Tests exercise multiple bidirectional peers, target selection, disconnect isolation, reverse calls during one-shot commands and PTY sessions, output/exit-status handling, PTY input, sizing, hang-up, timeouts and flow control, rendered screens and scrollback, named sessions across connections and CLI calls (keys, waits, attach redraws, detach, kill and limits), PTY proxying through the daemon, process cleanup, connection limits, daemon attachment and startup races. MCP tests drive `cns mcp` with the official SDK client over stdio and HTTP, in both protocol eras: every tool, tool errors, cancellation and disconnects killing commands and freeing screen waits, 2025-era session limits, HTTP authentication, origin and host checks, calls beyond Bun's idle timeout with progress, daemon peer selection and the refusal of reverse calls. The compiled suite additionally tests the executable outside its checkout without a JavaScript runtime on `PATH`.
+Tests exercise multiple bidirectional peers, target selection, disconnect isolation, reverse calls during one-shot commands and PTY sessions, output/exit-status handling, PTY input, sizing, hang-up, timeouts and flow control, rendered screens and scrollback, named sessions across connections and CLI calls (keys, waits, attach redraws, detach, kill and limits), PTY proxying through the daemon, streaming commands with flow control and cancellation (also through the daemon), file operations and their validation, one-way peers refusing every reverse call, process cleanup, connection limits, daemon attachment, startup races and stale-state recovery. MCP tests drive `cns mcp` with the official SDK client over stdio and HTTP, in both protocol eras: every tool, tool errors, cancellation and disconnects killing commands and freeing screen waits, 2025-era session limits, HTTP authentication, origin and host checks, calls beyond Bun's idle timeout with progress, daemon peer selection and the refusal of reverse calls. The compiled suite additionally tests the executable outside its checkout without a JavaScript runtime on `PATH`.

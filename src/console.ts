@@ -1,8 +1,9 @@
 import readline from "node:readline";
+import type { RpcStub } from "capnweb";
 import { formatSessions } from "./commands/one-shot.js";
 import { errorMessage } from "./errors.js";
 import {
-  MAX_TIMEOUT_MS, type PtyOptions, type PtySessionInfo, type PtySessionOptions, type PtySink, type RunOptions, type RunResult, type ShellInfo,
+  MAX_TIMEOUT_MS, type PtyOptions, type PtySessionInfo, type PtySessionOptions, type PtySink, type RunOptions, type RunResult, type ShellApi, type ShellInfo,
 } from "./shell.js";
 import { attachSession, attachTerminal, type RemoteNamedPty, type RemotePty } from "./terminal.js";
 
@@ -16,6 +17,12 @@ export interface PeerController {
   ptySessions(id: string): Promise<PtySessionInfo[]>;
   startPtySession(id: string, name: string, options: PtySessionOptions): Promise<PtySessionInfo>;
   ptySession(id: string, name: string): Promise<RemoteNamedPty>;
+  /**
+   * A fork of the peer's shell with its own command limit, for callers that use the
+   * whole ShellApi: commands, files and sessions. Releasing it kills its commands.
+   * Rejects when the peer's cns predates ShellApi.fork.
+   */
+  shell(id: string): Promise<RpcStub<ShellApi>>;
 }
 
 const help = `
