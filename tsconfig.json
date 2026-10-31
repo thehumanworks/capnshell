@@ -21,7 +21,8 @@
   },
   "include": [
     "src/**/*.ts",
-    "pi/**/*.ts"
+    "pi/**/*.ts",
+    "scripts/**/*.ts"
   ],
   "exclude": [
     "node_modules",

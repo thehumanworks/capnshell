@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { newBunWebSocketRpcSession, newMessagePortRpcSession, newWebSocketRpcSession, RpcTarget, type BunWebSocketTransport, type RpcStub } from "capnweb";
-import { forkShell } from "./commands/peer.js";
+import { forkShell } from "./connect.js";
 import { RefusingShell } from "./refusing-shell.js";
 import { localShellInfo, ShellApi, type RunResult } from "./shell.js";
 

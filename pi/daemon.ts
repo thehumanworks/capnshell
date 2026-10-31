@@ -1,10 +1,9 @@
-import { existsSync } from "node:fs";
 import { isIP } from "node:net";
-import { fileURLToPath } from "node:url";
 import { connectControl, daemonStatePath, startDaemon, type ControlConnection, type DaemonStatus } from "../src/commands/daemon.js";
 import { errorMessage } from "../src/errors.js";
 import { endpointUrl, isLoopback } from "../src/options.js";
 import { plain } from "../src/terminal.js";
+import type { Invocation } from "./program.js";
 import { DEFAULT_PORT } from "./target.js";
 
 /** Where `/cns listen` listens: CNS_BIND and CNS_PORT, else every interface on the default port. */
@@ -24,21 +23,15 @@ export function listenSettings(env: NodeJS.ProcessEnv = process.env, state?: str
   return { bind, port, state };
 }
 
-export type Invocation = (args: string[]) => { file: string; args: string[] };
-
 /**
- * How to run cns for the daemon, which outlives Pi: --cns-bin or CNS_BIN, else
- * `cns` on PATH, else this checkout's source with Bun. Never Pi's own executable.
+ * CNS_LISTEN: whether Pi listens from the start, as with --cns-listen. 1, true,
+ * yes or on starts listening; 0, false, no, off or nothing does not.
  */
-export function cnsInvocation(explicit?: string, env: NodeJS.ProcessEnv = process.env): Invocation {
-  const configured = explicit?.trim() || env.CNS_BIN?.trim();
-  if (configured) return (args) => ({ file: configured, args });
-  const installed = Bun.which("cns", { PATH: env.PATH ?? "" });
-  if (installed) return (args) => ({ file: installed, args });
-  const source = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
-  const bun = Bun.which("bun", { PATH: env.PATH ?? "" });
-  if (bun && existsSync(source)) return (args) => ({ file: bun, args: [source, ...args] });
-  throw new Error("Cannot find cns to start its daemon. Put cns on PATH, set CNS_BIN, or start Pi with --cns-bin PATH.");
+export function listenAtStartup(env: NodeJS.ProcessEnv = process.env): boolean {
+  const value = env.CNS_LISTEN?.trim().toLowerCase() ?? "";
+  if (["1", "true", "yes", "on"].includes(value)) return true;
+  if (["", "0", "false", "no", "off"].includes(value)) return false;
+  throw new Error(`CNS_LISTEN must be 1 to listen when Pi starts, or 0 not to, not ${env.CNS_LISTEN}.`);
 }
 
 export interface Listener {
@@ -56,7 +49,7 @@ async function daemonStatus(control: ControlConnection): Promise<DaemonStatus> {
   } catch (error) {
     control.close();
     if (/is not a function/.test(errorMessage(error))) {
-      throw new Error("The running cns daemon is too old for Pi. Stop it with cns stop, then run /cns listen again.");
+      throw new Error("The running cns daemon is too old for Pi. Stop it with /cns stop, then run /cns listen again.");
     }
     throw error;
   }

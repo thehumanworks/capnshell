@@ -7,7 +7,8 @@ import { errorMessage } from "../errors.js";
 import type { PeerConfig } from "../options.js";
 import { RefusingShell } from "../refusing-shell.js";
 import { plain, type RemoteNamedPty } from "../terminal.js";
-import { serveControl } from "./daemon.js";
+import { forkShell } from "../connect.js";
+import { serveControl } from "./daemon-server.js";
 import { runOneShot } from "./one-shot.js";
 
 export { commandExitCode } from "./one-shot.js";
@@ -29,16 +30,6 @@ interface Session {
   remote: RpcStub<ShellApi>;
   timer: ReturnType<typeof setTimeout>;
   info?: ShellInfo;
-}
-
-/** A fork of a peer's shell, or undefined when the peer's cns predates ShellApi.fork. */
-export async function forkShell(remote: RpcStub<ShellApi>): Promise<RpcStub<ShellApi> | undefined> {
-  try {
-    return await remote.fork() as RpcStub<ShellApi>;
-  } catch (error) {
-    if (error instanceof TypeError && error.message === "'fork' is not a function.") return undefined;
-    throw error;
-  }
 }
 
 export async function startPeer(config: PeerConfig): Promise<void> {

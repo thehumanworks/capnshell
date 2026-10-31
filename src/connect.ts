@@ -1,3 +1,6 @@
+import type { RpcStub } from "capnweb";
+import type { ShellApi } from "./shell.js";
+
 /** Wait this long for a listener to accept the socket. */
 export const CONNECT_MS = 10_000;
 
@@ -21,7 +24,7 @@ export function openSocket(url: string, signal: AbortSignal): Promise<WebSocket>
     }
     function fail(error: unknown) {
       cleanup();
-      socket.terminate();
+      terminateSocket(socket);
       reject(error);
     }
     socket.addEventListener("open", onOpen);
@@ -30,10 +33,26 @@ export function openSocket(url: string, signal: AbortSignal): Promise<WebSocket>
   });
 }
 
+/** Drop a socket at once. Node's WebSocket, which Pi may run on, has no terminate(). */
+export function terminateSocket(socket: WebSocket) {
+  if (typeof socket.terminate === "function") socket.terminate();
+  else socket.close();
+}
+
 /** Close a socket politely, then forcibly if the peer does not answer. */
 export function closeSocket(socket: WebSocket, reason = "Connection ended") {
   socket.close(1000, reason);
-  const timer = setTimeout(() => socket.terminate(), 750);
+  const timer = setTimeout(() => terminateSocket(socket), 750);
   timer.unref();
   socket.addEventListener("close", () => clearTimeout(timer), { once: true });
+}
+
+/** A fork of a peer's shell, or undefined when the peer's cns predates ShellApi.fork. */
+export async function forkShell(remote: RpcStub<ShellApi>): Promise<RpcStub<ShellApi> | undefined> {
+  try {
+    return await remote.fork() as RpcStub<ShellApi>;
+  } catch (error) {
+    if (error instanceof TypeError && error.message === "'fork' is not a function.") return undefined;
+    throw error;
+  }
 }

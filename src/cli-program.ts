@@ -34,6 +34,7 @@ export function createCli(): Command {
     .action(async (options: { state?: string }) => {
       const { stopDaemon } = await import("./commands/daemon.js");
       await stopDaemon(options.state);
+      console.log("Daemon stopped.");
     });
   return program;
 }

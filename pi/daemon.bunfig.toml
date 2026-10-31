@@ -1,0 +1,2 @@
+# Deliberately empty. The Pi extension runs cns with `bun --config=` this file so that
+# Bun does not read a bunfig.toml, and run its preloads, from the directory Pi runs in.

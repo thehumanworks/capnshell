@@ -10,7 +10,8 @@ import { RpcTarget } from "capnweb";
 import { ShellApi, type ExecSink, type PtyExit } from "../shell.js";
 import { launchCli as launch } from "../test-support.js";
 import { plain } from "../terminal.js";
-import { connectControl, removeStaleState, serveControl } from "./daemon.js";
+import { connectControl, removeStaleState } from "./daemon.js";
+import { serveControl } from "./daemon-server.js";
 
 async function temporaryState(t: TestContext): Promise<string> {
   const directory = await mkdtemp(path.join(os.tmpdir(), "cns-daemon-"));
