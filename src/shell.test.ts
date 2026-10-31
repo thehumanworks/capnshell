@@ -3,13 +3,28 @@ import { mkdtemp, realpath, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
-import { MAX_OUTPUT_BYTES, MAX_PTY_BACKLOG_BYTES, MAX_PTY_INPUT_BYTES, MAX_SCREEN_HISTORY, MAX_TIMEOUT_MS, ShellApi, type PtyExit } from "./shell.js";
+import { Terminal as Screen } from "@xterm/headless";
+import {
+  MAX_NAMED_PTYS, MAX_OUTPUT_BYTES, MAX_PTY_BACKLOG_BYTES, MAX_PTY_INPUT_BYTES, MAX_SCREEN_HISTORY, MAX_TIMEOUT_MS, PtyRegistry, ShellApi, type PtyExit,
+} from "./shell.js";
 
 const windows = process.platform === "win32";
 function apiFor(t: TestContext) {
   const api = new ShellApi();
   t.after(() => api[Symbol.dispose]());
   return api;
+}
+
+/** Named sessions belong to the registry, which outlives each connection's ShellApi. */
+function registryFor(t: TestContext) {
+  const registry = new PtyRegistry();
+  t.after(() => registry[Symbol.dispose]());
+  const connect = () => {
+    const api = new ShellApi(registry);
+    t.after(() => api[Symbol.dispose]());
+    return api;
+  };
+  return { registry, connect };
 }
 
 test("reports the native runtime and shell", (t) => {
@@ -131,9 +146,12 @@ function ptySink(stall = false) {
   let changed = () => {};
   let finish!: (result: PtyExit) => void;
   const exited = new Promise<PtyExit>((resolve) => { finish = resolve; });
+  let detach!: (reason: string) => void;
+  const detached = new Promise<string>((resolve) => { detach = resolve; });
   const decoder = new TextDecoder();
   return {
     exited,
+    detached,
     get output() { return output; },
     get chunks() { return chunks; },
     sink: {
@@ -144,6 +162,7 @@ function ptySink(stall = false) {
         changed();
       },
       exit(result: PtyExit) { finish(result); },
+      detached(reason: string) { detach(reason); },
     },
     waitFor(needle: string) {
       return new Promise<void>((resolve, reject) => {
@@ -205,7 +224,7 @@ test("PTY sessions validate input and are killed with their shell API", { skip: 
   assert.throws(() => api.openPty(collected.sink, { command: " " }), /Command/);
   assert.throws(() => api.openPty(collected.sink, { cwd: "relative" }), /absolute/);
   assert.throws(() => api.openPty(null as never), /sink/);
-  assert.throws(() => api.openPty(collected.sink, { cwd: path.join(os.tmpdir(), "capnweb-no-such-directory", "absent") }), /ENOENT/);
+  assert.throws(() => api.openPty(collected.sink, { cwd: path.join(os.tmpdir(), "capnweb-no-such-directory", "absent") }), /cwd does not exist/);
   const pty = api.openPty(collected.sink, { command: "printf 'READY\\n'; sleep 10" });
   await collected.waitFor("READY");
   assert.throws(() => pty.write("x".repeat(MAX_PTY_INPUT_BYTES + 1)), /at most/);
@@ -293,6 +312,154 @@ test("released PTY sessions free their slot; unreleased ones keep it", { skip: w
   const collected = ptySink();
   api.openPty(collected.sink, { command: "true" });
   await collected.exited;
+});
+
+test("named PTY sessions outlive the connection that started them and are found by name", { skip: windows }, async (t) => {
+  const { connect } = registryFor(t);
+  const first = connect();
+  const started = first.startPtySession("work", {
+    cols: 40, rows: 5, command: "printf 'ready\\n'; while IFS= read -r line; do printf 'got:%s\\n' \"$line\"; done",
+  });
+  assert.equal((await started.wait({ text: "ready", timeoutMs: 10000 })).matched, true);
+  // Closing the connection that started it leaves a named session running.
+  first[Symbol.dispose]();
+  const second = connect();
+  const work = second.ptySession("work");
+  work.keys(["héllo world", "Enter"]);
+  const waited = await work.wait({ text: "got:héllo world", timeoutMs: 10000 });
+  assert.deepEqual([waited.matched, waited.running], [true, true]);
+  assert.match(waited.screen.text, /^ready\n/);
+  const [info] = second.ptySessions();
+  assert.deepEqual([info?.name, info?.running, info?.exit, info?.viewers, info?.cols, info?.rows], ["work", true, null, 0, 40, 5]);
+  assert.match(info!.command!, /^printf 'ready/);
+  assert.throws(() => second.startPtySession("work", { command: "true" }), /already exists/);
+  assert.throws(() => second.ptySession("missing"), /No PTY session named missing/);
+  assert.throws(() => second.ptySession("bad name"), /Session names/);
+  assert.throws(() => second.startPtySession("-x", { command: "true" }), /Session names/);
+  assert.throws(() => second.startPtySession("nowhere", { command: "true", cwd: "/nonexistent/cns" }), /cwd does not exist on the executing peer/);
+  assert.equal(second.ptySessions().length, 1, "a session that failed to start is not registered");
+
+  const exit = await work.kill();
+  assert.equal(exit.signal, "SIGHUP");
+  assert.deepEqual(second.ptySessions(), []);
+  // A handle never reaches a later session that reuses its name.
+  second.startPtySession("work", { command: "sleep 60" });
+  await assert.rejects(work.capture(), /no longer exists/);
+  assert.throws(() => work.keys(["x"]), /no longer exists/);
+  assert.equal(second.ptySession("work").info().command, "sleep 60");
+});
+
+test("attaching redraws the current screen, then streams; detaching leaves the program running", { skip: windows }, async (t) => {
+  const { connect } = registryFor(t);
+  const api = connect();
+  const session = api.startPtySession("view", {
+    cols: 30, rows: 5, command: "printf '\\033[?1049h\\033[2J\\033[1;1Htop line\\033[3;5Hdrawn'; while IFS= read -r line; do printf '<%s>' \"$line\"; done",
+  });
+  await session.wait({ text: "drawn", timeoutMs: 10000 });
+  const first = ptySink();
+  const attachment = session.attach(first.sink, { cols: 30, rows: 5 });
+  await first.waitFor("drawn");
+  // Drawing the redraw on a fresh terminal reproduces the session's screen.
+  const fresh = new Screen({ cols: 30, rows: 5, allowProposedApi: true });
+  await new Promise<void>((resolve) => fresh.write(first.output, resolve));
+  const lines = Array.from({ length: 5 }, (_, y) => fresh.buffer.active.getLine(y)!.translateToString(true).trimEnd());
+  assert.equal(lines.join("\n"), (await session.capture()).text);
+  assert.equal(fresh.buffer.active.type, "alternate");
+  fresh.dispose();
+
+  session.keys(["live", "Enter"]);
+  await first.waitFor("<live>");
+  const second = ptySink();
+  const other = session.attach(second.sink);
+  await second.waitFor("<live>");
+  assert.equal(session.info().viewers, 2);
+  attachment.detach();
+  session.keys(["more", "Enter"]);
+  await second.waitFor("<more>");
+  assert.ok(!first.output.includes("<more>"), "a detached viewer receives nothing further");
+  other[Symbol.dispose]();
+  assert.deepEqual([session.info().viewers, session.info().running], [0, true]);
+  // Attaching with a size resizes the session for every viewer, as in tmux.
+  session.attach(ptySink().sink, { cols: 50, rows: 7 })[Symbol.dispose]();
+  assert.deepEqual([session.info().cols, session.info().rows], [50, 7]);
+});
+
+test("finished named sessions keep their screen; late viewers get the redraw and exit", { skip: windows }, async (t) => {
+  const api = registryFor(t).connect();
+  const session = api.startPtySession("done", { command: "printf 'final words'; exit 3" });
+  // Without a deadline, waiting ends when the program does.
+  const waited = await session.wait({ text: "never shown" });
+  assert.deepEqual([waited.matched, waited.running], [false, false]);
+  assert.match(waited.screen.text, /^final words/);
+  assert.equal(session.info().exit?.exitCode, 3);
+  assert.equal(api.ptySessions()[0]?.running, false);
+  const late = ptySink();
+  session.attach(late.sink);
+  assert.equal((await late.exited).exitCode, 3);
+  assert.match(late.output, /final words/);
+  assert.equal((await session.kill()).exitCode, 3);
+  assert.deepEqual(api.ptySessions(), []);
+});
+
+test("named sessions answer terminal queries unless an attached terminal does", { skip: windows }, async (t) => {
+  const session = registryFor(t).connect().startPtySession("queries", {
+    cols: 40, rows: 4,
+    command: "printf 'abc\\033[6n'; IFS= read -rs -d R first; printf ' first=%s\\n' \"${first#*[}\"; read -r _; printf '\\033[6n'; IFS= read -rs -d R second; printf ' second=%s' \"${second#*[}\"",
+  });
+  await session.wait({ text: "first=1;4", timeoutMs: 10000 });
+  const viewer = ptySink();
+  const attachment = session.attach(viewer.sink, { answers: true });
+  await viewer.waitFor("first=");
+  session.keys(["Enter"]);
+  await viewer.waitFor("\x1b[6n");
+  // Only the attached terminal answers now; a second answer would corrupt the reply.
+  attachment.write("\x1b[9;9R");
+  const done = await session.wait({ text: "second=", timeoutMs: 10000 });
+  assert.match(done.screen.text, /second=9;9$/m);
+});
+
+test("keys follow the program's cursor-key mode", { skip: windows }, async (t) => {
+  const session = registryFor(t).connect().startPtySession("cursor", {
+    command: "printf '\\033[?1hready'; IFS= read -rs -n 3 key; printf ' hex=%s' \"$(printf '%s' \"$key\" | od -An -tx1 | tr -d ' \\n')\"",
+  });
+  await session.wait({ text: "ready", timeoutMs: 10000 });
+  session.keys(["Up"]);
+  assert.match((await session.wait({ text: "hex=", timeoutMs: 10000 })).screen.text, /hex=1b4f41/);
+  assert.throws(() => session.keys([]));
+  assert.throws(() => session.keys(["x".repeat(MAX_PTY_INPUT_BYTES + 1)]));
+});
+
+test("a viewer that stops reading is dropped without ending the program", { skip: windows }, async (t) => {
+  const session = registryFor(t).connect().startPtySession("slow", { command: "printf ready; sleep 60" });
+  await session.wait({ text: "ready", timeoutMs: 10000 });
+  const failing = ptySink();
+  failing.sink.output = () => { throw new Error("gone"); };
+  session.attach(failing.sink);
+  assert.match(await failing.detached, /stopped receiving/);
+  assert.deepEqual([session.info().viewers, session.info().running], [0, true]);
+});
+
+test("waits time out, validate their options and are limited per session", { skip: windows }, async (t) => {
+  const session = registryFor(t).connect().startPtySession("waits", { command: "sleep 60" });
+  const timedOut = await session.wait({ text: "x", timeoutMs: 100 });
+  assert.deepEqual([timedOut.matched, timedOut.running], [false, true]);
+  await assert.rejects(session.wait({ text: "" }));
+  await assert.rejects(session.wait({ text: "x", timeoutMs: -1 }));
+  await assert.rejects(session.wait({ text: "x", extra: 1 } as never));
+  // Killing the session ends every wait.
+  const pending = Array.from({ length: 8 }, () => assert.rejects(session.wait({ text: "never" }), /released/));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  await assert.rejects(session.wait({ text: "never" }), /Too many callers/);
+  await session.kill();
+  await Promise.all(pending);
+});
+
+test("each process holds a bounded number of named sessions until they are killed", { skip: windows }, async (t) => {
+  const api = registryFor(t).connect();
+  const sessions = Array.from({ length: MAX_NAMED_PTYS }, (_, index) => api.startPtySession(`s${index}`, { command: "true" }));
+  assert.throws(() => api.startPtySession("extra", { command: "true" }), /Too many named PTY sessions/);
+  await sessions[0]!.kill();
+  api.startPtySession("extra", { command: "true" });
 });
 
 // ConPTY: no termios, no signals and no CR-to-LF translation of input.

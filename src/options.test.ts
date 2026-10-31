@@ -210,3 +210,34 @@ test("tty opens a login shell or one quoted command with optional terminal setti
     ["run", "--screen", "--", "echo ok"],
   ]) assert.throws(() => parseOptions(args), `Expected rejection: ${args.join(" ")}`);
 });
+
+test("named session commands take an optional URL, a session name and their own options", () => {
+  const started = parseOptions(["tty", "--name", "build", "--timeout", "5000", "--", "make watch"]);
+  assert.deepEqual([started.name, started.attach, started.command, started.timeoutMs], ["build", false, "make watch", 5000]);
+  const attached = parseOptions(["tty", "ws://[::1]:9", "--attach", "build"]);
+  assert.deepEqual([attached.name, attached.attach, attached.url], ["build", true, "ws://[::1]:9/"]);
+  // An environment cwd default is not an explicit change to the session.
+  assert.equal(parseOptions(["tty", "--attach", "build"], { CNS_CWD: "/srv" }).attach, true);
+
+  const keys = parseOptions(["keys", "build", "make test", "Enter"]);
+  assert.deepEqual([keys.role, keys.name, keys.keys, keys.literal, keys.url], ["keys", "build", ["make test", "Enter"], undefined, "ws://127.0.0.1:47381"]);
+  const remote = parseOptions(["keys", "wss://peer.example:9/", "build", "--literal", "--", "-n", "Enter"]);
+  assert.deepEqual([remote.url, remote.name, remote.keys, remote.literal], ["wss://peer.example:9/", "build", ["-n", "Enter"], true]);
+
+  const screen = parseOptions(["screen", "build", "--history", "20", "--until", "PASS", "--timeout", "0"]);
+  assert.deepEqual([screen.name, screen.screen, screen.until, screen.timeoutMs], ["build", { history: 20 }, "PASS", 0]);
+  assert.deepEqual(parseOptions(["screen", "ws://localhost:9", "build"]).screen, { history: 0 });
+  assert.equal(parseOptions(["sessions", "--json"]).json, true);
+  assert.equal(parseOptions(["sessions", "ws://localhost:9"]).url, "ws://localhost:9/");
+  assert.equal(parseOptions(["kill", "build"], { CNS_PORT: "47390" }).url, "ws://127.0.0.1:47390");
+
+  for (const args of [
+    ["tty", "--name", "a", "--attach", "a"], ["tty", "--attach", "a", "--", "ls"], ["tty", "--attach", "a", "--cwd", "/srv"],
+    ["tty", "--attach", "a", "--timeout", "5"], ["tty", "--attach", "a", "--term", "vt100"], ["tty", "--name", "a", "--screen"],
+    ["tty", "--name", "bad name"], ["tty", "--attach", ".hidden"], ["tty", "--name", "x".repeat(65)],
+    ["keys"], ["keys", "build"], ["keys", "ws://localhost:9", "build"], ["keys", "bad:name", "Enter"],
+    ["keys", "build", ...Array.from({ length: 1001 }, () => "x")],
+    ["screen"], ["screen", "a", "b"], ["screen", "a", "--timeout", "5"], ["screen", "a", "--until", ""], ["screen", "a", "--history", "1001"],
+    ["kill"], ["kill", "a", "b"], ["sessions", "a", "b"], ["sessions", "--literal"],
+  ]) assert.throws(() => parseOptions(args), `Expected rejection: ${args.join(" ")}`);
+});

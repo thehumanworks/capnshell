@@ -1,11 +1,15 @@
 import { newBunWebSocketRpcSession, newWebSocketRpcSession, type BunWebSocketTransport, type RpcStub } from "capnweb";
 import { serve, type Server, type ServerWebSocket } from "bun";
 import { z } from "zod";
-import { ShellApi, type RunResult, type ShellInfo } from "../shell.js";
+import { PtyRegistry, ShellApi, type ShellInfo } from "../shell.js";
 import { openConsole, type PeerController } from "../console.js";
+import { errorMessage } from "../errors.js";
 import type { PeerConfig } from "../options.js";
-import { attachTerminal } from "../terminal.js";
+import { plain, type RemoteNamedPty } from "../terminal.js";
 import { serveControl } from "./daemon.js";
+import { runOneShot } from "./one-shot.js";
+
+export { commandExitCode } from "./one-shot.js";
 
 // Bound unauthenticated connections, including peers that never complete the RPC handshake.
 export const MAX_PEERS = 32;
@@ -26,16 +30,12 @@ interface Session {
   info?: ShellInfo;
 }
 
-export function commandExitCode(result: Pick<RunResult, "exitCode" | "signalNumber" | "timedOut">): number {
-  if (result.timedOut) return 124;
-  if (result.exitCode !== null) return result.exitCode;
-  return result.signalNumber != null ? 128 + result.signalNumber : 1;
-}
-
 export async function startPeer(config: PeerConfig): Promise<void> {
   const daemonChild = process.env.CNS_DAEMON_CHILD === "1";
   delete process.env.CNS_DAEMON_CHILD;
   const sessions = new Map<string, Session>();
+  // Named PTY sessions outlive the connection that started them, but not this process.
+  const ptys = new PtyRegistry();
   let nextId = 1;
   let listener: Server<SocketData> | undefined;
   let input: ReturnType<typeof openConsole> | undefined;
@@ -43,7 +43,7 @@ export async function startPeer(config: PeerConfig): Promise<void> {
   let stopping = false;
   let finished!: () => void;
   const done = new Promise<void>((resolve) => { finished = resolve; });
-  const oneShot = config.role === "run" || config.role === "tty";
+  const oneShot = config.role !== "listen" && config.role !== "connect";
   const cancelled = new AbortController();
   const announce = (message: string) => { if (!oneShot) console.log(message); };
 
@@ -73,11 +73,12 @@ export async function startPeer(config: PeerConfig): Promise<void> {
     cancelled.abort();
     input?.close();
     for (const session of sessions.values()) remove(session);
+    ptys[Symbol.dispose]();
     try {
       await Promise.all([listener?.stop(true), controlCleanup?.()]);
     } catch (error) {
       process.exitCode = 1;
-      console.error(error instanceof Error ? error.message : String(error));
+      console.error(errorMessage(error));
     } finally {
       process.off("SIGINT", interrupt);
       process.off("SIGTERM", terminate);
@@ -101,13 +102,18 @@ export async function startPeer(config: PeerConfig): Promise<void> {
     async info(id) { return { ...requireSession(id).info! }; },
     async run(id, command, options) {
       // Capture the session once; its ID is never reused, even after disconnect.
-      const session = requireSession(id);
-      const result = await session.remote.run(command, options);
-      try { return { ...result }; }
-      finally { result[Symbol.dispose](); }
+      return await plain(requireSession(id).remote.run(command, options));
     },
     async openPty(id, sink, options) {
       return await requireSession(id).remote.openPty(sink, options);
+    },
+    async ptySessions(id) { return await plain(requireSession(id).remote.ptySessions()); },
+    async startPtySession(id, name, options) {
+      using session = await requireSession(id).remote.startPtySession(name, options);
+      return await plain(session.info());
+    },
+    async ptySession(id, name) {
+      return await requireSession(id).remote.ptySession(name) as unknown as RemoteNamedPty;
     },
   };
 
@@ -135,27 +141,12 @@ export async function startPeer(config: PeerConfig): Promise<void> {
         clearTimeout(session.timer);
         announce(`Connected to ${describe(session)} [${session.info.platform} / ${session.info.shell}].`);
         if (config.mode === "connect") {
-          if (config.role === "tty") {
-            const { command, cwd, timeoutMs, cols, rows, term, screen } = config;
-            const { exit: result, screen: captured } = await attachTerminal((sink, options) => controller.openPty(id, sink, options),
-              { command, cwd, timeoutMs, cols, rows, term }, { signal: cancelled.signal, screen });
-            // Like tmux capture-pane, but without the blank rows below the last output.
-            if (captured) process.stdout.write(captured.text.replace(/\n+$/, "") + "\n");
-            if (result.error) console.error(`cns: ${result.error}`);
-            if (result.timedOut) console.error("cns: command timed out");
-            await stop(commandExitCode(result));
-          } else if (oneShot) {
-            const result = await controller.run(id, config.command!, { cwd: config.cwd, timeoutMs: config.timeoutMs });
-            process.stdout.write(result.stdout);
-            process.stderr.write(result.stderr);
-            if (result.truncated) console.error("cns: OUTPUT TRUNCATED at 1 MiB");
-            if (result.timedOut) console.error("cns: command timed out");
-            await stop(commandExitCode(result));
-          } else if (!config.noRepl) input = openConsole(controller, () => { void stop(); });
+          if (oneShot) await stop(await runOneShot(config, controller, id, cancelled.signal));
+          else if (!config.noRepl) input = openConsole(controller, () => { void stop(); });
         } else void input?.refresh();
       } catch (error) {
         if (!stopping && sessions.has(id)) {
-          console.error(error instanceof Error ? error.message : String(error));
+          console.error(errorMessage(error));
           disconnected(session, 1);
         }
       }
@@ -185,7 +176,7 @@ export async function startPeer(config: PeerConfig): Promise<void> {
           idleTimeout: 0, maxPayloadLength: 8 * 1024 * 1024,
           open(ws) {
             if (stopping) { ws.close(); return; }
-            const local = new ShellApi();
+            const local = new ShellApi(ptys);
             const { stub, transport } = newBunWebSocketRpcSession<ShellApi, SocketData>(ws, local);
             ws.data.transport = transport;
             ws.data.session = register(ws, local, stub, ws.data.address);
@@ -208,7 +199,7 @@ export async function startPeer(config: PeerConfig): Promise<void> {
       announce(`${label} listening at ${config.url}.`);
     } else {
       const socket = new WebSocket(config.url);
-      const local = new ShellApi();
+      const local = new ShellApi(ptys);
       const remote = newWebSocketRpcSession<ShellApi>(socket, local);
       const session = register(socket, local, remote, new URL(config.url).host);
       socket.addEventListener("error", () => {
