@@ -7,3 +7,4 @@ result-*
 .env*
 .DS_Store
 .direnv
+.pi/worktrees
