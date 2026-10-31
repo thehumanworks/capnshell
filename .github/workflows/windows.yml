@@ -1,0 +1,20 @@
+# Windows peers are otherwise untested. Manual only, because this repository's
+# Actions minutes are limited: run it from the Actions tab or `gh workflow run`.
+name: Windows
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - run: bun run typecheck
+      - run: bun run test
+      - run: bun run test:compiled

@@ -162,8 +162,8 @@ A named session keeps running between commands, so an agent can work with a TUI 
 ```sh
 cns tty --name claude --cwd /srv/app -- 'claude'   # start in the background; prints nothing
 cns screen claude --until 'trust this folder'       # wait for the prompt, then print the screen
-sleep 1
 cns keys claude Down                                 # move to "Yes, I trust this folder"
+cns screen claude --until '❯ Yes'                    # confirm the key landed before pressing Enter
 cns keys claude Enter
 cns keys claude 'fix the failing tests' Enter
 cns screen claude --history 50
@@ -174,8 +174,8 @@ cns kill claude
 
 - **Lifetime:** sessions live in the `cns` process running the program, the listener or the connected peer, not in a connection. They survive the commands and connections that use them and end when killed or when that process stops. Nothing is written to disk. Each process holds up to 16 named sessions, running or finished. A finished session keeps its final screen and exit status until it is killed. `--timeout` on `tty --name` limits the session's lifetime.
 - **`keys`** takes tmux-style key names: `Enter`, `Tab`, `BTab`, `Escape`, `Space`, `BSpace`, `Up`, `Down`, `Left`, `Right`, `Home`, `End`, `PageUp`, `PageDown`, `Insert`, `Delete`, `F1`–`F12`, with `C-`, `M-` and `S-` prefixes such as `C-c` or `C-Left`. Other arguments are typed as text; `--literal` types every argument as text. The executing peer encodes keys, so arrow keys follow the program's cursor-key mode.
-- **`screen`** prints the current screen like `tty --screen`. `--until TEXT` first waits for the screen to show TEXT, checking after every chunk of output. It exits 0 when the text appears, 1 if the program ends first and 124 after `--timeout` (default 30000 ms; 0 waits indefinitely). It prints the screen in each case. The renderer does not decide when a program is finished; `--until` is a convenience over it. Text can appear before a program reads input: Claude Code ignores keys for a moment after it draws a prompt, so pause briefly or check the screen after sending.
-- **`tty --attach NAME`** shows a session in your terminal. It first redraws the current screen, so it clears your terminal's visible screen, then streams live output and sends your keys. Ctrl-] detaches and leaves the program running; exiting the program ends the attach with its status. Attaching from a terminal resizes the session to that terminal, as in tmux. Several viewers can attach at once. Without a local terminal, `--attach` streams raw output and forwards stdin, without detach key or resize.
+- **`screen`** prints the current screen like `tty --screen`. `--until TEXT` first waits for the screen to show TEXT, checking after every chunk of output. It exits 0 when the text appears, 1 if the program ends first and 124 after `--timeout` (default 30000 ms; 0 waits indefinitely). It prints the screen in each case. The renderer does not decide when a program is finished; `--until` is a convenience over it. To confirm that a key took effect, wait for the screen it should produce rather than sleeping.
+- **`tty --attach NAME`** shows a session in your terminal, on its alternate screen as tmux does: detaching or the program's exit returns your terminal to what it showed before. It redraws the current screen, then streams live output and sends your keys. When the program switches between its normal and alternate screens, as vim does, `cns` redraws from its own copy of the session's screen instead of letting your terminal switch. As in tmux, lines that scroll by while attached are not added to your terminal's scrollback; `cns screen NAME --history N` has them. Ctrl-] detaches and leaves the program running; exiting the program ends the attach with its status. Attaching from a terminal resizes the session to that terminal, as in tmux. Several viewers can attach at once. Without a local terminal, `--attach` streams raw output and forwards stdin, without detach key or resize.
 - **Terminal queries** are answered by the session's screen unless an attached terminal answers them, so programs keep drawing with no one attached.
 
 ### RPC interface
@@ -205,7 +205,7 @@ Releasing a handle leaves its session running. A handle only reaches the session
 
 The caller passes `sink`, an `RpcTarget` with `output(bytes)` and `exit(result)`, by reference. The executor waits for each `output` acknowledgement before sending more, coalescing reads into messages of up to 64 KiB. Bun cannot pause PTY reads, so a caller that falls more than 8 MiB behind is hung up with an error. Each connection allows four unnamed PTY sessions until they are released. The daemon proxies all of these stubs between `attach` and its peers.
 
-On Windows peers, programs run on a ConPTY in Windows PowerShell, with the same quoting as `run`. **This path is untested.** It compiles, and `src/shell.test.ts` has a Windows-only PTY test, but it has not been run on Windows yet. Expected differences, from [Bun's ConPTY notes](https://bun.com/docs/runtime/child-process#platform-differences):
+On Windows peers, programs run on a ConPTY in Windows PowerShell, with the same quoting as `run`. **This path is untested.** It compiles, and `src/shell.test.ts` has a Windows-only PTY test, but it has not been run on Windows yet. The manually triggered `Windows` GitHub Actions workflow (`.github/workflows/windows.yml`) runs both test suites on `windows-latest`, including Windows versions of the named-session tests. Expected differences, from [Bun's ConPTY notes](https://bun.com/docs/runtime/child-process#platform-differences):
 
 - Hang-up and `--timeout` kill the program's process tree; Windows has no SIGHUP for programs to handle.
 - ConPTY redraws output itself, so raw output differs from what the program wrote, though rendered screens should match.

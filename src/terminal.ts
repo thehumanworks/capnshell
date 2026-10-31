@@ -4,6 +4,7 @@ import type {
 } from "./shell.js";
 import { MAX_PTY_INPUT_BYTES } from "./shell.js";
 import type { PeerController } from "./console.js";
+import { AttachedScreen } from "./redraw.js";
 
 type Result<T> = Promise<T & { [Symbol.dispose]?(): void }>;
 /** The caller's view of a remote PtySession or PtyAttachment stub. */
@@ -41,6 +42,8 @@ export interface AttachOptions {
   screen?: CaptureOptions;
   /** For named sessions: this byte typed at a local terminal detaches instead of being sent. */
   detachKey?: number;
+  /** Show the session on a local terminal's alternate screen, restoring the screen on return. */
+  alternateScreen?: boolean;
 }
 export type AttachResult =
   | { exit: PtyExit; screen?: PtyScreen }
@@ -54,14 +57,17 @@ const RESET_MODES = "\x1b[0m\x1b[?25h\x1b[?1l\x1b>\x1b[?66l\x1b[?2004l\x1b[?1004
 class OutputSink extends RpcTarget implements PtySink {
   #exit: (result: PtyExit) => void;
   #detached: (reason: string) => void;
-  constructor(exit: (result: PtyExit) => void, detached: (reason: string) => void) {
+  #write: (data: Uint8Array) => Promise<void>;
+  // Only prototype methods are callable over RPC, so the peer sees just the sink protocol.
+  constructor(write: (data: Uint8Array) => Promise<void>, exit: (result: PtyExit) => void, detached: (reason: string) => void) {
     super();
+    this.#write = write;
     this.#exit = exit;
     this.#detached = detached;
   }
   output(data: Uint8Array): Promise<void> {
     if (!(data instanceof Uint8Array)) throw new TypeError("PTY output must be bytes.");
-    return new Promise((resolve) => process.stdout.write(data, () => resolve()));
+    return this.#write(data);
   }
   exit(result: PtyExit): void { this.#exit(result); }
   detached(reason: string): void { this.#detached(String(reason)); }
@@ -73,7 +79,7 @@ class OutputSink extends RpcTarget implements PtySink {
  * input is forwarded verbatim; its end is not translated into a keystroke, because
  * Ctrl-D would also quit TUIs started with stdin closed.
  */
-export async function attachTerminal(open: OpenPty, options: PtyOptions, { signal, screen, detachKey }: AttachOptions = {}): Promise<AttachResult> {
+export async function attachTerminal(open: OpenPty, options: PtyOptions, { signal, screen, detachKey, alternateScreen }: AttachOptions = {}): Promise<AttachResult> {
   const input = process.stdin;
   const interactive = !!(input.isTTY && process.stdout.isTTY);
   // A local terminal answers queries such as cursor-position reports only when it
@@ -90,12 +96,28 @@ export async function attachTerminal(open: OpenPty, options: PtyOptions, { signa
   const abort = () => failed(new Error("PTY session cancelled."));
   if (signal?.aborted) throw new Error("PTY session cancelled.");
   signal?.addEventListener("abort", abort, { once: true });
-  const sink = new OutputSink(finish, (reason) => finish({ detached: reason }));
+  const local = interactive && alternateScreen ? new AttachedScreen(size().cols, size().rows) : undefined;
+  let closed = false;
+  const write = async (data: Uint8Array) => {
+    const translated = local ? await local.translate(data) : data;
+    // Output still in flight after detaching must not reach the restored screen.
+    if (!closed) await new Promise((resolve) => process.stdout.write(translated, resolve));
+  };
+  const sink = new OutputSink(write, finish, (reason) => finish({ detached: reason }));
+  // Switch before any output arrives; leaving the alternate screen restores the user's.
+  if (local) await new Promise((resolve) => process.stdout.write("\x1b[?1049h", resolve));
+  const leave = async () => {
+    if (!local) return;
+    closed = true;
+    await new Promise((resolve) => process.stdout.write(RESET_MODES + "\x1b[?1049l", resolve));
+  };
   let pty: RemotePty;
   try {
     pty = await open(sink, { ...remote, ...options, ...size() });
   } catch (error) {
     signal?.removeEventListener("abort", abort);
+    await leave();
+    local?.dispose();
     throw error;
   }
   pty.onRpcBroken?.((error) => failed(new Error(`PTY connection lost: ${error instanceof Error ? error.message : String(error)}`)));
@@ -126,6 +148,7 @@ export async function attachTerminal(open: OpenPty, options: PtyOptions, { signa
   };
   const onResize = () => {
     const { cols, rows } = size();
+    local?.resize(cols, rows);
     Promise.resolve(pty.resize(cols, rows)).catch(() => {});
   };
   let ended = false;
@@ -135,16 +158,12 @@ export async function attachTerminal(open: OpenPty, options: PtyOptions, { signa
   input.resume();
   try {
     const outcome = await result;
-    if ("detached" in outcome) {
-      if (interactive) {
-        const { alternateScreen } = await plain(pty.capture()).catch(() => ({ alternateScreen: false }));
-        await new Promise((resolve) => process.stdout.write(RESET_MODES + (alternateScreen ? "\x1b[?1049l" : ""), resolve));
-      }
-      return { exit: null, detached: outcome.detached };
-    }
+    if ("detached" in outcome) return { exit: null, detached: outcome.detached };
     if (!screen) return { exit: outcome };
     return { exit: outcome, screen: await plain(pty.capture(screen)) };
   } finally {
+    await leave();
+    local?.dispose();
     ended = true;
     signal?.removeEventListener("abort", abort);
     input.off("data", onData);
@@ -168,7 +187,7 @@ export async function attachSession(controller: PeerController, id: string, name
     const sized = !!process.stdout.isTTY || cols !== undefined || rows !== undefined;
     return await attachTerminal((sink, options) => session.attach(sink, {
       ...(sized ? { cols: options.cols, rows: options.rows } : {}), answers: !options.respond,
-    }), { cols, rows }, { signal, detachKey: DETACH_KEY });
+    }), { cols, rows }, { signal, detachKey: DETACH_KEY, alternateScreen: true });
   } finally {
     session[Symbol.dispose]();
   }
