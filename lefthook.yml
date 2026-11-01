@@ -1,0 +1,8 @@
+pre-commit:
+  commands:
+    version-rule-tests:
+      glob: "{sgconfig.yml,lint/**}"
+      run: ast-grep test --skip-snapshot-tests
+    version-rules:
+      # Named explicitly because ast-grep skips hidden directories.
+      run: ast-grep scan . .github

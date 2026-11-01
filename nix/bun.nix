@@ -1,7 +1,8 @@
 # Bun comes from its own release hashes here, so that updating nixpkgs can't
 # change it. Bun's version decides what `bun install` writes, and so the
 # dependency hash in package.nix. To update: change package.json's
-# packageManager, then the version and hashes below, then that dependency hash.
+# packageManager, then the version and hashes below, then that dependency hash,
+# then the versions in lint/rules/bun-version.yml and its tests.
 { lib, bun, fetchurl }:
 let
   version = "1.4.4";

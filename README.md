@@ -358,4 +358,13 @@ bun run test
 bun run test:compiled
 ```
 
+The Bun version is pinned, and a pre-commit hook rejects changes that break the pin. Run this once in a checkout to install it, with the tools in `mise.toml`:
+
+```sh
+mise install
+lefthook install
+```
+
+The hook runs `ast-grep scan . .github`. The rules in `lint/rules` check that every file stating Bun's version agrees, that Nix builds with `nix/bun.nix` and that CI reads the version from `package.json`.
+
 Tests exercise multiple bidirectional peers, target selection, disconnect isolation, reverse calls during one-shot commands and PTY sessions, output/exit-status handling, PTY input, sizing, hang-up, timeouts and flow control, rendered screens and scrollback, named sessions across connections and CLI calls (keys, waits, attach redraws, detach, kill and limits), PTY proxying through the daemon, streaming commands with flow control and cancellation (also through the daemon), file operations and their validation, one-way peers refusing every reverse call, process cleanup, connection limits, daemon attachment, startup races and stale-state recovery. MCP tests drive `cns mcp` with the official SDK client over stdio and HTTP, in both protocol eras: every tool, tool errors, cancellation and disconnects killing commands and freeing screen waits, 2025-era session limits, HTTP authentication, origin and host checks, calls beyond Bun's idle timeout with progress, daemon peer selection and the refusal of reverse calls. The Pi extension tests run Pi's agent sessions with a scripted model against real listeners and the daemon: each tool and `!` on a host, results matching Pi's local tools for `grep`, `find`, `ls` and `read`, images, aborts and timeouts stopping the host's command, long commands, sessions sharing one daemon and attaching to its peers, `CNS_LISTEN`, `/cns stop`, lost hosts and failed startup attachments blocking every tool, and continued sessions attaching again. The package tests build the npm package, install it beside a Bun package, and drive it in Pi processes in RPC mode, on Node and with the installed `pi` when there is one, with neither `bun` nor `cns` on `PATH` and hostile `.env` and `bunfig.toml` files where the daemon would read them. The compiled suite additionally tests the executable outside its checkout without a JavaScript runtime on `PATH`.

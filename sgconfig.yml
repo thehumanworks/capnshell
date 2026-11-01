@@ -1,0 +1,8 @@
+ruleDirs:
+  - lint/rules
+testConfigs:
+  - testDir: lint/tests
+languageGlobs:
+  # ast-grep has no TOML parser. A `key = "value"` line is also valid Python,
+  # and `[tools]` a list, so this one file parses well enough to match on.
+  python: [mise.toml]
