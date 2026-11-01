@@ -1,0 +1,48 @@
+id: bun-package-manager
+valid:
+  - '{ "packageManager": "bun@1.4.4" }'
+invalid:
+  - '{ "packageManager": "bun@1.4.2" }'
+  - '{ "name": "no-declaration" }'
+---
+id: bun-engine
+valid:
+  - '{ "engines": { "bun": "1.4.4" } }'
+invalid:
+  - '{ "engines": { "bun": ">=1.4.4" } }'
+  - '{ "dependencies": { "bun": "1.4.4" } }'
+  - '{ "name": "no-declaration" }'
+---
+id: bun-types
+valid:
+  - '{ "devDependencies": { "@types/bun": "1.4.4" } }'
+invalid:
+  - '{ "devDependencies": { "@types/bun": "^1.4.4" } }'
+  - '{ "devDependencies": {} }'
+---
+id: bun-nix-release
+valid:
+  - '{ }: let version = "1.4.4"; in version'
+invalid:
+  - '{ }: let version = "1.4.2"; in version'
+  - '{ }: let other = "1.4.4"; in other'
+---
+id: bun-pi-package
+valid:
+  - 'export const BUN_VERSION = "1.4.4";'
+invalid:
+  - 'export const BUN_VERSION = "1.4.2";'
+  - 'export const OTHER = "1.4.4";'
+---
+id: bun-mise
+valid:
+  - |
+    [tools]
+    bun = "1.4.4"
+invalid:
+  - |
+    [tools]
+    bun = "latest"
+  - |
+    [tools]
+    node = "24"

@@ -1,0 +1,93 @@
+# The one pinned Bun version, as each file that states it must declare it. These
+# rules match the file, not the value, so a removed declaration fails as well.
+# To update Bun, change every 1\.4\.4 here and in lint/tests/bun-version-test.yml
+# along with the files themselves. nix/bun.nix lists the rest of the steps.
+id: bun-package-manager
+language: json
+severity: error
+files: [package.json]
+message: package.json must declare "packageManager" as "bun@1.4.4".
+rule:
+  kind: document
+  not:
+    has:
+      stopBy: end
+      kind: pair
+      all:
+        - has: { field: key, regex: '^"packageManager"$' }
+        - has: { field: value, regex: '^"bun@1\.4\.4"$' }
+---
+id: bun-engine
+language: json
+severity: error
+files: [package.json]
+message: package.json must declare engines.bun as exactly "1.4.4", without a range.
+rule:
+  kind: document
+  not:
+    has:
+      stopBy: end
+      kind: pair
+      all:
+        - has: { field: key, regex: '^"engines"$' }
+        - has:
+            field: value
+            has:
+              kind: pair
+              all:
+                - has: { field: key, regex: '^"bun"$' }
+                - has: { field: value, regex: '^"1\.4\.4"$' }
+---
+id: bun-types
+language: json
+severity: error
+files: [package.json]
+message: package.json must pin "@types/bun" to exactly "1.4.4".
+rule:
+  kind: document
+  not:
+    has:
+      stopBy: end
+      kind: pair
+      all:
+        - has: { field: key, regex: '^"@types/bun"$' }
+        - has: { field: value, regex: '^"1\.4\.4"$' }
+---
+id: bun-nix-release
+language: nix
+severity: error
+files: [nix/bun.nix]
+message: nix/bun.nix must pin version = "1.4.4", with release hashes to match.
+rule:
+  kind: source_code
+  not:
+    has:
+      stopBy: end
+      kind: binding
+      all:
+        - has: { field: attrpath, regex: '^version$' }
+        - has: { field: expression, regex: '^"1\.4\.4"$' }
+---
+id: bun-pi-package
+language: typescript
+severity: error
+files: [pi/program.ts]
+message: pi/program.ts must ship BUN_VERSION = "1.4.4".
+rule:
+  kind: program
+  not:
+    has:
+      stopBy: end
+      pattern: export const BUN_VERSION = "1.4.4"
+---
+id: bun-mise
+language: python
+severity: error
+files: [mise.toml]
+message: mise.toml must pin bun = "1.4.4".
+rule:
+  kind: module
+  not:
+    has:
+      stopBy: end
+      pattern: bun = "1.4.4"

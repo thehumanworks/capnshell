@@ -1,0 +1,49 @@
+# Where Bun may come from: nix/bun.nix in Nix, and package.json in CI.
+id: no-nixpkgs-bun
+language: nix
+severity: error
+files: [flake.nix, nix/*.nix]
+message: pkgs.bun follows nixpkgs. Use the pinned Bun from nix/bun.nix.
+rule:
+  pattern: pkgs.bun
+---
+id: package-gets-pinned-bun
+language: nix
+severity: error
+files: [flake.nix]
+message: Without `inherit bun`, nix/package.nix builds with the Bun in nixpkgs.
+rule:
+  pattern: pkgs.callPackage ./nix/package.nix $ARGS
+  not:
+    has:
+      stopBy: end
+      kind: inherit
+      regex: '^inherit\s+bun\s*;$'
+---
+id: no-ci-bun-version
+language: yaml
+severity: error
+files: [.github/workflows/*.yml]
+message: Read Bun's version from package.json with bun-version-file instead.
+rule:
+  kind: block_mapping_pair
+  regex: '^bun-version:'
+---
+id: ci-bun-from-package-json
+language: yaml
+severity: error
+files: [.github/workflows/*.yml]
+message: "setup-bun needs `bun-version-file: package.json`, or it installs the latest Bun."
+rule:
+  kind: block_mapping
+  has:
+    kind: block_mapping_pair
+    regex: '^uses:\s+oven-sh/setup-bun@'
+  not:
+    has:
+      kind: block_mapping_pair
+      regex: '^with:'
+      has:
+        stopBy: end
+        kind: block_mapping_pair
+        regex: '^bun-version-file:\s+package\.json$'
