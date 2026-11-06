@@ -353,7 +353,7 @@ The server speaks MCP 2026-07-28 and serves 2025-era clients too. Over HTTP, a 2
 
 ## Pi extension
 
-The Pi extension in `pi/` runs [Pi](https://pi.dev)'s own tools on a cns host: while Pi is attached, `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls` and `!` commands work on that host's files and shell. `/cns listen` (or `CNS_LISTEN=1`) lets hosts connect to Pi's machine, and `/cns attach HOST` sends the tools there. Nothing falls back to Pi's machine when a host goes away. [pi/README.md](pi/README.md) documents its use; it is also the npm package's README.
+The Pi extension in `pi/` runs [Pi](https://pi.dev)'s own tools on a cns host: while Pi is attached, `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls` and `!` commands work on that host's files and shell. `/cns listen` (or `CNS_LISTEN=1`) lets hosts connect to Pi's machine, and `/cns attach HOST` sends the tools there; `HOST` may be a paired device's name, reached over its encrypted link within its grants. Nothing falls back to Pi's machine when a host goes away. [pi/README.md](pi/README.md) documents its use; it is also the npm package's README.
 
 ```sh
 pi install npm:@nothumanwork/pi-cns

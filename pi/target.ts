@@ -1,4 +1,5 @@
 import { isIP } from "node:net";
+import { getPeer } from "../src/peers.js";
 
 /** The port `cns listen` uses unless told otherwise. */
 export const DEFAULT_PORT = 47381;
@@ -10,7 +11,18 @@ export const DEFAULT_PORT = 47381;
 export type Target =
   | { kind: "local" }
   | { kind: "peer"; id: string }
-  | { kind: "url"; url: string };
+  | { kind: "url"; url: string }
+  /** A device paired with this one (`cns pair`), reached by its saved addresses over an encrypted link. */
+  | { kind: "paired"; name: string; publicKey: string; addresses: string[] };
+
+/** The paired device saved under `name`, if any; never throws, so a stray peers file cannot break attaching. */
+function pairedDevice(name: string): Extract<Target, { kind: "paired" }> | undefined {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(name)) return undefined;
+  try {
+    const entry = getPeer(name);
+    return entry?.kind === "paired" ? { kind: "paired", name, publicKey: entry.publicKey, addresses: entry.addresses } : undefined;
+  } catch { return undefined; }
+}
 
 /** The port for `host` without one: CNS_PORT, as `cns run` uses, else the default. */
 function defaultPort(env: NodeJS.ProcessEnv): number {
@@ -27,6 +39,12 @@ export function parseTarget(text: string, env: NodeJS.ProcessEnv = process.env):
   if (!value) throw new Error("Name a host: local, a peer such as p1, host[:port] or a ws:// URL.");
   if (value === "local") return { kind: "local" };
   if (/^p[1-9]\d*$/.test(value)) return { kind: "peer", id: value };
+  // A paired device's name comes before reading the word as a hostname.
+  const paired = pairedDevice(value);
+  if (paired) {
+    if (!paired.addresses.length) throw new Error(`Paired device ${value} has no saved address. Add one with cns peer address ${value} ws://HOST:PORT.`);
+    return paired;
+  }
   if (/^wss?:\/\//i.test(value)) {
     const url = new URL(value);
     if (!url.hostname || url.username || url.password || url.hash) {
@@ -47,6 +65,7 @@ export function parseTarget(text: string, env: NodeJS.ProcessEnv = process.env):
 export function targetLabel(target: Target): string {
   if (target.kind === "local") return "local";
   if (target.kind === "peer") return target.id;
+  if (target.kind === "paired") return target.name;
   const url = new URL(target.url);
   return url.protocol === "ws:" ? url.host : url.href.replace(/\/$/, "");
 }

@@ -29,12 +29,20 @@ cns listen --bind 0.0.0.0 --allow-remote    # on the host
 | --- | --- |
 | `/cns listen` | Start this machine's cns daemon, or use the one running, so hosts can connect. |
 | `/cns status` | The daemon, its peers and where the tools run. |
-| `/cns attach HOST [DIRECTORY]` | Run the tools on `HOST`: a daemon peer (`p1`), a listener (`host[:port]`) or a `ws://`/`wss://` URL. `DIRECTORY` is absolute or relative to the host's home, which is the default. |
+| `/cns attach HOST [DIRECTORY]` | Run the tools on `HOST`: a device paired with this one (`cns pair`) by its name, a daemon peer (`p1`), a listener (`host[:port]`) or a `ws://`/`wss://` URL. `DIRECTORY` is absolute or relative to the host's home, which is the default. |
 | `/cns detach` | Run the tools on Pi's machine again. |
 | `/cns run HOST COMMAND` | Run one command on `HOST` and add its output, fenced and labelled with the host and directory, to the conversation. |
 | `/cns stop` | Stop the daemon, for every Pi session and `cns attach` console using it. |
 
 The model gets a `cns` tool with `status`, `attach` and `detach`, to attach to a host you name. While attached, the footer shows the host and its directory. The system prompt tells the model where the tools run and that `~` is the host's home. Commands get the host's environment: nothing from Pi's, such as its `PI_*` session variables, is forwarded.
+
+Or, with devices paired by `cns pair`, attach by name. Pi reaches the device at the first of its saved addresses that answers, directly or through its relay, over an encrypted link that both devices authenticate, and the device's grants decide what Pi's tools may do there (`shell` for `bash` and `!`, `files` for the file tools):
+
+```sh
+cns up                           # on the host, once
+cns pair                         # on the host; paste the invite on Pi's machine with cns pair 'cns1:...'
+# then in Pi: /cns attach studio
+```
 
 ## Configuration
 

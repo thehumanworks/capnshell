@@ -9,7 +9,7 @@ import { errorMessage } from "../src/errors.js";
 import { stopDaemon } from "../src/commands/daemon.js";
 import { findDaemon, listen, listenAtStartup, listenSettings, type Listener } from "./daemon.js";
 import { cnsInvocation, type Invocation } from "./program.js";
-import { connectPeer, connectUrl, lostMessage, type Host } from "./host.js";
+import { connectPeer, connectPaired, connectUrl, lostMessage, type Host } from "./host.js";
 import { parseTarget, targetLabel, type Target } from "./target.js";
 import { registerTools, SHADOWED_TOOLS } from "./tools.js";
 
@@ -174,6 +174,7 @@ export function createCnsExtension(options: CnsOptions = {}) {
 
     async function connect(target: Exclude<Target, { kind: "local" }>, signal?: AbortSignal): Promise<Host> {
       if (target.kind === "url") return await connectUrl(target, signal ?? AbortSignal.timeout(CONNECT_MS));
+      if (target.kind === "paired") return await connectPaired(target, signal ?? AbortSignal.timeout(CONNECT_MS));
       if (!listener) {
         const running = await findDaemon(options.statePath);
         if (!running) throw new Error(`${target.id} is a peer of this machine's cns daemon, and none runs. Run /cns listen, connect the peer to it, then attach.`);
