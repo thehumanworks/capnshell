@@ -1,5 +1,6 @@
 import { isIP } from "node:net";
 import { validatePeerUrl } from "./aliases.js";
+import { relayEndpoint } from "./relay-hub.js";
 import { isSavedPeer, resolvePeer, type Permission } from "./peers.js";
 import { Command, Option } from "commander";
 import { z } from "zod";
@@ -24,6 +25,7 @@ const peerOptionsSchema = z.strictObject({
   allowRemote: z.boolean().default(false),
   oneWay: z.boolean().default(false),
   paired: z.boolean().default(false),
+  relay: z.string().min(1).optional(),
   daemon: z.boolean().default(false),
   state: z.string().min(1).optional(),
   cwd: z.string().min(1).optional(),
@@ -54,6 +56,8 @@ export interface PeerConfig {
   oneWay: boolean;
   /** Accept only paired devices, after they authenticate; `cns up` runs such a listener. */
   paired: boolean;
+  /** For a paired listener: also register at this relay, so devices that cannot reach it directly can. */
+  relay?: string;
   /** The paired device this connection must reach, from a saved peer name, and every address saved for it. */
   expect?: { name: string; publicKey: string; outgoing: Permission[]; addresses: string[] };
   daemon: boolean;
@@ -123,7 +127,11 @@ function resolveOptions(role: PeerRole, command: Command, destination: string | 
       delete options[name];
     }
   }
-  const { bind, port, repl, allowRemote, oneWay, paired, daemon, state, cwd, timeout, cols, rows, term, screen, history, name, attach, literal, until, json } = peerOptionsSchema.parse(options);
+  const { bind, port, repl, allowRemote, oneWay, paired, relay, daemon, state, cwd, timeout, cols, rows, term, screen, history, name, attach, literal, until, json } = peerOptionsSchema.parse(options);
+  if (relay !== undefined) {
+    if (!paired) throw new Error("--relay is for the paired daemon; start it with cns up --relay URL.");
+    relayEndpoint(relay, "accept", "A".repeat(43));
+  }
   if (role === "tty") {
     if (history !== undefined && !screen) throw new Error("--history requires --screen.");
     if (name !== undefined && attach !== undefined) throw new Error("Use either --name to start a session or --attach to join one, not both.");
@@ -143,7 +151,7 @@ function resolveOptions(role: PeerRole, command: Command, destination: string | 
     url = peerUrl(destination);
   }
   return {
-    role, mode, bind, port, url, noRepl: role === "run" || role === "tty" || !repl, oneWay, paired, expect, daemon, state, cwd, timeoutMs: timeout,
+    role, mode, bind, port, url, noRepl: role === "run" || role === "tty" || !repl, oneWay, paired, relay, expect, daemon, state, cwd, timeoutMs: timeout,
     cols, rows, term, screen: screen || role === "screen" ? { history: history ?? 0 } : undefined,
     name: name ?? attach, attach: attach !== undefined, literal, until, json,
     remote: mode === "listen" ? !isLoopback(bind) : !isLoopback(new URL(url).hostname),
@@ -173,7 +181,10 @@ export function addPeerCommands(program: Command, run: (config: PeerConfig) => v
       command.addHelpText("after", "\nNamed sessions live in the peer's cns process: they survive this command and reconnects,\nand end when they are killed or that process stops. Start one with cns tty --name NAME.");
     }
     if (role !== "listen") command.option("--peer <name>", "Use a saved peer: a paired device, or an address alias");
-    if (role === "listen") command.addOption(new Option("--paired", "Accept only paired devices (used by cns up)").hideHelp());
+    if (role === "listen") {
+      command.addOption(new Option("--paired", "Accept only paired devices (used by cns up)").hideHelp())
+        .addOption(new Option("--relay <url>", "With --paired: also register at this relay (used by cns up)").hideHelp());
+    }
     if (role !== "connect") {
       command.addOption(new Option("--bind <address>", `Numeric ${role === "listen" ? "interface" : "remote peer"} address (default: 127.0.0.1)`).env("CNS_BIND"))
         .addOption(new Option("--port <port>", "TCP port (default: 47381)").env("CNS_PORT"));

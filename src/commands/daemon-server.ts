@@ -11,6 +11,8 @@ import type { PtyOptions, PtySessionOptions, PtySink, RunOptions } from "../shel
 export interface PairingController {
   identity(): { publicKey: string; fingerprint: string };
   addresses(): string[];
+  /** Whether the daemon is registered at its relay, when it has one. */
+  relayRegistered(): boolean | undefined;
   /** A single-use invite for another device, valid for `ttlMs`. */
   invite(ttlMs: number): Promise<{ id: string; text: string; expiresAt: number }>;
   /** Resolves once a device has authenticated with the invite and proposed a pairing. */
@@ -53,7 +55,7 @@ export class ControlApi extends RpcTarget {
     const peers = (await this.#controller.peers()).length;
     return {
       ...(this.#listener ?? { url: "", bind: "", port: 0, remote: false, oneWay: false }), pid: process.pid, startedAt: this.#startedAt, peers,
-      ...this.#pairing ? { identity: this.#pairing.identity(), addresses: this.#pairing.addresses() } : {},
+      ...this.#pairing ? { identity: this.#pairing.identity(), addresses: this.#pairing.addresses(), relayRegistered: this.#pairing.relayRegistered() } : {},
     };
   }
   #paired(): PairingController {

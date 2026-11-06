@@ -51,8 +51,9 @@ export function createCli(): Command {
     .description("Run this device as a paired peer: start its daemon, or report the running one")
     .option("--bind <address>", "Interface to listen on (default: every interface; CNS_BIND)")
     .option("--port <port>", "TCP port (default: 47381; CNS_PORT)")
+    .option("--relay <url>", "Also register at this relay, for devices that cannot reach this one directly (CNS_RELAY)")
     .option("--state <path>", "Local daemon state file")
-    .addHelpText("after", "\nOnly paired devices can connect, after authenticating; each gets what cns pair granted it.\nThe link is authenticated, not encrypted: use trusted networks. Pair with cns pair.")
+    .addHelpText("after", "\nOnly paired devices can connect, after authenticating; each gets what cns pair granted it.\nLinks are encrypted end to end, directly or through the relay. Pair with cns pair.\nA relay is wss://HOST (the Cloudflare Worker in relay/, or cns relay), with ?token=TOKEN if it needs one.")
     .action(async (options) => { const { up } = await import("./commands/pairing-cli.js"); await up(options); });
   program.command("pair")
     .description("Pair this device with another: print an invite, or paste one from the other device")
@@ -70,6 +71,26 @@ export function createCli(): Command {
     .option("--json", "Print the list as JSON")
     .option("--state <path>", "Local daemon state file")
     .action(async (options) => { const { peers } = await import("./commands/pairing-cli.js"); await peers(options); });
+  program.command("relay")
+    .description("Run a relay for paired devices that cannot reach each other directly")
+    .option("--bind <address>", "Interface to listen on (default: 127.0.0.1)")
+    .option("--port <port>", "TCP port (default: 47380)")
+    .addHelpText("after", "\nThe relay forwards encrypted links it cannot read. A daemon registers by proving its key;\nany device may dial a registered key, and the daemon then authenticates it as usual.\nSet CNS_RELAY_TOKEN to require ?token=TOKEN on every request. Serve wss:// through a TLS proxy.\nThe Cloudflare Worker in relay/ is the same relay without a machine to keep running.")
+    .action(async (options: { bind?: string; port?: string }) => {
+      const { startRelay } = await import("./commands/relay.js");
+      const { isIP } = await import("node:net");
+      const bind = options.bind ?? "127.0.0.1";
+      if (!isIP(bind)) throw new Error("--bind requires a numeric IPv4 or IPv6 address.");
+      const port = Number(options.port ?? 47380);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("--port requires an integer from 1 to 65535.");
+      const relay = startRelay({ bind, port, token: process.env.CNS_RELAY_TOKEN || undefined });
+      console.log(`Relay listening at ${relay.url}${process.env.CNS_RELAY_TOKEN ? " (token required)" : ""}.`);
+      await new Promise<void>((resolve) => {
+        const end = () => { void relay.stop().then(resolve); };
+        process.once("SIGINT", end);
+        process.once("SIGTERM", end);
+      });
+    });
   program.command("status")
     .description("Show this device's identity, its daemon and its links")
     .option("--json", "Print the status as JSON")
