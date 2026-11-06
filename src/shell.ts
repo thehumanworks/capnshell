@@ -8,7 +8,7 @@ import {
 } from "./files.js";
 import { bash, commandSchema, optionsSchema, powershell, powershellArgs, type RunOptions } from "./platform.js";
 import {
-  MAX_PTYS, NamedPty, openUnnamedPty, ptyOptionsSchema, PtyRegistry,
+  HandleScope, MAX_PTYS, NamedPty, openUnnamedPty, ptyOptionsSchema, PtyRegistry,
   type PtyOptions, type PtySession, type PtySessionInfo, type PtySessionOptions, type PtySink,
 } from "./pty.js";
 
@@ -21,7 +21,7 @@ export {
   MAX_NAMED_PTYS, MAX_PTY_BACKLOG_BYTES, MAX_PTY_INPUT_BYTES, MAX_SCREEN_HISTORY, sessionNameSchema,
   type AttachOptions, type CaptureOptions, type KeysOptions, type PtyExit, type PtyOptions, type PtyScreen,
   type PtySessionInfo, type PtySessionOptions, type PtySink, type PtyWait, type WaitOptions,
-  NamedPty, PtyAttachment, PtyRegistry, PtySession,
+  HandleScope, NamedPty, PtyAttachment, PtyRegistry, PtySession,
 } from "./pty.js";
 
 export const MAX_OUTPUT_BYTES = 1024 * 1024;
@@ -31,6 +31,8 @@ export const MAX_FORKS = 32;
 export const MAX_COMMANDS = 4;
 /** Bytes per exec sink call at most. */
 export const MAX_EXEC_CHUNK_BYTES = 64 * 1024;
+/** Why a closed shell's named-session handles and attachments stop working. */
+export const HANDLES_REVOKED = "The shell that issued this PTY session handle has closed.";
 
 export interface ShellInfo {
   platform: NodeJS.Platform;
@@ -90,6 +92,8 @@ export class ShellApi extends RpcTarget {
   #children = new Set<ChildProcess>();
   #ptys = new Set<PtySession>();
   #forks = new Set<ShellApi>();
+  /** The named-session handles and attachments this shell issued; closing it revokes them. */
+  #handles = new HandleScope();
   #registry: PtyRegistry;
   #closed = false;
   #released = Promise.withResolvers<void>();
@@ -276,16 +280,20 @@ export class ShellApi extends RpcTarget {
   /**
    * Start a named PTY session without a viewer. It belongs to this process rather
    * than the connection, so later connections can reach it with ptySession(name).
+   * The returned handle is this shell's: closing the shell revokes it.
    */
   startPtySession(name: string, options: PtySessionOptions = {}): NamedPty {
     if (this.#closed) throw new Error("This shell session is closed.");
-    return new NamedPty(this.#registry, name, this.#registry.start(name, options));
+    return new NamedPty(this.#registry, name, this.#registry.start(name, options), this.#handles);
   }
 
-  /** A handle on a named session. Releasing the handle leaves the session running. */
+  /**
+   * A handle on a named session. Releasing the handle leaves the session running.
+   * Closing this shell revokes the handle and the attachments made through it.
+   */
   ptySession(name: string): NamedPty {
     if (this.#closed) throw new Error("This shell session is closed.");
-    return new NamedPty(this.#registry, name, this.#registry.get(name));
+    return new NamedPty(this.#registry, name, this.#registry.get(name), this.#handles);
   }
 
   ptySessions(): PtySessionInfo[] {
@@ -295,8 +303,9 @@ export class ShellApi extends RpcTarget {
 
   /**
    * Another shell on this peer with its own command limit, sharing its named sessions.
-   * Releasing the fork kills the commands it started and closes its unnamed PTYs, so a
-   * caller can cancel a run without closing the connection.
+   * Releasing the fork kills the commands it started, closes its unnamed PTYs and
+   * revokes the named-session handles it issued, so a caller can cancel a run without
+   * closing the connection. The named sessions themselves keep running.
    */
   fork(): ShellApi {
     if (this.#closed) throw new Error("This shell session is closed.");
@@ -315,6 +324,7 @@ export class ShellApi extends RpcTarget {
     this.#released.resolve();
     for (const child of this.#children) killTree(child);
     for (const pty of this.#ptys) pty[Symbol.dispose]();
+    this.#handles.close(HANDLES_REVOKED);
     for (const fork of this.#forks) fork[Symbol.dispose]();
     this.#onClose?.();
   }
