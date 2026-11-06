@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { newBunWebSocketRpcSession, newMessagePortRpcSession, newWebSocketRpcSession, RpcTarget, type BunWebSocketTransport, type RpcStub } from "capnweb";
 import { forkShell } from "./connect.js";
@@ -74,6 +77,52 @@ test("RefusingShell answers info() and refuses every other ShellApi method over 
     await assert.rejects(async () => { await (remote as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>)[name]!("/tmp"); },
       new RegExp(RefusingShell.refusal.replace(/[.;]/g, "\\$&")), `${name} must be refused`);
   }
+});
+
+test("one-way WebSocket refuses valid reverse operations without blocking forward use", { timeout: 15000, skip: process.platform === "win32" }, async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "cns-refusal-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const secret = path.join(directory, "secret");
+  const marker = path.join(directory, "marker");
+  await writeFile(secret, "unchanged");
+  const offered = new ShellApi();
+  interface Data { transport?: BunWebSocketTransport<Data> }
+  let accept!: (stub: RpcStub<ShellApi>) => void;
+  const accepted = new Promise<RpcStub<ShellApi>>((resolve) => { accept = resolve; });
+  const server = Bun.serve<Data>({
+    hostname: "::1", port: 0,
+    fetch(request, server) { if (server.upgrade(request, { data: {} })) return; return new Response("WebSocket required", { status: 400 }); },
+    websocket: {
+      idleTimeout: 0,
+      open(ws) { const { stub, transport } = newBunWebSocketRpcSession<ShellApi, Data>(ws, offered); ws.data.transport = transport; accept(stub); },
+      message(ws, message) { ws.data.transport?.dispatchMessage(message); },
+      close(ws, code, reason) { ws.data.transport?.dispatchClose(code, reason); },
+    },
+  });
+  t.after(async () => { offered[Symbol.dispose](); await server.stop(true); });
+  const socket = new WebSocket(`ws://[::1]:${server.port}`);
+  t.after(() => socket.terminate());
+  using forward = newWebSocketRpcSession<ShellApi>(socket, new RefusingShell());
+  using reverse = await accepted;
+  assert.equal((await reverse.info()).pid, process.pid);
+  class Sink extends RpcTarget { output() {} exit() {} }
+  const sink = new Sink();
+  const calls: Array<() => PromiseLike<unknown>> = [
+    () => reverse.run("printf touched > marker", { cwd: directory }),
+    () => reverse.exec(sink, "printf touched > marker", { cwd: directory }),
+    () => reverse.readFile(secret),
+    () => reverse.writeFile(secret, new TextEncoder().encode("changed")),
+    () => reverse.fork(),
+    () => reverse.openPty(sink, { command: "printf touched > marker", cwd: directory }),
+    () => reverse.startPtySession("work", { command: "printf touched > marker", cwd: directory }),
+    () => reverse.ptySession("work"),
+    () => reverse.ptySessions(),
+  ];
+  for (const call of calls) await assert.rejects(async () => { await call(); }, /does not run commands or share files/);
+  assert.equal(await readFile(secret, "utf8"), "unchanged");
+  await assert.rejects(() => stat(marker), { code: "ENOENT" });
+  const result = await forward.run("printf forward-ok");
+  try { assert.equal(result.stdout, "forward-ok"); } finally { result[Symbol.dispose](); }
 });
 
 test("forkShell forks a current peer's shell and recognises an older peer without fork", async (t) => {

@@ -242,6 +242,8 @@ File methods take absolute paths on the executing peer and reject with its syste
 
 A peer started with `--one-way` offers its peers only the handshake's `info()`; every other method is refused. This includes one-shot commands such as `cns run --one-way -- 'pwd'` and `cns tty --one-way`. Without the flag, these commands retain their bidirectional behavior. `cns mcp` always refuses reverse shell access. The flag does not authenticate the peer or encrypt a `ws://` connection; continue to use only trusted networks.
 
+One-way refusal is not a per-user authorization system. A peer that has shell access can use the named sessions in that process, including through a forked shell; a session name is not a credential. Releasing a fork stops its own commands and unnamed PTYs but does not revoke named-session handles already returned. Killing a named session invalidates handles to that session, even if its name is reused.
+
 On Windows peers, programs run on a ConPTY in Windows PowerShell, with the same quoting as `run`. **This path is untested.** It compiles, and `src/shell.test.ts` has a Windows-only PTY test, but it has not been run on Windows yet. The manually triggered `Windows` GitHub Actions workflow (`.github/workflows/windows.yml`) runs both test suites on `windows-latest`, including Windows versions of the named-session tests. Expected differences, from [Bun's ConPTY notes](https://bun.com/docs/runtime/child-process#platform-differences):
 
 - Hang-up and `--timeout` kill the program's process tree; Windows has no SIGHUP for programs to handle.

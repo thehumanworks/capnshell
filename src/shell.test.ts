@@ -536,6 +536,23 @@ test("named PTY sessions outlive the connection that started them and are found 
   assert.equal(second.ptySession("work").info().command, "sleep 60");
 });
 
+test("a fork shares named sessions and releasing it does not revoke a named handle", { skip: windows }, async (t) => {
+  const { connect } = registryFor(t);
+  const shell = connect();
+  const started = shell.startPtySession("work", { command: "printf READY; while IFS= read -r line; do printf 'got:%s\\n' \"$line\"; done" });
+  assert.equal((await started.wait({ text: "READY", timeoutMs: 10000 })).matched, true);
+  const fork = shell.fork();
+  assert.equal(fork.ptySessions()[0]?.pid, started.info().pid);
+  const handle = fork.ptySession("work");
+  fork[Symbol.dispose]();
+  handle.keys(["hello", "Enter"]);
+  assert.equal((await started.wait({ text: "got:hello", timeoutMs: 10000 })).matched, true);
+  await started.kill();
+  shell.startPtySession("work", { command: "sleep 60" });
+  assert.throws(() => handle.keys(["Enter"]), /no longer exists/);
+  handle[Symbol.dispose]();
+});
+
 test("attaching redraws the current screen, then streams; detaching leaves the program running", { skip: windows }, async (t) => {
   const { connect } = registryFor(t);
   const api = connect();
