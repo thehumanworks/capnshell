@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { copyFile, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
@@ -69,9 +69,26 @@ test("saved peer addresses persist across CLI invocations", { skip: process.plat
     const invocation = cliInvocation(args);
     return execa(invocation.file, invocation.args, { cwd, reject, env });
   }
+  // An empty address book lists nothing as text and an empty array as JSON.
+  assert.equal((await call(["peer", "list"])).stdout, "");
+  assert.deepEqual(JSON.parse((await call(["peer", "list", "--json"])).stdout), []);
   await call(["peer", "add", "studio", "ws://127.0.0.1:12345"]);
+  await call(["peer", "add", "build", "ws://127.0.0.1:12346"]);
   assert.match((await call(["peer", "list"])).stdout, /studio\s+ws:\/\/127\.0\.0\.1:12345\//);
+  // JSON lists the same entries, sorted by name, with name before url in each object.
+  const json = (await call(["peer", "list", "--json"])).stdout;
+  assert.deepEqual(JSON.parse(json), [{ name: "build", url: "ws://127.0.0.1:12346/" }, { name: "studio", url: "ws://127.0.0.1:12345/" }]);
+  assert.deepEqual(JSON.parse(json).map((peer: object) => Object.keys(peer)), [["name", "url"], ["name", "url"]]);
+  await call(["peer", "remove", "build"]);
   assert.notEqual((await call(["peer", "add", "studio", "ws://127.0.0.1:12346"], false)).exitCode, 0);
+  // Errors are the same with --json: a message on stderr, nothing on stdout and a failing status.
+  await chmod(env.CNS_CONFIG_DIR, 0o755);
+  for (const args of [["peer", "list"], ["peer", "list", "--json"]]) {
+    const unsafe = await call(args, false);
+    assert.deepEqual([unsafe.exitCode, unsafe.stdout], [1, ""]);
+    assert.match(unsafe.stderr, /directory must be private/);
+  }
+  await chmod(env.CNS_CONFIG_DIR, 0o700);
   await call(["peer", "remove", "studio"]);
   const missing = await call(["run", "--peer", "studio", "--", "pwd"], false);
   assert.notEqual(missing.exitCode, 0);
