@@ -1,4 +1,5 @@
-import { closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { checkConfigDirectory, checkPrivateDirectory, configDirectory, isPrivateFile, requirePrivateStateSupport } from "./config.js";
 
@@ -37,15 +38,33 @@ export function createPeerFile(name: string, content: string): void {
   try { writeFileSync(fd, content); } finally { closeSync(fd); }
 }
 
-/** Replace a private peer file's contents in place. */
+/**
+ * Replace a saved peer file's contents. The new contents go to a private temporary
+ * file that is then renamed over the old one, so a crash leaves either version whole.
+ * The temporary name starts with a dot, which peerNames never lists.
+ */
 export function rewritePeerFile(name: string, content: string): void {
   const target = file(name);
-  checkDirectories();
-  const fd = openSync(target, constants.O_WRONLY | constants.O_TRUNC | (constants.O_NOFOLLOW ?? 0));
+  if (readPeerFile(name) === undefined) throw new Error(`Unknown peer: ${name}`);
+  const temporary = path.join(directory(), `.${name}.${randomBytes(6).toString("hex")}.tmp`);
+  const fd = openSync(temporary, "wx", 0o600);
   try {
-    if (!isPrivateFile(fstatSync(fd))) throw new Error(`Peer file must be a private file owned by your user: ${target}`);
-    writeFileSync(fd, content);
-  } finally { closeSync(fd); }
+    try {
+      writeFileSync(fd, content);
+      fsyncSync(fd);
+    } finally { closeSync(fd); }
+    renameSync(temporary, target);
+  } catch (error) {
+    rmSync(temporary, { force: true });
+    throw error;
+  }
+}
+
+/** Whether any file, valid or not, is saved under this name. */
+export function peerFileExists(name: string): boolean {
+  const target = file(name);
+  try { checkDirectories(); lstatSync(target); return true; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
 }
 
 /** Read a saved peer's file, which must be a private regular file; undefined when there is none. */
@@ -63,10 +82,13 @@ export function readPeerFile(name: string): string | undefined {
   } finally { closeSync(fd); }
 }
 
-/** The names of every saved peer, sorted; [] when nothing has been saved yet. */
+/**
+ * The names of every saved peer, sorted; [] when nothing has been saved yet. Files
+ * whose names cannot be peer names, such as .DS_Store or a temporary file, are not peers.
+ */
 export function peerNames(): string[] {
   const peerDirectory = directory(); // Fail closed on unsupported platforms even when config is absent.
-  try { checkDirectories(); return readdirSync(peerDirectory).sort(); }
+  try { checkDirectories(); return readdirSync(peerDirectory).filter((name) => namePattern.test(name)).sort(); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
 }
 

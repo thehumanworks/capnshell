@@ -9,20 +9,26 @@ import { ShellApi, type ShellInfo } from "./shell.js";
  * returned whole, so `sessions:view` currently needs `sessions:control` and
  * `sessions:kill` too; derived read-only handles are a later slice.
  */
+/**
+ * The grants a peer holds, which the daemon may widen while the peer is connected.
+ * It is held privately: nothing a peer can call reaches it.
+ */
+export interface GrantHolder { current: readonly Permission[] }
+
 export class GrantedShell extends RpcTarget {
   #shell: ShellApi;
-  #grants: ReadonlySet<Permission>;
+  #grants: GrantHolder;
   #peer: string;
-  constructor(shell: ShellApi, grants: readonly Permission[], peer: string) {
+  constructor(shell: ShellApi, grants: readonly Permission[] | GrantHolder, peer: string) {
     super();
     this.#shell = shell;
-    this.#grants = new Set(grants);
+    this.#grants = Array.isArray(grants) ? { current: [...grants] } : grants as GrantHolder;
     this.#peer = peer;
   }
   /** What the peer may do here, as people read it. */
-  get grants(): string { return describeGrants([...this.#grants]); }
+  get grants(): string { return describeGrants([...this.#grants.current]); }
   #require(...permissions: Permission[]) {
-    const missing = permissions.filter((permission) => !this.#grants.has(permission));
+    const missing = permissions.filter((permission) => !this.#grants.current.includes(permission));
     if (missing.length) throw new Error(`Permission denied: ${missing.join(", ")} not granted to ${this.#peer}.`);
   }
   info(): ShellInfo { return this.#shell.info(); }
@@ -30,7 +36,7 @@ export class GrantedShell extends RpcTarget {
   exec(...args: Parameters<ShellApi["exec"]>) { this.#require("shell"); return this.#shell.exec(...args); }
   openPty(...args: Parameters<ShellApi["openPty"]>) { this.#require("shell"); return this.#shell.openPty(...args); }
   /** A fork carries the same grants. */
-  fork(): GrantedShell { this.#require("shell"); return new GrantedShell(this.#shell.fork(), [...this.#grants], this.#peer); }
+  fork(): GrantedShell { this.#require("shell"); return new GrantedShell(this.#shell.fork(), this.#grants, this.#peer); }
   stat(...args: Parameters<ShellApi["stat"]>) { this.#require("files"); return this.#shell.stat(...args); }
   access(...args: Parameters<ShellApi["access"]>) { this.#require("files"); return this.#shell.access(...args); }
   readdir(...args: Parameters<ShellApi["readdir"]>) { this.#require("files"); return this.#shell.readdir(...args); }

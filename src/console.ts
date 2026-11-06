@@ -7,7 +7,12 @@ import {
 } from "./shell.js";
 import { attachSession, attachTerminal, type RemoteNamedPty, type RemotePty } from "./terminal.js";
 
-export interface PeerSummary { id: string; info: ShellInfo; /** Set for an authenticated paired device. */ peer?: { name: string; fingerprint: string } }
+export interface PeerSummary {
+  id: string;
+  info: ShellInfo;
+  /** Set for an authenticated paired device; `daemon` for the daemons' standing link rather than one command's connection. */
+  peer?: { name: string; fingerprint: string; daemon: boolean };
+}
 export interface PeerController {
   peers(): Promise<PeerSummary[]>;
   info(id: string): Promise<ShellInfo>;

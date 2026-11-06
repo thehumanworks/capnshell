@@ -2,6 +2,8 @@ import { newWebSocketRpcSession } from "capnweb";
 import { connectControl } from "../commands/daemon.js";
 import { closeSocket, openSocket } from "../connect.js";
 import type { PeerController } from "../console.js";
+import { loadIdentity } from "../identity.js";
+import { authenticateClient } from "../link.js";
 import { RefusingShell } from "../refusing-shell.js";
 import type { ShellApi } from "../shell.js";
 import { plain, type RemoteNamedPty } from "../terminal.js";
@@ -66,12 +68,22 @@ function limitCalls(open: (signal: AbortSignal) => Promise<Link>): (signal: Abor
  * does. Closing a call's connection makes the listener kill its commands and
  * end its waits.
  */
-export function listenerTarget(url: string, cwd?: string): McpTarget {
+export function listenerTarget(url: string, cwd?: string, expect?: { name: string; publicKey: string }): McpTarget {
   return {
-    label: url,
+    label: expect ? `${expect.name} (${url})` : url,
     cwd,
     open: limitCalls(async (signal) => {
+      // A paired device: prove this device's identity and require the saved one on the other end.
+      const identity = expect ? loadIdentity() : undefined;
+      if (expect && !identity) throw new Error("This device has no identity yet; run cns identity or cns up first.");
       const socket = await openSocket(url, signal);
+      if (expect) {
+        const abort = () => closeSocket(socket, "Cancelled");
+        signal.addEventListener("abort", abort, { once: true });
+        try { await authenticateClient(socket, identity!, { expect: expect.publicKey }); }
+        catch (error) { closeSocket(socket); throw error; }
+        finally { signal.removeEventListener("abort", abort); }
+      }
       const remote = newWebSocketRpcSession<ShellApi>(socket, new RefusingShell());
       let closed = false;
       let lost = false;

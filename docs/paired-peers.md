@@ -3,7 +3,7 @@
 Status: in progress, 6 November 2026. Base: `main` at `1986d6a` with the address book
 (PR 12), `peer list --json` (PR 18) and scoped handle lifetimes (PR 19). Decisions taken so
 far: `cns up` listens on all interfaces for paired devices; both sides confirm a pairing;
-the relay is a Cloudflare Worker; slices 1 and 2 are merged as PRs 21 and 22; slice 3 (pairing, peers file v2, `cns up`, `cns pair`, `cns peers`, named targets and grant enforcement at the method level) is PR 23.
+the relay is a Cloudflare Worker; slices 1 and 2 are merged as PRs 21 and 22; slice 3 (pairing, peers file v2, `cns up`, `cns pair`, `cns peers`, named targets and grant enforcement at the method level) is PR 23; `status`, `doctor`, grant and address changes with live refresh, link deduplication, paired MCP targets and the fixes from PR 23's review are PR 24.
 
 The requirement is **two devices I know of that have paired**. Today `cns` connects a
 listener and a connector, identifies peers by connection IDs such as `p1`, grants
@@ -19,7 +19,7 @@ before the slice that needs them.
 | --- | --- |
 | Device | One installation of `cns` for one OS user, with its own identity. |
 | Identity | A device's long-lived Ed25519 key pair. Its public key is the device's name on the wire; its fingerprint is what people compare. |
-| Alias | The local, human-readable name a device gives another device: `studio`, `laptop`. Aliases never travel on the wire. |
+| Alias | The local, human-readable name a device gives another device: `studio`, `laptop`. Aliases never travel on the wire; during pairing each device sends only the name it suggests for itself. |
 | Pairing | The one-time exchange in which two devices learn and confirm each other's identity. |
 | Grant | What one device permits a paired device to do on it. Grants are directional and enforced by the device that grants them. |
 | Peer daemon | The one `cns` process per device that listens, dials, hosts sessions and serves local clients. |
@@ -30,7 +30,7 @@ before the slice that needs them.
 
 - `cns up` creates `~/.cns/identity.json` (`0600`) on first use: `{ "version": 1, "publicKey", "privateKey", "createdAt" }`, keys as base64url Ed25519. The file lives under the same trusted configuration path as the address book and gets the same ownership and mode checks (PR 12, PR 13).
 - The **fingerprint** is `SHA-256(publicKey)`, shown as groups of base32, e.g. `k7qm-3h2x-...`. It is what `cns pair` asks people to compare and what `cns peers` shows.
-- A paired device is recorded in `~/.cns/peers/<alias>` as JSON: `{ "version": 2, "publicKey", "fingerprint", "addresses": [...], "pairedAt", "grants": { "incoming": [...], "outgoing": [...] } }`. The plain-URL files PR 12 writes stay valid as **unpaired address-book entries**; `cns peer list` shows both kinds and marks which is which.
+- A paired device is recorded in `~/.cns/peers/<alias>` as JSON: `{ "version": 2, "publicKey", "addresses": [...], "pairedAt", "grants": { "incoming": [...], "outgoing": [...] } }`; the fingerprint is derived from the key, not stored. Changes replace the file whole (write a private temporary file, then rename). A file in the directory that is not a valid record is reported and skipped, so it never stops the other devices from authenticating. The plain-URL files PR 12 writes stay valid as **unpaired address-book entries**; `cns peer list` shows both kinds and marks which is which.
 - Trust is keyed by the public key, so renaming an alias (`cns peer rename old new`) changes nothing about trust. Two aliases for the same key are refused; a key seen under a new alias is reported as the existing alias.
 - **Identity change**: a device that presents a different key under a known address is treated as an unknown device, never silently re-trusted. `cns peers` shows `identity changed`; the user must pair again. Rotation is therefore "pair again", and there is no automatic migration of grants to a new key.
 - **Lost local state** (identity or peers directory gone) means the device is new to everyone and must pair again. Documented, not recovered.
@@ -52,11 +52,11 @@ studio: Allow laptop (fingerprint j4ra-...) to use this machine's shell? [y/N] y
 Paired. Reverse shell access has not been granted.
 ```
 
-- An **invite** is `cns1:` plus base64url JSON: `{ "v": 1, "key": <inviter public key>, "addr": [<URLs the inviter is reachable at>], "secret": <128-bit random>, "exp": <unix time> }`. It is single-use and expires after five minutes by default (`--expires`). The inviter's daemon keeps the pending invite in memory only.
+- An **invite** is `cns1:` plus base64url JSON: `{ "v": 1, "id", "key": <inviter public key>, "addr": [<URLs the inviter is reachable at>], "secret": <128-bit random>, "exp": <unix time>, "name": <the inviter's suggested name> }`. It is single-use and expires after five minutes by default (`--expires`), or as soon as the `cns pair` that printed it exits. The inviter's daemon keeps the pending invite in memory only.
 - The invitee dials each address in turn and runs the **handshake** (section 3). The handshake proves possession of both keys. The invitee additionally proves knowledge of the invite secret by including an HMAC of the transcript, so a device that intercepted the invite's public part but not the secret cannot pair.
-- Each side **confirms interactively**, showing the other's fingerprint and the grants being requested. Non-interactive acceptance (`--yes`, `--grant shell,files`) exists for scripted setups and is spelled out as such in the output.
+- Each side **confirms interactively**, showing the other's fingerprint and the grants being requested. Non-interactive pairing (`--yes`, with `--grant shell,files` for what to allow) exists for scripted setups; `--yes` alone grants nothing. The inviting side grants at most what the other device requested.
 - Pairing and granting are **separate states**: a pairing with no grants in a direction is valid and useful (the device is recognized but may do nothing). The example above pairs both ways and grants shell access in one direction only.
-- Duplicate alias, expired or refused invite, unknown identity, and an identity change on a known alias each have a distinct error text and exit status 2.
+- Everything that can fail locally is checked before the other device saves anything: an alias already in use, or a device already paired, is refused before connecting (exit 1). If the inviting device cannot save the pairing, it declines, so neither side keeps half of one. A declined or refused pairing, an expired or unknown invite, an unpaired device and an identity change each have a distinct error text and exit status 3.
 
 ## 3. Authenticated links
 

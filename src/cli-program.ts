@@ -24,8 +24,19 @@ export function createCli(): Command {
   const alias = program.command("peer").description("Manage locally saved peer addresses (not authenticated identities)");
   alias.command("add <name> <url>").description("Save a new peer address without replacing an existing alias")
     .action(async (name: string, url: string) => { const { addAlias } = await import("./aliases.js"); addAlias(name, url); console.log(`Saved ${name}.`); });
-  alias.command("remove <name>").description("Remove a saved peer address")
-    .action(async (name: string) => { const { removeAlias } = await import("./aliases.js"); removeAlias(name); console.log(`Removed ${name}.`); });
+  alias.command("remove <name>").description("Remove a saved peer; for a paired device, its links end at once")
+    .option("--state <path>", "Local daemon state file")
+    .action(async (name: string, options: { state?: string }) => { const { removePeer } = await import("./commands/pairing-cli.js"); await removePeer(name, options); });
+  alias.command("grant <name> <grants...>").description("Let a paired device use more of this device: shell, files, sessions, all or permissions")
+    .option("--state <path>", "Local daemon state file")
+    .action(async (name: string, grants: string[], options: { state?: string }) => { const { grant } = await import("./commands/pairing-cli.js"); await grant(name, grants, options); });
+  alias.command("revoke <name> [grants...]").description("Take access away from a paired device, now; without grants, all of it")
+    .option("--state <path>", "Local daemon state file")
+    .action(async (name: string, grants: string[], options: { state?: string }) => { const { revoke } = await import("./commands/pairing-cli.js"); await revoke(name, grants, options); });
+  alias.command("address <name> <urls...>").description("Add where to reach a paired device, or remove addresses with --remove")
+    .option("--remove", "Remove these addresses instead of adding them")
+    .option("--state <path>", "Local daemon state file")
+    .action(async (name: string, urls: string[], options: { remove?: boolean; state?: string }) => { const { address } = await import("./commands/pairing-cli.js"); await address(name, urls, options); });
   alias.command("list").description("List saved peers: address aliases and paired devices")
     .option("--json", "Print a JSON array sorted by name, [] when there are none: { name, url } per alias, plus paired, fingerprint, publicKey, addresses and grants per paired device")
     .action(async (options: { json?: boolean }) => {
@@ -47,10 +58,10 @@ export function createCli(): Command {
     .description("Pair this device with another: print an invite, or paste one from the other device")
     .argument("[invite]", "The cns1:... invite the other device printed")
     .option("--name <name>", "Save the other device under this name")
-    .option("--request <grants>", "What to ask for on the other device: shell, files, sessions, all, or permissions (default: all)")
-    .option("--offer <grants>", "What the other device may do here: shell, files, sessions, all, or permissions (default: none)")
+    .option("--request <grants>", "With an invite: what to ask for on the other device: shell, files, sessions, all, or permissions (default: all)")
+    .option("--grant <grants>", "What the other device may do here: shell, files, sessions, all, or permissions (default: none). The inviting device grants at most what was requested; without --grant it asks, and --yes alone grants nothing")
     .option("--expires <minutes>", "How long a printed invite stays valid (default: 5)")
-    .option("--yes", "Accept without asking; for scripts, after comparing fingerprints yourself")
+    .option("--yes", "Pair without asking; for scripts, after comparing fingerprints yourself")
     .option("--state <path>", "Local daemon state file")
     .addHelpText("after", "\nOn the device you want to reach:  cns pair          (prints an invite and waits)\nOn the other device:              cns pair 'cns1:...'\nBoth sides show the other's fingerprint and ask before saving anything.")
     .action(async (invite: string | undefined, options) => { const { pair } = await import("./commands/pairing-cli.js"); await pair(invite, options); });
@@ -59,6 +70,18 @@ export function createCli(): Command {
     .option("--json", "Print the list as JSON")
     .option("--state <path>", "Local daemon state file")
     .action(async (options) => { const { peers } = await import("./commands/pairing-cli.js"); await peers(options); });
+  program.command("status")
+    .description("Show this device's identity, its daemon and its links")
+    .option("--json", "Print the status as JSON")
+    .option("--state <path>", "Local daemon state file")
+    .action(async (options) => { const { status } = await import("./commands/pairing-cli.js"); await status(options); });
+  program.command("doctor")
+    .description("Check how this device reaches a paired device: each saved address, authentication and grants")
+    .argument("<name>", "A saved peer name")
+    .option("--json", "Print the report as JSON")
+    .option("--state <path>", "Local daemon state file")
+    .addHelpText("after", "\nExit 0 when an address answered as the paired device, 3 when it answered as another device or refused the pairing, 5 when none answered or none is saved.")
+    .action(async (name: string, options) => { const { doctor } = await import("./commands/pairing-cli.js"); await doctor(name, options); });
   program.command("identity")
     .description("Show this device's identity for pairing, creating it on first use")
     .option("--json", "Print { publicKey, fingerprint, createdAt, path } as JSON")
