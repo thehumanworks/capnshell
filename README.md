@@ -47,6 +47,20 @@ Use an address reachable from the other machine. This does not configure routing
 
 Use `cns <command> --help` for options.
 
+## Saved peer addresses
+
+Save an address under a local alias and select it explicitly with `--peer`:
+
+```sh
+cns peer add studio ws://127.0.0.1:47381
+cns peer list
+cns run --peer studio -- 'uname -a'
+cns tty --peer studio
+cns peer remove studio
+```
+
+The alias is an address-book entry, not an authenticated identity. Peer connections remain unauthenticated; use them only on trusted networks. Saved aliases are local to this user in `~/.cns/peers` (or `$CNS_CONFIG_DIR/peers`). Existing aliases cannot be replaced by `add`: remove one first to change its address. Saved addresses cannot include paths or query strings; use an explicit URL when those are needed. Missing aliases fail instead of falling back to a default. The configuration directory and its entire path must be trusted and protected by the user from modification by other users; custom `CNS_CONFIG_DIR` directories must already exist. On Unix, untrusted owners and shared-writable ancestors other than root-owned sticky directories are rejected. These pathname checks are best-effort safeguards, not a filesystem security boundary or a guarantee against path races. Saved aliases are unavailable on Windows until filesystem ACL checks are supported; use explicit URLs there. These checks do not protect against a process running as the same user. `--peer` cannot be combined with a URL or endpoint flags. This is separate from the console's connection IDs and does not rename connected peers or change MCP and Pi selection.
+
 ## Multiple peers
 
 Each console can list and select its remote peers:

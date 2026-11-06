@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { copyFile, mkdtemp, readdir, rm } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
@@ -59,4 +59,21 @@ test("compiled CLI runs outside its checkout without a JS runtime on PATH", { sk
   const result = await execa(executable, ["--help"], { cwd, env: { PATH: "" } });
   assert.match(result.stdout, /Usage: cns/);
   assert.equal(result.exitCode, 0);
+});
+
+test("saved peer addresses persist across CLI invocations", { skip: process.platform === "win32" }, async (t) => {
+  const cwd = await temporaryDirectory(t);
+  const env = { ...cliEnvironment(), CNS_CONFIG_DIR: path.join(cwd, "config") };
+  await mkdir(env.CNS_CONFIG_DIR, { mode: 0o700 });
+  async function call(args: string[], reject = true) {
+    const invocation = cliInvocation(args);
+    return execa(invocation.file, invocation.args, { cwd, reject, env });
+  }
+  await call(["peer", "add", "studio", "ws://127.0.0.1:12345"]);
+  assert.match((await call(["peer", "list"])).stdout, /studio\s+ws:\/\/127\.0\.0\.1:12345\//);
+  assert.notEqual((await call(["peer", "add", "studio", "ws://127.0.0.1:12346"], false)).exitCode, 0);
+  await call(["peer", "remove", "studio"]);
+  const missing = await call(["run", "--peer", "studio", "--", "pwd"], false);
+  assert.notEqual(missing.exitCode, 0);
+  assert.match(missing.stderr, /Unknown peer alias/);
 });
