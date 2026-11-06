@@ -325,7 +325,7 @@ Detaching with `:quit` or Ctrl+C leaves the daemon, peer connections and pending
 | `list_sessions` | A peer's named sessions. |
 | `kill_session` | End and remove a named session. |
 
-Results include text for the agent and structured content matching each tool's output schema. A command that exits nonzero is a normal result with its exit code; an unreachable peer, a missing session or invalid arguments are tool errors. `run_command` has a default deadline of 120 seconds (`timeoutMs: 0` removes it) and returns the start and end of output longer than 30,000 characters. Peers still keep at most 1 MiB. With several daemon peers connected, calls must name a `peer`.
+With `--daemon`, `list_peers` also gives each paired device's `name` and `fingerprint`, and `peer` accepts the name. Results include text for the agent and structured content matching each tool's output schema. A command that exits nonzero is a normal result with its exit code; an unreachable peer, a missing session or invalid arguments are tool errors. `run_command` has a default deadline of 120 seconds (`timeoutMs: 0` removes it) and returns the start and end of output longer than 30,000 characters. Peers still keep at most 1 MiB. With several daemon peers connected, calls must name a `peer`.
 
 By default the client starts `cns mcp` and talks to it over stdin and stdout. The tools use the listener at the URL, or else `--bind`/`--port`, `CNS_BIND`/`CNS_PORT` or `127.0.0.1:47381`, as `cns run` does. With `--daemon [--state PATH]` they use the peers connected to `cns listen --daemon`, which suits machines behind NAT that connect out to yours. `--cwd PATH` (or `CNS_CWD`) sets the working directory for calls that do not pass `cwd`.
 
