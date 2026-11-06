@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promi
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { launchCli, unusedPort } from "./test-support.js";
+import { LOOPBACK, LOOPBACK_HOST, launchCli, unusedPort } from "./test-support.js";
 
 const print = (marker: string) => process.platform === "win32"
   ? `[Console]::Write('${marker}')` : `printf '${marker}'`;
@@ -20,10 +20,10 @@ async function eventually(check: () => Promise<boolean>, label: string): Promise
 
 test("listener routes multiple bidirectional peers explicitly and survives disconnects", { timeout: 30000 }, async (t) => {
   const port = await unusedPort();
-  const url = `ws://[::1]:${port}`;
-  const listener = launchCli(t, ["listen", "--bind", "::1", "--port", port], { env: { CNS_TEST_PEER: "LISTENER_ONLY" } });
+  const url = `ws://${LOOPBACK_HOST}:${port}`;
+  const listener = launchCli(t, ["listen", "--bind", LOOPBACK, "--port", port], { env: { CNS_TEST_PEER: "LISTENER_ONLY" } });
   await listener.waitFor("listening at");
-  const rejected = await fetch(`http://[::1]:${port}`, { headers: { Origin: "https://example.invalid", Upgrade: "websocket" } });
+  const rejected = await fetch(`http://${LOOPBACK_HOST}:${port}`, { headers: { Origin: "https://example.invalid", Upgrade: "websocket" } });
   assert.equal(rejected.status, 401);
   const first = launchCli(t, ["connect", url], { env: { CNS_TEST_PEER: "FIRST_ONLY" } });
   await first.waitFor("Type a shell command");
@@ -76,8 +76,8 @@ test("listener routes multiple bidirectional peers explicitly and survives disco
 
 test("run preserves exact output, quoting and remote exit status against a headless listener", { timeout: 30000 }, async (t) => {
   const port = await unusedPort();
-  const url = `ws://[::1]:${port}`;
-  const listener = launchCli(t, ["listen", "--bind", "::1", "--port", port, "--no-repl"]);
+  const url = `ws://${LOOPBACK_HOST}:${port}`;
+  const listener = launchCli(t, ["listen", "--bind", LOOPBACK, "--port", port, "--no-repl"]);
   await listener.waitFor("listening at");
   const command = process.platform === "win32"
     ? `[Console]::Write("héllo 'quoted' "+'$HOME'); [Console]::Error.Write('exact error'); exit 7`
@@ -98,7 +98,7 @@ test("run preserves exact output, quoting and remote exit status against a headl
   assert.deepEqual(disconnected, connected, "each disconnect identifies the same endpoint as its connection");
   for (const identity of connected) {
     assert.ok(identity!.startsWith(`${os.hostname()} (`));
-    assert.match(identity!, /\[::1\]:\d+\)$/);
+    assert.match(identity!, new RegExp(`${LOOPBACK_HOST.replace(/[.[\]]/g, "\\$&")}:\\d+\\)$`));
   }
   assert.doesNotMatch(listener.stdout, /\bp\d+\b/);
 });
@@ -111,21 +111,21 @@ test("run uses environment defaults and honors explicit endpoint and cwd overrid
   await writeFile(path.join(directory, "marker.txt"), "ENV_CWD");
   await writeFile(path.join(override, "marker.txt"), "FLAG_CWD");
   const port = await unusedPort();
-  const env = { CNS_BIND: "::1", CNS_PORT: port, CNS_CWD: directory };
+  const env = { CNS_BIND: LOOPBACK, CNS_PORT: port, CNS_CWD: directory };
   const listener = launchCli(t, ["listen", "--no-repl"], { env });
-  await listener.waitFor(`listening at ws://[::1]:${port}`);
+  await listener.waitFor(`listening at ws://${LOOPBACK_HOST}:${port}`);
   const command = process.platform === "win32"
     ? "[Console]::Write((Get-Content -Raw marker.txt)); exit 7"
     : "printf '%s' \"$(< marker.txt)\"; exit 7";
   for (const scenario of [
     { args: ["run", "--", command], env, output: "ENV_CWD" },
     {
-      args: ["run", "--bind", "::1", "--port", port, "--cwd", override, "--", command],
+      args: ["run", "--bind", LOOPBACK, "--port", port, "--cwd", override, "--", command],
       env: { CNS_BIND: "invalid", CNS_PORT: "invalid", CNS_CWD: "" },
       output: "FLAG_CWD",
     },
     {
-      args: ["run", `ws://[::1]:${port}`, "--", command],
+      args: ["run", `ws://${LOOPBACK_HOST}:${port}`, "--", command],
       env: { ...env, CNS_BIND: "invalid", CNS_PORT: "invalid" },
       output: "ENV_CWD",
     },
@@ -142,8 +142,8 @@ test("run exports reverse RPC while its command is live and disconnect cleans up
   t.after(() => rm(directory, { recursive: true, force: true }));
   const pidFile = path.join(directory, "command.pid");
   const port = await unusedPort();
-  const url = `ws://[::1]:${port}`;
-  const listener = launchCli(t, ["listen", "--bind", "::1", "--port", port]);
+  const url = `ws://${LOOPBACK_HOST}:${port}`;
+  const listener = launchCli(t, ["listen", "--bind", LOOPBACK, "--port", port]);
   await listener.waitFor("listening at");
   const survivor = launchCli(t, ["connect", url]);
   await survivor.waitFor("Type a shell command");
@@ -171,8 +171,8 @@ test("tty runs programs on a remote terminal with piped input and returns their 
   const directory = await mkdtemp(path.join(os.tmpdir(), "cns tty "));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const port = await unusedPort();
-  const url = `ws://[::1]:${port}`;
-  const listener = launchCli(t, ["listen", "--bind", "::1", "--port", port]);
+  const url = `ws://${LOOPBACK_HOST}:${port}`;
+  const listener = launchCli(t, ["listen", "--bind", LOOPBACK, "--port", port]);
   await listener.waitFor("listening at");
   const tty = launchCli(t, ["tty", url, "--cwd", directory, "--cols", "100", "--rows", "30", "--term", "vt100", "--",
     `tty -s && printf 'IS''TTY %s %s ' "$TERM" "$(pwd)"; stty size; read -r line; printf 'got:%s\n' "$line"; exit 5`]);
@@ -207,8 +207,8 @@ test("tty runs programs on a remote terminal with piped input and returns their 
 
 test("named tty sessions persist across CLI calls for keys, screens, attach and kill", { timeout: 60000 }, async (t) => {
   const port = await unusedPort();
-  const url = `ws://[::1]:${port}`;
-  const listener = launchCli(t, ["listen", "--bind", "::1", "--port", port, "--no-repl"]);
+  const url = `ws://${LOOPBACK_HOST}:${port}`;
+  const listener = launchCli(t, ["listen", "--bind", LOOPBACK, "--port", port, "--no-repl"]);
   await listener.waitFor("listening at");
   const cli = async (...args: string[]) => {
     const command = launchCli(t, args);
@@ -259,8 +259,8 @@ test("a named session can be manually reattached after an abrupt client loss", {
   const directory = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-reattach-")));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const port = await unusedPort();
-  const url = `ws://[::1]:${port}`;
-  const listener = launchCli(t, ["listen", "--bind", "::1", "--port", port, "--no-repl"]);
+  const url = `ws://${LOOPBACK_HOST}:${port}`;
+  const listener = launchCli(t, ["listen", "--bind", LOOPBACK, "--port", port, "--no-repl"]);
   await listener.waitFor("listening at");
   const cli = async (...args: string[]) => {
     const child = launchCli(t, args);
@@ -302,13 +302,13 @@ test("a named session can be manually reattached after an abrupt client loss", {
     try { process.kill(lost.pid, 0); return false; }
     catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
   }, "host shutdown ended its session process");
-  const replacement = launchCli(t, ["listen", "--bind", "::1", "--port", port, "--no-repl"]);
+  const replacement = launchCli(t, ["listen", "--bind", LOOPBACK, "--port", port, "--no-repl"]);
   await replacement.waitFor("listening at");
   assert.deepEqual(JSON.parse((await cli("sessions", url, "--json")).stdout), []);
 });
 
 test("run and interactive connect report unreachable listeners as failure", { timeout: 15000 }, async (t) => {
-  const url = `ws://[::1]:${await unusedPort()}`;
+  const url = `ws://${LOOPBACK_HOST}:${await unusedPort()}`;
   const run = launchCli(t, ["run", url, "--", print("MUST_NOT_RUN")]);
   const interactive = launchCli(t, ["connect", url]);
   const codes = await Promise.all([run.exited, interactive.exited]);
@@ -320,8 +320,8 @@ test("run and interactive connect report unreachable listeners as failure", { ti
 
 test("a one-way listener uses its peers' shells and refuses theirs", { timeout: 30000 }, async (t) => {
   const port = await unusedPort();
-  const url = `ws://[::1]:${port}`;
-  const listener = launchCli(t, ["listen", "--one-way", "--bind", "::1", "--port", port], { env: { CNS_TEST_PEER: "LISTENER_ONLY" } });
+  const url = `ws://${LOOPBACK_HOST}:${port}`;
+  const listener = launchCli(t, ["listen", "--one-way", "--bind", LOOPBACK, "--port", port], { env: { CNS_TEST_PEER: "LISTENER_ONLY" } });
   await listener.waitFor("listening at");
   assert.match(listener.output, /One-way: peers cannot run commands or read files here/);
   const peer = launchCli(t, ["connect", url], { env: { CNS_TEST_PEER: "PEER_ONLY" } });
@@ -339,8 +339,8 @@ test("one-shot run and tty can refuse reverse shell calls while using the remote
   const directory = await mkdtemp(path.join(os.tmpdir(), "cns-one-way-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const port = await unusedPort();
-  const url = `ws://[::1]:${port}`;
-  const listener = launchCli(t, ["listen", "--bind", "::1", "--port", port]);
+  const url = `ws://${LOOPBACK_HOST}:${port}`;
+  const listener = launchCli(t, ["listen", "--bind", LOOPBACK, "--port", port]);
   await listener.waitFor("listening at");
 
   const run = launchCli(t, ["run", url, "--one-way", "--cwd", directory, "--", "while [ ! -f release ]; do sleep 0.05; done; printf DONE"], { env: { CNS_TEST_PEER: "RUN_SECRET" } });
@@ -368,9 +368,9 @@ test("a saved peer address reaches the selected listener", { timeout: 30000, ski
   t.after(() => rm(directory, { recursive: true, force: true }));
   const env = { CNS_CONFIG_DIR: directory };
   const port = await unusedPort();
-  const listener = launchCli(t, ["listen", "--bind", "::1", "--port", port, "--no-repl"]);
+  const listener = launchCli(t, ["listen", "--bind", LOOPBACK, "--port", port, "--no-repl"]);
   await listener.waitFor("listening at");
-  const add = launchCli(t, ["peer", "add", "studio", `ws://[::1]:${port}`], { env });
+  const add = launchCli(t, ["peer", "add", "studio", `ws://${LOOPBACK_HOST}:${port}`], { env });
   assert.equal(await add.exited, 0);
   const run = launchCli(t, ["run", "--peer", "studio", "--", print("ALIAS_TARGET")], { env });
   assert.equal(await run.exited, 0);

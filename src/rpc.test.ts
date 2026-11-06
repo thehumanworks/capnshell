@@ -7,6 +7,7 @@ import { newBunWebSocketRpcSession, newMessagePortRpcSession, newWebSocketRpcSes
 import { forkShell } from "./connect.js";
 import { RefusingShell } from "./refusing-shell.js";
 import { localShellInfo, ShellApi, type RunResult } from "./shell.js";
+import { LOOPBACK, LOOPBACK_HOST } from "./test-support.js";
 
 // Model an untrusted caller, not the typed client contract. Runtime validation
 // must reject malformed values even when the other peer is not TypeScript.
@@ -21,7 +22,7 @@ test("Cap’n Web validates untrusted calls and keeps the bidirectional session 
   let accept!: (stub: RpcStub<ShellApi>) => void;
   const accepted = new Promise<RpcStub<ShellApi>>((resolve) => { accept = resolve; });
   const server = Bun.serve<Data>({
-    hostname: "::1", port: 0,
+    hostname: LOOPBACK, port: 0,
     fetch(request, server) {
       if (server.upgrade(request, { data: {} })) return;
       return new Response("WebSocket required", { status: 400 });
@@ -42,7 +43,7 @@ test("Cap’n Web validates untrusted calls and keeps the bidirectional session 
     clientApi[Symbol.dispose]();
     await server.stop(true);
   });
-  const client = new WebSocket(`ws://[::1]:${server.port}`);
+  const client = new WebSocket(`ws://${LOOPBACK_HOST}:${server.port}`);
   t.after(() => client.terminate());
   // Cap'n Web queues outgoing calls until the native client socket opens.
   using clientRemote = newWebSocketRpcSession<UntrustedShell>(client, clientApi);
@@ -90,7 +91,7 @@ test("one-way WebSocket refuses valid reverse operations without blocking forwar
   let accept!: (stub: RpcStub<ShellApi>) => void;
   const accepted = new Promise<RpcStub<ShellApi>>((resolve) => { accept = resolve; });
   const server = Bun.serve<Data>({
-    hostname: "::1", port: 0,
+    hostname: LOOPBACK, port: 0,
     fetch(request, server) { if (server.upgrade(request, { data: {} })) return; return new Response("WebSocket required", { status: 400 }); },
     websocket: {
       idleTimeout: 0,
@@ -100,7 +101,7 @@ test("one-way WebSocket refuses valid reverse operations without blocking forwar
     },
   });
   t.after(async () => { offered[Symbol.dispose](); await server.stop(true); });
-  const socket = new WebSocket(`ws://[::1]:${server.port}`);
+  const socket = new WebSocket(`ws://${LOOPBACK_HOST}:${server.port}`);
   t.after(() => socket.terminate());
   using forward = newWebSocketRpcSession<ShellApi>(socket, new RefusingShell());
   using reverse = await accepted;

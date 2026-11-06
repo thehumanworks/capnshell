@@ -35,8 +35,16 @@ export async function daemonHome(t: TestContext, prefix = "cns-daemon-"): Promis
   return { home, statePath };
 }
 
+/**
+ * The loopback address tests bind: `::1` where the host has IPv6, else `127.0.0.1`.
+ * Some containers, including Claude Code's cloud sessions, have no IPv6 at all.
+ */
+export const LOOPBACK = Object.values(os.networkInterfaces()).flat().some((entry) => entry?.address === "::1") ? "::1" : "127.0.0.1";
+/** `LOOPBACK` as it appears in a URL: an IPv6 address is bracketed. */
+export const LOOPBACK_HOST = LOOPBACK.includes(":") ? `[${LOOPBACK}]` : LOOPBACK;
+
 /** A port that is free on `host`, which should be the address the test then binds. */
-export async function unusedPort(host = "::1"): Promise<string> {
+export async function unusedPort(host = LOOPBACK): Promise<string> {
   const probe = net.createServer();
   probe.listen(0, host);
   await once(probe, "listening");

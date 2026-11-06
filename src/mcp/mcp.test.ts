@@ -7,7 +7,7 @@ import test, { type TestContext } from "node:test";
 import { Client, StreamableHTTPClientTransport, type CallToolResult } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { connectControl } from "../commands/daemon.js";
-import { cliEnvironment, cliInvocation, launchCli, unusedPort } from "../test-support.js";
+import { LOOPBACK, LOOPBACK_HOST, cliEnvironment, cliInvocation, launchCli, unusedPort } from "../test-support.js";
 import { LegacySessions, MAX_SESSIONS } from "./legacy-sessions.js";
 import { clip, createMcpServer, MAX_RESULT_CHARS } from "./server.js";
 import type { McpTarget, ToolController } from "./target.js";
@@ -18,9 +18,9 @@ const TOKEN = "t".repeat(40);
 
 async function listener(t: TestContext, repl = false) {
   const port = await unusedPort();
-  const peer = launchCli(t, ["listen", "--bind", "::1", "--port", port, ...repl ? [] : ["--no-repl"]]);
+  const peer = launchCli(t, ["listen", "--bind", LOOPBACK, "--port", port, ...repl ? [] : ["--no-repl"]]);
   await peer.waitFor("listening at");
-  return { peer, url: `ws://[::1]:${port}` };
+  return { peer, url: `ws://${LOOPBACK_HOST}:${port}` };
 }
 
 /** Start cns mcp over stdio as an MCP client would, speaking the protocol revision `mode` selects. */
