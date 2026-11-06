@@ -181,4 +181,4 @@ Each slice is a PR with its own tests, merged after review, in this order unless
 5. `cns tty studio` without a name uses the `main` named session (recommended) or an unnamed PTY.
 6. Exclusive-control lease for sessions: not in the first release (recommended).
 7. Session persistence across host restart: not in this plan (recommended).
-8. Transport order: encrypted WebSocket, then a self-hosted relay, then iroh on evidence (recommended), or iroh first.
+8. Transport order: settled. Encrypted WebSocket, direct first and the relay (Cloudflare Worker or `cns relay`) last; iroh evaluated and deferred, see [iroh-evaluation.md](iroh-evaluation.md).
