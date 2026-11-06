@@ -11,7 +11,7 @@ export interface PeerSummary {
   id: string;
   info: ShellInfo;
   /** Set for an authenticated paired device; `daemon` for the daemons' standing link rather than one command's connection. */
-  peer?: { name: string; fingerprint: string; daemon: boolean };
+  peer?: { name: string; fingerprint: string; daemon: boolean; via: "direct" | "relay" };
 }
 export interface PeerController {
   peers(): Promise<PeerSummary[]>;

@@ -12,7 +12,9 @@ const posix = process.platform !== "win32";
 
 test("a daemon whose peer restarted after losing the link silently links again", { skip: !posix, timeout: 90000 }, async (t) => {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-links-")));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  // Hooks run in the order they were added: stop the daemons first, then remove their directories.
+  const cleanups: Array<() => Promise<unknown>> = [];
+  t.after(async () => { for (const cleanup of cleanups.reverse()) await cleanup(); await rm(root, { recursive: true, force: true }); });
   const cli = async (dir: string, args: string[]) => {
     const child = launchCli(t, args, { env: { CNS_CONFIG_DIR: dir, HOME: dir } });
     child.child.stdin.end();
@@ -49,7 +51,7 @@ test("a daemon whose peer restarted after losing the link silently links again",
     upstream.on("error", () => {});
   });
   await new Promise<void>((resolve) => proxy.listen(Number(proxyPort), "127.0.0.1", resolve));
-  t.after(async () => {
+  cleanups.push(async () => {
     await cli(large.dir, ["stop", "--state", large.state]);
     await cli(small.dir, ["stop", "--state", small.state]);
     for (const pair of pairs) { pair.client.destroy(); pair.upstream.destroy(); }

@@ -27,6 +27,8 @@ export interface ListenerInfo {
   oneWay: boolean;
   /** Only paired devices are accepted, after authenticating. */
   paired?: boolean;
+  /** The relay this daemon registers at, if any. */
+  relay?: string;
 }
 export interface DaemonStatus extends ListenerInfo {
   pid: number;
@@ -36,8 +38,10 @@ export interface DaemonStatus extends ListenerInfo {
   peers: number;
   /** This device's identity, when the daemon accepts paired devices. */
   identity?: { publicKey: string; fingerprint: string };
-  /** The URLs other devices can use to reach this listener. */
+  /** The URLs other devices can use to reach this listener: direct ones, then its relay address. */
   addresses?: string[];
+  /** Whether the daemon is registered at its relay right now. */
+  relayRegistered?: boolean;
 }
 
 export const stateSchema = z.strictObject({
@@ -107,7 +111,7 @@ export async function removeStaleState(statePath?: string): Promise<boolean> {
   return true;
 }
 
-export type DaemonConfig = Pick<PeerConfig, "bind" | "port" | "url" | "remote" | "state"> & Partial<Pick<PeerConfig, "oneWay" | "paired">>;
+export type DaemonConfig = Pick<PeerConfig, "bind" | "port" | "url" | "remote" | "state"> & Partial<Pick<PeerConfig, "oneWay" | "paired" | "relay">>;
 export interface StartDaemonOptions {
   /** The executable and arguments that run `cns`; by default, this program. Embedders pass the cns executable. */
   invocation?: (args: string[]) => { file: string; args: string[] };
@@ -138,12 +142,13 @@ export async function startDaemon(config: DaemonConfig, options: StartDaemonOpti
   if (config.remote && !config.paired) args.push("--allow-remote");
   if (config.oneWay) args.push("--one-way");
   if (config.paired) args.push("--paired");
+  // The relay URL may carry a token, so it goes in the child's environment, which other users cannot read, not its arguments.
   const invocation = (options.invocation ?? selfInvocation)(args);
   const child = spawn(invocation.file, invocation.args, {
     detached: true,
     windowsHide: true,
     stdio: ["ignore", log.fd, log.fd, "ipc"],
-    env: { ...process.env, CNS_DAEMON_CHILD: "1", CNS_DAEMON_TOKEN: token },
+    env: { ...process.env, CNS_DAEMON_CHILD: "1", CNS_DAEMON_TOKEN: token, ...config.paired && config.relay ? { CNS_DAEMON_RELAY: config.relay } : {} },
   });
   try {
     const ready = new Promise<void>((resolve, reject) => {

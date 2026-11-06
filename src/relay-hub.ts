@@ -1,0 +1,273 @@
+/**
+ * The relay: a meeting point for paired devices that cannot reach each other directly.
+ * It forwards the messages of encrypted links (secure.ts) without being able to read
+ * them, and it needs no account: a device proves its identity to register.
+ *
+ *   GET /v1/accept/KEY      A daemon registers for its key. The relay sends a challenge:
+ *                             relay -> { t: "challenge", nonce }
+ *                             daemon -> { t: "proof", sig }     Ed25519 over the challenge, see challengeBytes
+ *                             relay -> { t: "ready" }, later { t: "incoming", id } per dialer, { t: "pong" }
+ *   GET /v1/dial/KEY        A device dials the daemon registered for KEY. The relay asks it to
+ *                           answer and holds the dialer's first messages until it does.
+ *   GET /v1/answer/KEY/ID   The daemon answers one dialer; the relay then forwards both ways.
+ *
+ * This file uses only WebCrypto and WebSocket-like objects, so the Cloudflare Worker
+ * (relay/worker.ts) and `cns relay` (Bun) run the same code. A relay may require a
+ * token to register: then /v1/accept carries ?token=TOKEN. Dialing needs no token:
+ * a dialer only reaches a registered device, which authenticates it end to end, so
+ * dial addresses, invites and saved peers never carry the token.
+ */
+
+export const RELAY_PROTOCOL = "cns-relay-1";
+/** Dialers waiting for, or connected through, one registered daemon. */
+export const MAX_PIPES_PER_KEY = 32;
+/** How long a dialer waits for the daemon to answer. */
+export const ANSWER_MS = 10_000;
+/** How long a registering daemon has to answer the challenge. */
+export const CHALLENGE_MS = 10_000;
+/** What the relay holds for a dialer before the daemon answers. */
+export const MAX_HELD_MESSAGES = 16;
+export const MAX_HELD_BYTES = 256 * 1024;
+/** Dialers from one address to one key at once, so nobody can fill a key's pipes alone. */
+export const MAX_DIALS_PER_ADDRESS = 8;
+/** Messages larger than this are refused; encrypted links send 64 KiB records. */
+export const MAX_RELAY_MESSAGE_BYTES = 1024 * 1024;
+
+export type RelayData = string | ArrayBuffer | Uint8Array;
+/** The side of a WebSocket the relay holds. */
+export interface RelaySocket {
+  send(data: RelayData): void;
+  close(code: number, reason: string): void;
+}
+/** What the runtime calls on the relay for one accepted socket. */
+export interface RelayHandlers {
+  message(data: RelayData): void;
+  close(): void;
+}
+
+const encoder = new TextEncoder();
+const keyPattern = /^[A-Za-z0-9_-]{43}$/;
+const idPattern = /^[A-Za-z0-9_-]{22}$/;
+
+export function base64url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+export function fromBase64url(text: string): Uint8Array<ArrayBuffer> {
+  const binary = atob(text.replace(/-/g, "+").replace(/_/g, "/"));
+  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+}
+export function size(data: RelayData): number { return typeof data === "string" ? encoder.encode(data).length : data.byteLength; }
+export const randomId = () => base64url(crypto.getRandomValues(new Uint8Array(16)));
+
+/**
+ * What a registering daemon signs: SHA-256 over the protocol name, the relay's host as
+ * the daemon dialed it, its own key and the relay's nonce. Binding the host means a
+ * proof made for one relay cannot be replayed to register at another.
+ */
+export async function challengeBytes(host: string, key: string, nonce: string): Promise<Uint8Array<ArrayBuffer>> {
+  const parts = [encoder.encode(RELAY_PROTOCOL), new Uint8Array([0]), encoder.encode(host.toLowerCase()), new Uint8Array([0]), fromBase64url(key), fromBase64url(nonce)];
+  const joined = new Uint8Array(parts.reduce((total, part) => total + part.length, 0));
+  let offset = 0;
+  for (const part of parts) { joined.set(part, offset); offset += part.length; }
+  return new Uint8Array(await crypto.subtle.digest("SHA-256", joined));
+}
+
+/** Whether `sig` is the daemon with `key` signing this relay's challenge. */
+export async function verifyProof(host: string, key: string, nonce: string, sig: string): Promise<boolean> {
+  try {
+    const publicKey = await crypto.subtle.importKey("raw", fromBase64url(key), { name: "Ed25519" }, false, ["verify"]);
+    return await crypto.subtle.verify({ name: "Ed25519" }, publicKey, fromBase64url(sig), await challengeBytes(host, key, nonce));
+  } catch { return false; }
+}
+
+function json(socket: RelaySocket, value: unknown) { try { socket.send(JSON.stringify(value)); } catch { /* Gone. */ } }
+function safeClose(socket: RelaySocket, code: number, reason: string) { try { socket.close(code, reason); } catch { /* Already closed. */ } }
+
+interface Pipe { dialer: RelaySocket; address: string; answer?: RelaySocket; held: RelayData[]; heldBytes: number; timer?: ReturnType<typeof setTimeout> }
+
+/**
+ * Everything the relay knows about one key: its registered daemon, if any, and the
+ * dialers waiting for or connected to it. A Cloudflare Durable Object holds one room;
+ * `cns relay` holds one per key in memory.
+ */
+export class RelayRoom {
+  #key: string;
+  #host: string;
+  #listener?: RelaySocket;
+  #pipes = new Map<string, Pipe>();
+  constructor(key: string, host: string) {
+    this.#key = key;
+    this.#host = host;
+  }
+  get listening(): boolean { return this.#listener !== undefined; }
+  get pipes(): number { return this.#pipes.size; }
+
+  /**
+   * A daemon registering for this key. It is only listening once it has proved the key
+   * for `host`, the name devices use for this relay (by default the room's).
+   */
+  listen(socket: RelaySocket, host = this.#host): RelayHandlers {
+    const nonce = randomId();
+    let proved = false;
+    let checking = false;
+    let closed = false;
+    const timer = setTimeout(() => { if (!proved) safeClose(socket, 4008, "No proof of the key in time."); }, CHALLENGE_MS);
+    json(socket, { t: "challenge", nonce });
+    return {
+      message: (data) => {
+        if (typeof data !== "string" || size(data) > 4096) { safeClose(socket, 4008, "Invalid relay message."); return; }
+        let message: { t?: unknown; sig?: unknown };
+        try { message = JSON.parse(data); } catch { safeClose(socket, 4008, "Invalid relay message."); return; }
+        if (proved) {
+          if (message.t === "ping") json(socket, { t: "pong" });
+          return;
+        }
+        if (message.t !== "proof" || typeof message.sig !== "string" || checking) { safeClose(socket, 4008, "Invalid relay message."); return; }
+        checking = true;
+        void verifyProof(host, this.#key, nonce, message.sig).then((ok) => {
+          clearTimeout(timer);
+          // A socket that left while its proof was checked must not displace the live one.
+          if (closed) return;
+          if (!ok) { safeClose(socket, 4003, "The proof does not match the key."); return; }
+          proved = true;
+          // The newest registration wins: it is the daemon that restarted.
+          if (this.#listener && this.#listener !== socket) safeClose(this.#listener, 4000, "Another daemon registered for this key.");
+          this.#listener = socket;
+          json(socket, { t: "ready" });
+        });
+      },
+      close: () => {
+        closed = true;
+        clearTimeout(timer);
+        if (this.#listener !== socket) return;
+        this.#listener = undefined;
+        // Dialers still waiting for an answer will not get one.
+        for (const [id, pipe] of this.#pipes) {
+          if (pipe.answer) continue;
+          this.#drop(id, 4004, "The device left the relay.");
+        }
+      },
+    };
+  }
+
+  /** Whether a dialer from `address` could be taken now; check before accepting its socket. */
+  dialable(address = ""): { ok: true } | { ok: false; status: number; reason: string } {
+    if (!this.#listener) return { ok: false, status: 404, reason: "No device with this key is registered at this relay." };
+    if (this.#pipes.size >= MAX_PIPES_PER_KEY) return { ok: false, status: 503, reason: "Too many connections to this device through the relay." };
+    if (address && [...this.#pipes.values()].filter((pipe) => pipe.address === address).length >= MAX_DIALS_PER_ADDRESS) {
+      return { ok: false, status: 429, reason: "Too many connections to this device from this address." };
+    }
+    return { ok: true };
+  }
+
+  /** A device dialing this key from `address`. Its messages are held until the daemon answers. */
+  dial(socket: RelaySocket, address = ""): RelayHandlers {
+    const check = this.dialable(address);
+    if (!check.ok) {
+      safeClose(socket, 4004, check.reason);
+      return { message() {}, close() {} };
+    }
+    const id = randomId();
+    const pipe: Pipe = { dialer: socket, address, held: [], heldBytes: 0 };
+    pipe.timer = setTimeout(() => this.#drop(id, 4004, "The device did not answer through the relay."), ANSWER_MS);
+    this.#pipes.set(id, pipe);
+    try { this.#listener!.send(JSON.stringify({ t: "incoming", id })); }
+    catch { this.#drop(id, 4004, "The device's relay connection failed."); }
+    return {
+      message: (data) => {
+        if (size(data) > MAX_RELAY_MESSAGE_BYTES) { this.#drop(id, 4009, "Message too large for the relay."); return; }
+        if (pipe.answer) { try { pipe.answer.send(data); } catch { this.#drop(id, 4000, "The device's connection failed."); } return; }
+        pipe.held.push(data);
+        pipe.heldBytes += size(data);
+        if (pipe.held.length > MAX_HELD_MESSAGES || pipe.heldBytes > MAX_HELD_BYTES) this.#drop(id, 4009, "Too much sent before the device answered.");
+      },
+      close: () => this.#drop(id, 1000, "The other side closed the connection."),
+    };
+  }
+
+  /** The registered daemon answering dialer `id`; from now on the relay forwards both ways. */
+  answer(id: string, socket: RelaySocket): RelayHandlers {
+    const pipe = idPattern.test(id) ? this.#pipes.get(id) : undefined;
+    if (!pipe || pipe.answer) {
+      safeClose(socket, 4004, "No dialer is waiting with this id.");
+      return { message() {}, close() {} };
+    }
+    clearTimeout(pipe.timer);
+    pipe.answer = socket;
+    for (const data of pipe.held.splice(0)) socket.send(data);
+    pipe.heldBytes = 0;
+    return {
+      message: (data) => {
+        if (size(data) > MAX_RELAY_MESSAGE_BYTES) { this.#drop(id, 4009, "Message too large for the relay."); return; }
+        try { pipe.dialer.send(data); } catch { this.#drop(id, 4000, "The dialer's connection failed."); }
+      },
+      close: () => this.#drop(id, 1000, "The other side closed the connection."),
+    };
+  }
+
+  #drop(id: string, code: number, reason: string) {
+    const pipe = this.#pipes.get(id);
+    if (!pipe) return;
+    this.#pipes.delete(id);
+    clearTimeout(pipe.timer);
+    safeClose(pipe.dialer, code, reason);
+    if (pipe.answer) safeClose(pipe.answer, code, reason);
+  }
+}
+
+/** A request the relay understands, from its path and query. */
+export type RelayRoute =
+  | { kind: "accept"; key: string }
+  | { kind: "dial"; key: string }
+  | { kind: "answer"; key: string; id: string }
+  | { kind: "health" };
+
+/** Parse a relay request; undefined for anything else. */
+export function route(url: URL): RelayRoute | undefined {
+  const parts = url.pathname.split("/").filter(Boolean);
+  if (!parts.length) return { kind: "health" };
+  if (parts[0] !== "v1") return undefined;
+  const [, kind, key, id] = parts;
+  if (!key || !keyPattern.test(key)) return undefined;
+  if (kind === "accept" && parts.length === 3) return { kind, key };
+  if (kind === "dial" && parts.length === 3) return { kind, key };
+  if (kind === "answer" && parts.length === 4 && id && idPattern.test(id)) return { kind, key, id };
+  return undefined;
+}
+
+/** Show a relay URL without its token. */
+export function redactRelay(url: string): string {
+  return url.replace(/([?&]token=)[^&#]*/g, "$1…");
+}
+
+/** Whether a request carries the relay's token, when it has one. Compared in constant time. */
+export function authorized(url: URL, token: string | undefined): boolean {
+  if (!token) return true;
+  const supplied = encoder.encode(url.searchParams.get("token") ?? "");
+  const expected = encoder.encode(token);
+  let difference = supplied.length ^ expected.length;
+  for (let index = 0; index < expected.length; index++) difference |= expected[index]! ^ (supplied[index] ?? 0);
+  return difference === 0;
+}
+
+/** The relay endpoint for `kind`, from a relay's base URL (ws://, wss://, http:// or https://, with an optional path prefix and ?token=). */
+export function relayEndpoint(base: string, kind: "accept" | "dial" | "answer", key: string, id?: string): string {
+  const url = new URL(base);
+  if (url.protocol === "https:") url.protocol = "wss:";
+  else if (url.protocol === "http:") url.protocol = "ws:";
+  if (url.protocol !== "ws:" && url.protocol !== "wss:") throw new Error("A relay URL starts with wss://, ws://, https:// or http://.");
+  if (url.username || url.password || url.hash) throw new Error("A relay URL has no credentials or fragment; pass a token as ?token=TOKEN.");
+  const prefix = url.pathname.replace(/\/+$/, "");
+  url.pathname = `${prefix}/v1/${kind}/${key}${id ? `/${id}` : ""}`;
+  // Only registering needs the token: dial and answer addresses are passed around without it.
+  if (kind !== "accept") url.searchParams.delete("token");
+  url.search = url.searchParams.size ? `?${url.searchParams}` : "";
+  return url.href;
+}
+
+/** Whether a saved address reaches a device through a relay rather than directly. */
+export function isRelayAddress(address: string): boolean {
+  try { return /\/v1\/dial\/[A-Za-z0-9_-]{43}\/?$/.test(new URL(address).pathname); } catch { return false; }
+}

@@ -1,0 +1,13 @@
+# The cns relay as a Cloudflare Worker. Deploy from this directory with `wrangler deploy`.
+# Optional: `wrangler secret put RELAY_TOKEN` to require ?token=TOKEN on every request.
+name = "cns-relay"
+main = "worker.ts"
+compatibility_date = "2026-10-01"
+
+[[durable_objects.bindings]]
+name = "RELAY_KEYS"
+class_name = "RelayKey"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RelayKey"]

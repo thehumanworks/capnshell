@@ -9,12 +9,13 @@ export function openSocket(url: string, signal: AbortSignal): Promise<WebSocket>
   if (signal.aborted) return Promise.reject(signal.reason);
   return new Promise((resolve, reject) => {
     const socket = new WebSocket(url);
-    const timer = setTimeout(() => fail(new Error(`Timed out connecting to ${url}.`)), CONNECT_MS);
+    const shown = url.replace(/([?&]token=)[^&#]*/g, "$1…");
+    const timer = setTimeout(() => fail(new Error(`Timed out connecting to ${shown}.`)), CONNECT_MS);
     const onOpen = () => {
       cleanup();
       resolve(socket);
     };
-    const onError = () => fail(new Error(`Cannot connect to ${url}. Check that the listener is running and reachable.`));
+    const onError = () => fail(new Error(`Cannot connect to ${shown}. Check that the listener is running and reachable.`));
     const onAbort = () => fail(signal.reason);
     function cleanup() {
       clearTimeout(timer);

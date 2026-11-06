@@ -22,7 +22,8 @@
   "include": [
     "src/**/*.ts",
     "pi/**/*.ts",
-    "scripts/**/*.ts"
+    "scripts/**/*.ts",
+    "relay/**/*.ts"
   ],
   "exclude": [
     "node_modules",
