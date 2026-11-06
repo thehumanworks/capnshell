@@ -4,7 +4,22 @@ import path from "node:path";
 import { serve } from "bun";
 import { newBunWebSocketRpcSession, RpcTarget, type BunWebSocketTransport } from "capnweb";
 import type { PeerController } from "../console.js";
+import type { Decision, Proposal } from "../pairing.js";
 import type { PtyOptions, PtySessionOptions, PtySink, RunOptions } from "../shell.js";
+
+/** What a paired daemon offers local clients for pairing and links; absent on a legacy listener. */
+export interface PairingController {
+  identity(): { publicKey: string; fingerprint: string };
+  addresses(): string[];
+  /** A single-use invite for another device, valid for `ttlMs`. */
+  invite(ttlMs: number): Promise<{ id: string; text: string; expiresAt: number }>;
+  /** Resolves once a device has authenticated with the invite and proposed a pairing. */
+  awaitProposal(id: string): Promise<{ peer: string; fingerprint: string; proposal: Proposal }>;
+  /** Answer a proposal; accepting saves the device and starts dialing it. */
+  decide(id: string, decision: Decision): Promise<Decision>;
+  /** Start, or restart, dialing a saved paired device. */
+  dial(name: string): Promise<void>;
+}
 import { daemonStatePath, removeOwnedState, stateSchema, type DaemonStatus, type ListenerInfo } from "./daemon.js";
 
 interface SocketData { transport?: BunWebSocketTransport<SocketData> }
@@ -15,19 +30,32 @@ export class ControlApi extends RpcTarget {
   #stop: () => void;
   #listener: ListenerInfo | undefined;
   #startedAt: number;
+  #pairing: PairingController | undefined;
   #closed = new AbortController();
-  constructor(controller: PeerController, stop: () => void, listener: ListenerInfo | undefined, startedAt: number) {
+  constructor(controller: PeerController, stop: () => void, listener: ListenerInfo | undefined, startedAt: number, pairing?: PairingController) {
     super();
     this.#controller = controller;
     this.#stop = stop;
     this.#listener = listener;
     this.#startedAt = startedAt;
+    this.#pairing = pairing;
   }
   /** The daemon's listener and how many peers it has, for clients that found its state file. */
   async status(): Promise<DaemonStatus> {
     const peers = (await this.#controller.peers()).length;
-    return { ...(this.#listener ?? { url: "", bind: "", port: 0, remote: false, oneWay: false }), pid: process.pid, startedAt: this.#startedAt, peers };
+    return {
+      ...(this.#listener ?? { url: "", bind: "", port: 0, remote: false, oneWay: false }), pid: process.pid, startedAt: this.#startedAt, peers,
+      ...this.#pairing ? { identity: this.#pairing.identity(), addresses: this.#pairing.addresses() } : {},
+    };
   }
+  #paired(): PairingController {
+    if (!this.#pairing) throw new Error("This daemon does not accept paired devices. Start it with cns up.");
+    return this.#pairing;
+  }
+  invite(ttlMs: number) { return this.#paired().invite(ttlMs); }
+  awaitProposal(id: string) { return this.#paired().awaitProposal(id); }
+  decide(id: string, decision: Decision) { return this.#paired().decide(id, decision); }
+  dial(name: string) { return this.#paired().dial(name); }
   peers() { return this.#controller.peers(); }
   info(id: string) { return this.#controller.info(id); }
   /** Pending commands keep running when an attached console detaches. */
@@ -52,7 +80,7 @@ export class ControlApi extends RpcTarget {
   [Symbol.dispose]() { this.#closed.abort(new Error("The control connection closed.")); }
 }
 
-export async function serveControl(controller: PeerController, stop: () => void, statePath?: string, listener?: ListenerInfo): Promise<() => Promise<void>> {
+export async function serveControl(controller: PeerController, stop: () => void, statePath?: string, listener?: ListenerInfo, pairing?: PairingController): Promise<() => Promise<void>> {
   const token = process.env.CNS_DAEMON_TOKEN ?? randomBytes(32).toString("hex");
   const startedAt = Date.now();
   delete process.env.CNS_DAEMON_TOKEN;
@@ -74,7 +102,7 @@ export async function serveControl(controller: PeerController, stop: () => void,
       idleTimeout: 0,
       maxPayloadLength: 8 * 1024 * 1024,
       open(ws) {
-        ws.data.transport = newBunWebSocketRpcSession(ws, new ControlApi(controller, stop, listener, startedAt)).transport;
+        ws.data.transport = newBunWebSocketRpcSession(ws, new ControlApi(controller, stop, listener, startedAt, pairing)).transport;
       },
       message(ws, message) { ws.data.transport?.dispatchMessage(message); },
       close(ws, code, reason) { ws.data.transport?.dispatchClose(code, reason); },

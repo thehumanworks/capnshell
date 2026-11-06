@@ -3,7 +3,7 @@
 Status: in progress, 6 November 2026. Base: `main` at `1986d6a` with the address book
 (PR 12), `peer list --json` (PR 18) and scoped handle lifetimes (PR 19). Decisions taken so
 far: `cns up` listens on all interfaces for paired devices; both sides confirm a pairing;
-the relay is a Cloudflare Worker; slices 1 and 2 are merged as PRs 21 and 22.
+the relay is a Cloudflare Worker; slices 1 and 2 are merged as PRs 21 and 22; slice 3 (pairing, peers file v2, `cns up`, `cns pair`, `cns peers`, named targets and grant enforcement at the method level) is PR 23.
 
 The requirement is **two devices I know of that have paired**. Today `cns` connects a
 listener and a connector, identifies peers by connection IDs such as `p1`, grants
@@ -83,7 +83,7 @@ A grant lists the operations one device may perform on another. The granting dev
 | `sessions:kill` | `NamedPty.kill` |
 
 - Presets: `shell` and `files` as above; `sessions` means all five session permissions; `all` means everything.
-- Enforcement is a `GrantedShell` in the manner of `RefusingShell`: every `ShellApi` method is present, permitted ones delegate, others throw `Permission denied: <permission> not granted to <alias>`. Session handles returned through a grant are **derived capabilities**: a handle issued without `sessions:control` has `write`, `keys` and `resize` refuse. Denied operations have no side effects, as PR 16's tests already require for one-way refusal.
+- Enforcement is a `GrantedShell` in the manner of `RefusingShell` (`src/granted-shell.ts`, merged with slice 3 at the method level; derived handles below are slice 4): every `ShellApi` method is present, permitted ones delegate, others throw `Permission denied: <permission> not granted to <alias>`. Session handles returned through a grant are **derived capabilities**: a handle issued without `sessions:control` has `write`, `keys` and `resize` refuse. Denied operations have no side effects, as PR 16's tests already require for one-way refusal.
 - **Revocation**: `cns peers revoke studio [permission...]` rewrites the file and tells the running daemon, which closes the `HandleScope` of every shell exported to that device under the revoked permission (PR 19's mechanism), so live handles and attachments fail with "access revoked" and viewers are detached with that reason. Commands and unnamed PTYs started under a revoked `shell` grant are killed, as releasing a fork does today.
 - **Expiry**: a grant may carry `expiresAt`; the daemon applies expiry like revocation.
 - Legacy connections (`cns listen` and `cns connect` without identities) keep today's behavior, unauthenticated and bidirectional unless `--one-way`, and the README keeps calling them that. They are refused by a daemon that is `up` unless it was started with `--allow-unpaired`, which prints the existing warning.

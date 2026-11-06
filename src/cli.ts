@@ -11,6 +11,7 @@ try {
     process.exitCode = error.exitCode;
   } else {
     console.error(errorMessage(error));
-    process.exitCode = 1;
+    // Peer-mode commands set 3 for an unpaired or changed device; a refused operation is 4.
+    process.exitCode = /^Permission denied/.test(errorMessage(error)) ? 4 : process.exitCode || 1;
   }
 }

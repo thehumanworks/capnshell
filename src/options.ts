@@ -1,5 +1,6 @@
 import { isIP } from "node:net";
-import { resolveAlias, validatePeerUrl } from "./aliases.js";
+import { validatePeerUrl } from "./aliases.js";
+import { isSavedPeer, resolvePeer, type Permission } from "./peers.js";
 import { Command, Option } from "commander";
 import { z } from "zod";
 import { MAX_SCREEN_HISTORY, MAX_TIMEOUT_MS, sessionNameSchema } from "./shell.js";
@@ -22,6 +23,7 @@ const peerOptionsSchema = z.strictObject({
   repl: z.boolean().default(true),
   allowRemote: z.boolean().default(false),
   oneWay: z.boolean().default(false),
+  paired: z.boolean().default(false),
   daemon: z.boolean().default(false),
   state: z.string().min(1).optional(),
   cwd: z.string().min(1).optional(),
@@ -50,6 +52,10 @@ export interface PeerConfig {
   remote: boolean;
   /** Use peers' shells without offering this machine's shell or files to them. */
   oneWay: boolean;
+  /** Accept only paired devices, after they authenticate; `cns up` runs such a listener. */
+  paired: boolean;
+  /** The paired device this connection must reach, from a saved peer name. */
+  expect?: { name: string; publicKey: string; outgoing: Permission[] };
   daemon: boolean;
   state?: string;
   /** The shell string for run; optional for tty, which otherwise starts a login shell. */
@@ -98,9 +104,16 @@ function resolveOptions(role: PeerRole, command: Command, destination: string | 
   const options = { ...command.opts() };
   if (options.peer !== undefined) {
     if (destination !== undefined) throw new Error("Use either a URL or --peer, not both.");
-    destination = resolveAlias(options.peer);
+    destination = options.peer;
   }
   delete options.peer;
+  let expect: PeerConfig["expect"];
+  if (destination !== undefined && !/^wss?:\/\//i.test(destination)) {
+    // A saved name: an address alias, or a paired device whose identity the connection must see.
+    const resolved = resolvePeer(destination);
+    destination = resolved.url;
+    expect = resolved.peer;
+  }
   if (destination !== undefined) {
     for (const name of ["bind", "port"]) {
       if (command.getOptionValueSource(name) === "cli") {
@@ -110,7 +123,7 @@ function resolveOptions(role: PeerRole, command: Command, destination: string | 
       delete options[name];
     }
   }
-  const { bind, port, repl, allowRemote, oneWay, daemon, state, cwd, timeout, cols, rows, term, screen, history, name, attach, literal, until, json } = peerOptionsSchema.parse(options);
+  const { bind, port, repl, allowRemote, oneWay, paired, daemon, state, cwd, timeout, cols, rows, term, screen, history, name, attach, literal, until, json } = peerOptionsSchema.parse(options);
   if (role === "tty") {
     if (history !== undefined && !screen) throw new Error("--history requires --screen.");
     if (name !== undefined && attach !== undefined) throw new Error("Use either --name to start a session or --attach to join one, not both.");
@@ -120,16 +133,17 @@ function resolveOptions(role: PeerRole, command: Command, destination: string | 
     if (attach !== undefined && fixed.length) throw new Error(`--attach cannot change --${fixed[0]}; it was set when the session started.`);
   }
   if (role === "screen" && timeout !== undefined && until === undefined) throw new Error("--timeout requires --until.");
-  if (mode === "listen" && !isLoopback(bind) && !allowRemote) {
+  if (mode === "listen" && !isLoopback(bind) && !allowRemote && !paired) {
     throw new Error("A non-loopback listener exposes shell access. Add --allow-remote only for a trusted LAN/VPN test.");
   }
+  if (paired && oneWay) throw new Error("A paired listener grants each device what it was granted; --one-way does not apply.");
   let url = endpointUrl(bind, port);
   if (role === "connect" || destination !== undefined) {
-    if (!destination) throw new Error(`${role} requires one ws:// or wss:// URL.`);
+    if (!destination) throw new Error(`${role} requires one ws:// or wss:// URL or a saved peer name.`);
     url = peerUrl(destination);
   }
   return {
-    role, mode, bind, port, url, noRepl: role === "run" || role === "tty" || !repl, oneWay, daemon, state, cwd, timeoutMs: timeout,
+    role, mode, bind, port, url, noRepl: role === "run" || role === "tty" || !repl, oneWay, paired, expect, daemon, state, cwd, timeoutMs: timeout,
     cols, rows, term, screen: screen || role === "screen" ? { history: history ?? 0 } : undefined,
     name: name ?? attach, attach: attach !== undefined, literal, until, json,
     remote: mode === "listen" ? !isLoopback(bind) : !isLoopback(new URL(url).hostname),
@@ -158,7 +172,8 @@ export function addPeerCommands(program: Command, run: (config: PeerConfig) => v
     if (role === "sessions" || sessionRoles.has(role)) {
       command.addHelpText("after", "\nNamed sessions live in the peer's cns process: they survive this command and reconnects,\nand end when they are killed or that process stops. Start one with cns tty --name NAME.");
     }
-    if (role !== "listen") command.option("--peer <alias>", "Use a locally saved peer address (not an authenticated identity)");
+    if (role !== "listen") command.option("--peer <name>", "Use a saved peer: a paired device, or an address alias");
+    if (role === "listen") command.addOption(new Option("--paired", "Accept only paired devices (used by cns up)").hideHelp());
     if (role !== "connect") {
       command.addOption(new Option("--bind <address>", `Numeric ${role === "listen" ? "interface" : "remote peer"} address (default: 127.0.0.1)`).env("CNS_BIND"))
         .addOption(new Option("--port <port>", "TCP port (default: 47381)").env("CNS_PORT"));
@@ -194,12 +209,12 @@ export function addPeerCommands(program: Command, run: (config: PeerConfig) => v
         .addHelpText("after", "\nWithout a command, starts the remote user's login shell (PowerShell on Windows). Otherwise pass\nexactly one quoted string after -- in the remote shell's syntax. A local terminal is switched to raw mode, so keys such as Ctrl-C go to\nthe remote program. Piped input is forwarded verbatim; send \\x04 yourself for Ctrl-D.\n--screen prints what the terminal shows, like tmux capture-pane; combine it with --timeout to\nsnapshot a program that keeps running.\n--name starts a session that outlives this command; --timeout then limits its lifetime.\nExamples: cns tty    cns tty --cwd /srv/app -- 'claude'    printf 'ls\\nexit\\n' | cns tty\n          cns tty --screen --timeout 5000 -- 'htop'\n          cns tty --name build -- 'make watch'    cns tty --attach build");
     }
     if (role === "run") {
-      command.addHelpText("after", "\nPass exactly one quoted shell string after --. Your local shell removes the outer quotes.\nWithout a URL, use --bind/--port, then CNS_BIND/CNS_PORT, then 127.0.0.1:47381.\nAn explicit URL overrides endpoint environment variables; do not combine it with --bind/--port.\nExample: cns run -- 'printf \"hello\\n\"'");
+      command.addHelpText("after", "\nPass exactly one quoted shell string after --. Your local shell removes the outer quotes.\nThe target is a paired device's name (cns pair), a saved address alias, or a ws:// URL.\nWithout one, use --bind/--port, then CNS_BIND/CNS_PORT, then 127.0.0.1:47381.\nAn explicit target overrides endpoint environment variables; do not combine it with --bind/--port.\nExamples: cns run studio -- 'git status'    cns run -- 'printf \"hello\\n\"'");
     }
     rejectRepeatedOptions(command);
     if (role === "run") {
-      command.usage("[url] [options] -- <command>")
-        .argument("[url]").argument("[command]");
+      command.usage("[target] [options] -- <command>")
+        .argument("[target]", "A paired device's name, a saved alias or a ws:// URL").argument("[command]");
       command.action((url: string | undefined, shellCommand: string | undefined) => {
         // With no URL, Commander puts the shell command in the first argument.
         if (shellCommand === undefined) {
@@ -216,8 +231,8 @@ export function addPeerCommands(program: Command, run: (config: PeerConfig) => v
         return run({ ...resolveOptions(role, command, url), command: shellCommand });
       });
     } else if (role === "tty") {
-      command.usage("[url] [options] [-- <command>]")
-        .argument("[url]").argument("[command]");
+      command.usage("[target] [options] [-- <command>]")
+        .argument("[target]", "A paired device's name, a saved alias or a ws:// URL").argument("[command]");
       command.action((url: string | undefined, shellCommand: string | undefined) => {
         const rawArgs = program.args;
         const delimiter = rawArgs.indexOf("--");
@@ -238,14 +253,16 @@ export function addPeerCommands(program: Command, run: (config: PeerConfig) => v
         return run({ ...config, command: shellCommand });
       });
     } else if (role === "sessions") {
-      command.usage("[url] [options]").argument("[url]").action((url: string | undefined) => run(resolveOptions(role, command, url)));
+      command.usage("[target] [options]").argument("[target]", "A paired device's name, a saved alias or a ws:// URL").action((url: string | undefined) => run(resolveOptions(role, command, url)));
     } else if (sessionRoles.has(role)) {
-      command.usage(role === "keys" ? "[url] [options] <name> <keys...>" : "[url] [options] <name>")
+      command.usage(role === "keys" ? "[target] [options] <name> <keys...>" : "[target] [options] <name>")
         .argument("<arguments...>");
       command.action((values: string[]) => {
         const args = [...values];
-        // Session names cannot contain ':', so a ws:// or wss:// URL is unambiguous.
-        const url = /^wss?:\/\//i.test(args[0] ?? "") ? args.shift() : undefined;
+        // Session names cannot contain ':', so a ws:// or wss:// URL is unambiguous. A saved
+        // peer's name before the session name is a target too; use --peer when they collide.
+        const minimum = role === "keys" ? 2 : 1;
+        const url = /^wss?:\/\//i.test(args[0] ?? "") || (args.length > minimum && command.opts().peer === undefined && isSavedPeer(args[0]!)) ? args.shift() : undefined;
         const name = sessionNameSchema.parse(args.shift() ?? "");
         if (role === "keys") {
           if (!args.length) throw new Error("keys requires at least one key or text after the session name.");

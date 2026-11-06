@@ -73,6 +73,36 @@ cns identity --json   # { publicKey, fingerprint, createdAt, path }
 
 The key lives in `~/.cns/identity.json` (or `$CNS_CONFIG_DIR/identity.json`), readable only by your user, under the same trusted-path checks as saved peers. The public key is this device's name on the wire; the fingerprint, SHA-256 of the public key in base32, is what people compare when pairing. The file is never replaced: deleting it makes this a new device that every peer must pair with again. Identities are unavailable on Windows until filesystem ACL checks are supported.
 
+## Paired devices
+
+Two devices you know can pair once and then reach each other by name, each granted only what the other's owner allowed. Pairing uses the device identities above; [docs/paired-peers.md](docs/paired-peers.md) has the design.
+
+```sh
+# On the machine you want to reach
+studio $ cns up                       # run as a paired peer; creates the identity on first use
+studio $ cns pair                     # prints an invite and waits
+Invite: cns1:...
+
+# On the other machine
+laptop $ cns pair 'cns1:...'          # shows studio's fingerprint and asks before pairing
+# studio's cns pair shows laptop's fingerprint and asks what laptop may use there
+
+laptop $ cns run studio -- 'git status'
+laptop $ cns tty studio --name main -- 'claude'
+laptop $ cns screen studio main --until '❯'
+laptop $ cns peers
+NAME    STATUS   CONNECTION  ACCESS               FINGERPRINT
+studio  online   direct      shell, files, sessions  k7qm-3h2x-...
+```
+
+- **`cns up`** runs this device's peer daemon. It listens on every interface by default (`--bind` narrows it; `CNS_BIND`/`CNS_PORT` apply) and accepts only paired devices: a connection must authenticate with its identity before anything is exported, and an unpaired device, or an older `cns`, is refused with a message saying so. The daemon also dials the saved addresses of paired devices and keeps those links up with backoff, so either side can initiate. `attach` and `stop` work on it as on any daemon.
+- **`cns pair`** on the device to be reached prints a single-use invite (five minutes by default, `--expires`) and waits. `cns pair 'cns1:...'` on the other device connects to one of the invite's addresses, proves it knows the invite's secret, and proposes a pairing: the name it suggests for itself, what it asks to use (`--request`, default `all`) and what it offers in return (`--offer`, default none). Both people see the other device's fingerprint and confirm; the inviting side chooses the alias (`--name`) and which of the requested permissions to grant. `--yes` answers every prompt for scripted setups after you have compared fingerprints yourself. Declines and refusals exit 3.
+- **Grants** are directional and enforced by the device that grants them: `shell` (run commands and open terminals), `files` (read, write and list files), and `sessions` (list, create, view, control and kill named sessions; currently granted and checked as one group). A denied call fails with `Permission denied` and exit status 4, with no side effects. What a device may do on the other is shown under `ACCESS` in `cns peers`.
+- **Targets.** `run`, `tty`, `sessions`, `keys`, `screen` and `kill` take a paired device's name, a saved address alias or a URL as their first argument, or `--peer NAME`. A paired name connects with this device's identity and requires the saved identity on the other end: if the device behind the address changed, the command exits 3 and nothing runs. Names never fall back to another peer. When a session shares a name with a saved peer, use `--peer`.
+- **`cns peers [--json]`** lists paired devices and address aliases with status (`online` while the local daemon has a link, else `offline`; `unpaired` for an address alias), the connection path, the access this device has there, and the fingerprint. The JSON fields are `name`, `kind`, `status`, `connection`, `fingerprint`, `access`, `grants` (what the peer may do here) and `addresses`; address aliases have `url`.
+- **Storage.** A paired device is a JSON file under `~/.cns/peers/<name>` beside plain address aliases, keyed by its public key: `cns peer list` shows both kinds. Renaming the file renames the alias without changing trust. A device cannot be saved twice under different names, and `add` never replaces an existing name.
+- **Security.** The link is authenticated, not encrypted: both devices prove their identities before anything is exported, and a saved identity that changes is refused, but a direct `ws://` link's traffic is as visible as any other on that network. Use paired devices on networks you trust, as for the unpaired commands, until the encrypted link in the design lands. Legacy `listen`/`connect` are unchanged and remain unauthenticated.
+
 ## Multiple peers
 
 Each console can list and select its remote peers:
