@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { lstat, mkdir, open, readFile, unlink } from "node:fs/promises";
+import { lstat, mkdir, open, unlink } from "node:fs/promises";
+import { constants } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { newWebSocketRpcSession, type RpcStub } from "capnweb";
@@ -46,11 +47,18 @@ export function daemonStatePath(value?: string): string {
 }
 
 async function readState(file: string): Promise<DaemonState> {
-  const stat = await lstat(file);
-  if (!stat.isFile() || (process.platform !== "win32" && ((stat.mode & 0o077) !== 0 || stat.uid !== process.getuid?.()))) {
-    throw new Error(`Daemon state must be a private file owned by your user: ${file}`);
+  const invalid = () => new Error(`Daemon state must be a private file owned by your user: ${file}`);
+  // Retain the symlink check on platforms without O_NOFOLLOW. O_NONBLOCK avoids
+  // waiting on a FIFO substituted between this check and the open.
+  if (!(await lstat(file)).isFile()) throw invalid();
+  const handle = await open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || (process.platform !== "win32" && ((stat.mode & 0o077) !== 0 || stat.uid !== process.getuid?.()))) throw invalid();
+    return stateSchema.parse(JSON.parse(await handle.readFile("utf8")));
+  } finally {
+    await handle.close();
   }
-  return stateSchema.parse(JSON.parse(await readFile(file, "utf8")));
 }
 
 export async function removeOwnedState(file: string, token: string): Promise<void> {
