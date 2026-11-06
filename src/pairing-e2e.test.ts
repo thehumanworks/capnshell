@@ -13,7 +13,9 @@ const posix = process.platform !== "win32";
 
 test("two devices pair, run commands within their grants, and refuse everyone else", { skip: !posix, timeout: 90000 }, async (t) => {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-pairing-")));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  // Hooks run in the order they were added: stop the daemons first, then remove their directories.
+  const cleanups: Array<() => Promise<unknown>> = [];
+  t.after(async () => { for (const cleanup of cleanups.reverse()) await cleanup(); await rm(root, { recursive: true, force: true }); });
   const device = async (name: string) => {
     const dir = path.join(root, name);
     await mkdir(dir, { mode: 0o700 });
@@ -36,7 +38,7 @@ test("two devices pair, run commands within their grants, and refuse everyone el
   const up = await cli(studio, ["up", "--bind", "127.0.0.1", "--port", port, "--state", studio.state]);
   assert.equal(up.code, 0, up.stderr);
   assert.match(up.stdout, /^Started as [a-z2-7]{4}(-[a-z2-7]{4}){5} \(pid \d+\), listening at ws:\/\/127\.0\.0\.1:\d+\.\nReachable at ws:\/\/127\.0\.0\.1:\d+\.\nNo paired devices yet/);
-  t.after(async () => { await cli(studio, ["stop", "--state", studio.state]); });
+  cleanups.push(() => cli(studio, ["stop", "--state", studio.state]));
   const again = await cli(studio, ["up", "--bind", "127.0.0.1", "--port", port, "--state", studio.state]);
   assert.match(again.stdout, /^Running as/);
 
@@ -167,7 +169,7 @@ test("two devices pair, run commands within their grants, and refuse everyone el
   const laptopPort = await unusedPort("127.0.0.1");
   const laptopUp = await cli(laptop, ["up", "--bind", "127.0.0.1", "--port", laptopPort, "--state", laptop.state]);
   assert.equal(laptopUp.code, 0, laptopUp.stderr);
-  t.after(async () => { await cli(laptop, ["stop", "--state", laptop.state]); });
+  cleanups.push(() => cli(laptop, ["stop", "--state", laptop.state]));
   assert.equal((await cli(studio, ["peer", "address", "laptop", `ws://127.0.0.1:${laptopPort}`, "--state", studio.state])).code, 0);
   const linkCounts = async () => {
     const counts: number[] = [];

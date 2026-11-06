@@ -13,13 +13,16 @@ const posix = process.platform !== "win32";
 
 test("devices that cannot reach each other directly pair and link through the relay", { skip: !posix, timeout: 120000 }, async (t) => {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-relay-")));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  // Hooks run in the order they were added: stop the daemons, then remove their directories.
+  const cleanups: Array<() => Promise<unknown>> = [];
+  t.after(async () => { for (const cleanup of cleanups.reverse()) await cleanup(); await rm(root, { recursive: true, force: true }); });
   // CNS_TEST_RELAY_URL tests an external relay, such as the Worker under wrangler dev, without the restart step.
   const external = process.env.CNS_TEST_RELAY_URL;
   const relayPort = Number(await unusedPort("127.0.0.1"));
-  let relay = external ? undefined : startRelay({ bind: "127.0.0.1", port: relayPort });
-  t.after(() => relay?.stop());
-  const relayBase = external ?? `ws://127.0.0.1:${relayPort}`;
+  const token = "relay-t0ken-value";
+  let relay = external ? undefined : startRelay({ bind: "127.0.0.1", port: relayPort, token });
+  cleanups.push(async () => relay?.stop());
+  const relayBase = external ?? `ws://127.0.0.1:${relayPort}/?token=${token}`;
   const relayHost = new URL(relayBase).host.replace(/[.]/g, "\\.");
   const device = async (name: string) => {
     const dir = path.join(root, name);
@@ -49,9 +52,16 @@ test("devices that cannot reach each other directly pair and link through the re
   const port = await unusedPort("127.0.0.1");
   const up = await cli(studio, ["up", "--bind", "127.0.0.1", "--port", port, "--relay", relayBase, "--state", studio.state]);
   assert.equal(up.code, 0, up.stderr);
-  t.after(async () => { await cli(studio, ["stop", "--state", studio.state]); });
+  cleanups.push(() => cli(studio, ["stop", "--state", studio.state]));
   assert.match(up.stdout, new RegExp(`Reachable at ws://127\\.0\\.0\\.1:${port}, wss?://${relayHost}/v1/dial/[A-Za-z0-9_-]{43}\\.\\nRelay: \\S+, regist`));
   await eventually(async () => /Relay: +\S+ \(registered\)/.test((await cli(studio, ["status", "--state", studio.state])).stdout), "studio registers at the relay");
+  // The token registers studio but is never shown, saved for others, or on the daemon's command line.
+  if (!external) {
+    const shown = [up.stdout, up.stderr, (await cli(studio, ["status", "--state", studio.state])).stdout, (await cli(studio, ["status", "--json", "--state", studio.state])).stdout];
+    assert.ok(!shown.some((text) => text.includes(token)), "the token is redacted");
+    const pid = JSON.parse((await cli(studio, ["status", "--json", "--state", studio.state])).stdout).daemon.pid;
+    assert.ok(!(await readFile(`/proc/${pid}/cmdline`, "utf8")).includes(token), "the token is not in the daemon's arguments");
+  }
 
   // The invite lists the direct address, then the relay. Laptop gets only the relay part, as if
   // studio's network were out of reach, and pairs through it.
@@ -61,6 +71,7 @@ test("devices that cannot reach each other directly pair and link through the re
   const text = /Invite: (cns1:[A-Za-z0-9_-]+)/.exec(inviting.stdout)![1]!;
   const body = JSON.parse(Buffer.from(text.slice(INVITE_PREFIX.length), "base64url").toString("utf8"));
   assert.deepEqual(body.addr.map(isRelayAddress), [false, true]);
+  assert.ok(!JSON.stringify(body).includes(token), "invites carry no relay token");
   const relayOnly = INVITE_PREFIX + Buffer.from(JSON.stringify({ ...body, addr: body.addr.filter(isRelayAddress) })).toString("base64url");
   const paired = await cli(laptop, ["pair", relayOnly, "--yes", "--name", "studio", "--request", "all"]);
   assert.equal(paired.code, 0, paired.stderr);
@@ -80,7 +91,7 @@ test("devices that cannot reach each other directly pair and link through the re
   // Laptop's daemon keeps a standing link to studio through the relay; studio has no address for laptop.
   const laptopUp = await cli(laptop, ["up", "--bind", "127.0.0.1", "--port", await unusedPort("127.0.0.1"), "--state", laptop.state]);
   assert.equal(laptopUp.code, 0, laptopUp.stderr);
-  t.after(async () => { await cli(laptop, ["stop", "--state", laptop.state]); });
+  cleanups.push(() => cli(laptop, ["stop", "--state", laptop.state]));
   const viaOf = async (dev: typeof laptop) => {
     const control = await connectControl(dev.state);
     try { return (await control.controller.peers()).filter((peer) => peer.peer?.daemon).map((peer) => peer.peer!.via); } finally { control.close(); }
@@ -94,7 +105,7 @@ test("devices that cannot reach each other directly pair and link through the re
   const registered = async () => JSON.parse((await cli(studio, ["status", "--json", "--state", studio.state])).stdout).daemon.relayRegistered;
   await relay.stop();
   await eventually(async () => (await viaOf(laptop)).length === 0 && !(await registered()), "the link and the registration end with the relay");
-  relay = startRelay({ bind: "127.0.0.1", port: relayPort });
+  relay = startRelay({ bind: "127.0.0.1", port: relayPort, token });
   await eventually(registered, "studio registers at the new relay", 60000);
   await eventually(async () => (await viaOf(laptop)).join() === "relay", "the link returns through the new relay", 60000);
   assert.equal((await cli(laptop, ["run", "studio", "--", "printf back"])).stdout, "back");

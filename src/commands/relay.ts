@@ -1,15 +1,29 @@
 import { serve, type Server } from "bun";
-import { authorized, RelayRoom, route, type RelayHandlers } from "../relay-hub.js";
+import { authorized, MAX_RELAY_MESSAGE_BYTES, RelayRoom, route, type RelayData, type RelayHandlers } from "../relay-hub.js";
 import { endpointUrl } from "../options.js";
 
-interface Data { handlers?: RelayHandlers; key: string; kind: "accept" | "dial" | "answer"; id?: string; host: string }
+interface Data { handlers?: RelayHandlers; key: string; kind: "accept" | "dial" | "answer"; id?: string; host: string; address: string }
 
-export interface RelayOptions { bind: string; port: number; token?: string }
+export interface RelayOptions {
+  bind: string;
+  port: number;
+  /** Required to register (accept); dialing needs none. */
+  token?: string;
+  /** The host:port devices use for this relay, which their registration proofs must name. Without it, each request's Host header. */
+  publicHost?: string;
+}
+
+/** Sockets one address may hold at once, and sockets in all. */
+export const MAX_SOCKETS_PER_ADDRESS = 64;
+export const MAX_SOCKETS = 4096;
+/** A pipe whose reader falls this far behind is closed rather than having its data dropped. */
+const BACKPRESSURE_BYTES = 4 * 1024 * 1024;
 
 /**
  * `cns relay`: the relay of src/relay-hub.ts as a Bun server, for running your own.
  * It holds rooms in memory, one per registered key, and forgets a room once nobody
- * uses it. Put it behind a TLS reverse proxy to serve wss://.
+ * uses it. Put it behind a TLS reverse proxy to serve wss://, and give it the public
+ * host devices use, so a proof signed for another relay is never accepted here.
  */
 export function startRelay(options: RelayOptions): { url: string; server: Server<Data>; stop(): Promise<void> } {
   // A room lives while any socket for its key is open, including a daemon still proving
@@ -25,6 +39,8 @@ export function startRelay(options: RelayOptions): { url: string; server: Server
     const entry = rooms.get(key);
     if (entry && --entry.sockets <= 0) rooms.delete(key);
   };
+  const perAddress = new Map<string, number>();
+  let total = 0;
   const server = serve<Data>({
     hostname: options.bind, port: options.port,
     fetch(request, server) {
@@ -32,27 +48,43 @@ export function startRelay(options: RelayOptions): { url: string; server: Server
       const target = route(url);
       if (!target) return new Response("Not found", { status: 404 });
       if (target.kind === "health") return new Response("cns relay\n");
-      if (!authorized(url, options.token)) return new Response("This relay needs its token: ?token=TOKEN", { status: 401 });
+      if (target.kind === "accept" && !authorized(url, options.token)) return new Response("Registering at this relay needs its token: ?token=TOKEN", { status: 401 });
       if (request.headers.has("Origin")) return new Response("Browser origins are not allowed", { status: 401 });
+      const address = server.requestIP(request)?.address ?? "unknown";
+      if (total >= MAX_SOCKETS || (perAddress.get(address) ?? 0) >= MAX_SOCKETS_PER_ADDRESS) return new Response("Too many connections", { status: 429 });
       if (target.kind === "dial") {
-        const check = rooms.get(target.key)?.room.dialable() ?? { ok: false as const, status: 404, reason: "No device with this key is registered at this relay." };
+        const check = rooms.get(target.key)?.room.dialable(address) ?? { ok: false as const, status: 404, reason: "No device with this key is registered at this relay." };
         if (!check.ok) return new Response(check.reason, { status: check.status });
       }
-      if (server.upgrade(request, { data: { key: target.key, kind: target.kind, id: target.kind === "answer" ? target.id : undefined, host: url.host } })) return undefined;
+      const host = options.publicHost ?? url.host;
+      if (server.upgrade(request, { data: { key: target.key, kind: target.kind, id: target.kind === "answer" ? target.id : undefined, host, address } })) return undefined;
       return new Response("WebSocket upgrade required", { status: 400 });
     },
     websocket: {
       idleTimeout: 0,
-      maxPayloadLength: 1024 * 1024,
+      maxPayloadLength: MAX_RELAY_MESSAGE_BYTES,
+      backpressureLimit: BACKPRESSURE_BYTES,
+      closeOnBackpressureLimit: true,
       open(ws) {
+        total++;
+        perAddress.set(ws.data.address, (perAddress.get(ws.data.address) ?? 0) + 1);
         const room = join(ws.data.key, ws.data.host);
-        const socket = { send: (data: string | ArrayBuffer | Uint8Array) => { ws.send(data); }, close: (code: number, reason: string) => ws.close(code, reason) };
-        ws.data.handlers = ws.data.kind === "accept" ? room.listen(socket) : ws.data.kind === "dial" ? room.dial(socket) : room.answer(ws.data.id!, socket);
+        const socket = {
+          // Bun drops a message it cannot queue (send returns 0): end the pipe instead of losing data silently.
+          send: (data: RelayData) => { if (ws.send(data) === 0) throw new Error("The reader fell too far behind."); },
+          close: (code: number, reason: string) => ws.close(code, reason),
+        };
+        ws.data.handlers = ws.data.kind === "accept" ? room.listen(socket, ws.data.host)
+          : ws.data.kind === "dial" ? room.dial(socket, ws.data.address)
+          : room.answer(ws.data.id!, socket);
       },
       message(ws, message) { ws.data.handlers?.message(typeof message === "string" ? message : new Uint8Array(message)); },
       close(ws) {
         ws.data.handlers?.close();
         leave(ws.data.key);
+        total--;
+        const left = (perAddress.get(ws.data.address) ?? 1) - 1;
+        if (left > 0) perAddress.set(ws.data.address, left); else perAddress.delete(ws.data.address);
       },
     },
   });

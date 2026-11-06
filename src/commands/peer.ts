@@ -1,12 +1,12 @@
 import os from "node:os";
 import { newBunWebSocketRpcSession, newWebSocketRpcSession, type BunWebSocketTransport, type RpcStub } from "capnweb";
 import { attachClientSocket, clientWire, connectFirst, rpcSession, secureReady, SecureChannel, serverWire, type Established } from "../secure.js";
-import { challengeBytes, isRelayAddress, relayEndpoint } from "../relay-hub.js";
+import { challengeBytes, isRelayAddress, redactRelay, relayEndpoint } from "../relay-hub.js";
 import { serve, type Server, type ServerWebSocket } from "bun";
 import { z } from "zod";
 import { PtyRegistry, ShellApi, type ShellInfo } from "../shell.js";
 import { openConsole, type PeerController } from "../console.js";
-import { errorMessage } from "../errors.js";
+import { errorMessage, printable } from "../errors.js";
 import type { PeerConfig } from "../options.js";
 import { RefusingShell } from "../refusing-shell.js";
 import { plain, type RemoteNamedPty } from "../terminal.js";
@@ -75,6 +75,10 @@ const REDIAL_MAX_MS = 30_000;
 const DECISION_MS = 10 * 60 * 1000;
 /** A daemon registered at a relay pings it this often, and re-registers if it hears nothing for three times as long. */
 const RELAY_PING_MS = 30_000;
+/** Dialers the relay announced that the daemon is answering at once; more are ignored. */
+const MAX_RELAY_ANSWERS = 32;
+/** A registration that stayed up this long resets the backoff, so a relay that keeps dropping it is not hammered. */
+const RELAY_STABLE_MS = 30_000;
 /**
  * Daemon links made within this long of each other count as both devices dialing at
  * once, settled by the key rule. A daemon dials only when it has no link, so a dial
@@ -85,6 +89,8 @@ const DIAL_RACE_MS = 5000;
 export async function startPeer(config: PeerConfig): Promise<void> {
   const daemonChild = process.env.CNS_DAEMON_CHILD === "1";
   delete process.env.CNS_DAEMON_CHILD;
+  // The relay URL may carry its token: it comes through the environment, never the command line.
+  delete process.env.CNS_DAEMON_RELAY;
   const sessions = new Map<string, Session>();
   // Named PTY sessions outlive the connection that started them, but not this process.
   const ptys = new PtyRegistry();
@@ -149,6 +155,8 @@ export async function startPeer(config: PeerConfig): Promise<void> {
     cancelled.abort();
     input?.close();
     for (const link of links.values()) link.stop();
+    for (const channel of relayAnswers.values()) channel?.close("The daemon is stopping");
+    relayAnswers.clear();
     for (const invite of invites.values()) expireInvite(invite, "The daemon stopped.");
     for (const session of sessions.values()) remove(session);
     ptys[Symbol.dispose]();
@@ -429,6 +437,18 @@ export async function startPeer(config: PeerConfig): Promise<void> {
   }
 
   let relayRegistered = false;
+  /** Answers to relay dialers in progress, by the relay's id, so a relay cannot make this daemon open connections without limit. */
+  const relayAnswers = new Map<string, SecureChannel | undefined>();
+  /** Log refusals at most a few times per window, so a flood cannot flood the log. */
+  let refusalWindow = 0;
+  let refusalsLogged = 0;
+  const refused = (message: string) => {
+    if (stopping) return;
+    const now = Date.now();
+    if (now - refusalWindow > 10_000) { refusalWindow = now; refusalsLogged = 0; }
+    if (++refusalsLogged <= 5) announce(message);
+    else if (refusalsLogged === 6) announce("More connections were refused; not logging them for a few seconds.");
+  };
   /** Where other devices can reach this daemon: its direct addresses, then its relay address. */
   function advertised(): string[] {
     const direct = listeningAddresses(config.bind, config.port);
@@ -448,7 +468,9 @@ export async function startPeer(config: PeerConfig): Promise<void> {
       let socket: WebSocket;
       try { socket = await openSocket(url, cancelled.signal); }
       catch { return retry(); }
+      const host = new URL(url).host;
       let lastHeard = Date.now();
+      let readyAt = 0;
       const pinger = setInterval(() => {
         if (Date.now() - lastHeard > 3 * RELAY_PING_MS) { closeSocket(socket, "The relay stopped answering"); return; }
         try { socket.send(JSON.stringify({ t: "ping" })); } catch { /* Closing follows. */ }
@@ -459,25 +481,32 @@ export async function startPeer(config: PeerConfig): Promise<void> {
         if (typeof event.data !== "string") return;
         let message: { t?: string; nonce?: string; id?: string };
         try { message = JSON.parse(event.data); } catch { return; }
-        if (message.t === "challenge" && typeof message.nonce === "string") {
-          void challengeBytes(new URL(url).host, identity!.publicKey, message.nonce).then((bytes) => {
+        if (message.t === "challenge" && typeof message.nonce === "string" && /^[A-Za-z0-9_-]{22}$/.test(message.nonce)) {
+          void challengeBytes(host, identity!.publicKey, message.nonce).then((bytes) => {
             socket.send(JSON.stringify({ t: "proof", sig: Buffer.from(identity!.sign(bytes)).toString("base64url") }));
-          });
-        } else if (message.t === "ready") {
-          attempt = 0;
+          }).catch(() => closeSocket(socket, "Invalid challenge"));
+        } else if (message.t === "challenge") {
+          closeSocket(socket, "Invalid challenge");
+        } else if (message.t === "ready" && !readyAt) {
+          readyAt = Date.now();
           relayRegistered = true;
-          announce(`Registered at the relay ${new URL(url).host}; devices that cannot reach this one directly can reach it there.`);
-        } else if (message.t === "incoming" && typeof message.id === "string") {
+          announce(`Registered at the relay ${host}; devices that cannot reach this one directly can reach it there.`);
+        } else if (message.t === "incoming" && typeof message.id === "string" && /^[A-Za-z0-9_-]{22}$/.test(message.id) && readyAt) {
+          if (relayAnswers.has(message.id)) return;
+          if (relayAnswers.size >= MAX_RELAY_ANSWERS) { refused(`Ignored a dialer at the relay ${host}: ${MAX_RELAY_ANSWERS} are already being answered.`); return; }
           void answerAtRelay(base, message.id);
         }
       });
+      const onStop = () => closeSocket(socket, "The daemon is stopping");
+      cancelled.signal.addEventListener("abort", onStop, { once: true });
       socket.addEventListener("close", (event: CloseEvent) => {
         clearInterval(pinger);
-        if (relayRegistered && !stopping) announce(`Left the relay ${new URL(url).host}${event.reason ? `: ${event.reason}` : ""}; registering again.`);
+        cancelled.signal.removeEventListener("abort", onStop);
+        if (relayRegistered && !stopping) announce(`Left the relay ${host}${event.reason ? `: ${printable(event.reason)}` : ""}; registering again.`);
         relayRegistered = false;
+        if (readyAt && Date.now() - readyAt >= RELAY_STABLE_MS) attempt = 0;
         retry();
       }, { once: true });
-      cancelled.signal.addEventListener("abort", () => closeSocket(socket, "The daemon is stopping"), { once: true });
     };
     const retry = () => {
       if (stopping) return;
@@ -489,14 +518,17 @@ export async function startPeer(config: PeerConfig): Promise<void> {
 
   /** Answer one dialer the relay announced: the same as an inbound connection, through the relay. */
   async function answerAtRelay(base: string, id: string) {
+    relayAnswers.set(id, undefined);
     let socket: WebSocket;
     try { socket = await openSocket(relayEndpoint(base, "answer", identity!.publicKey, id), cancelled.signal); }
-    catch { return; }
+    catch { relayAnswers.delete(id); return; }
+    if (stopping) { closeSocket(socket, "The daemon is stopping"); relayAnswers.delete(id); return; }
     const channel = SecureChannel.responder(clientWire(socket), identity!, { authorize, secretFor });
+    relayAnswers.set(id, channel);
     attachClientSocket(socket, channel);
     const address = `relay ${new URL(base).host}`;
-    channel.ready.then((established) => accept(channel, established, address, "relay"),
-      (error) => { if (!stopping) announce(`Refused ${address}: ${errorMessage(error)}`); });
+    channel.ready.then((established) => { relayAnswers.delete(id); accept(channel, established, address, "relay"); },
+      (error) => { relayAnswers.delete(id); refused(`Refused ${address}: ${printable(errorMessage(error))}`); });
   }
 
   /**
@@ -576,7 +608,7 @@ export async function startPeer(config: PeerConfig): Promise<void> {
             channel.ready.then((established) => {
               const session = accept(channel, established, ws.data.address);
               if (session) ws.data.session = session;
-            }, (error) => { if (!stopping) announce(`Refused ${ws.data.address}: ${errorMessage(error)}`); });
+            }, (error) => refused(`Refused ${ws.data.address}: ${printable(errorMessage(error))}`));
           },
           message(ws, message) {
             if (ws.data.channel) ws.data.channel.deliver(typeof message === "string" ? message : new Uint8Array(message));

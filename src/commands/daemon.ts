@@ -142,13 +142,13 @@ export async function startDaemon(config: DaemonConfig, options: StartDaemonOpti
   if (config.remote && !config.paired) args.push("--allow-remote");
   if (config.oneWay) args.push("--one-way");
   if (config.paired) args.push("--paired");
-  if (config.paired && config.relay) args.push("--relay", config.relay);
+  // The relay URL may carry a token, so it goes in the child's environment, which other users cannot read, not its arguments.
   const invocation = (options.invocation ?? selfInvocation)(args);
   const child = spawn(invocation.file, invocation.args, {
     detached: true,
     windowsHide: true,
     stdio: ["ignore", log.fd, log.fd, "ipc"],
-    env: { ...process.env, CNS_DAEMON_CHILD: "1", CNS_DAEMON_TOKEN: token },
+    env: { ...process.env, CNS_DAEMON_CHILD: "1", CNS_DAEMON_TOKEN: token, ...config.paired && config.relay ? { CNS_DAEMON_RELAY: config.relay } : {} },
   });
   try {
     const ready = new Promise<void>((resolve, reject) => {

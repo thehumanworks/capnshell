@@ -106,6 +106,8 @@ function rejectRepeatedOptions(command: Command) {
 function resolveOptions(role: PeerRole, command: Command, destination: string | undefined): PeerConfig {
   const mode = role === "listen" ? "listen" : "connect";
   const options = { ...command.opts() };
+  // A daemon started by cns up --relay gets the relay URL, which may hold a token, through its environment.
+  if (role === "listen" && options.paired && options.relay === undefined && process.env.CNS_DAEMON_RELAY) options.relay = process.env.CNS_DAEMON_RELAY;
   if (options.peer !== undefined) {
     if (destination !== undefined) throw new Error("Use either a URL or --peer, not both.");
     destination = options.peer;

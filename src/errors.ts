@@ -16,3 +16,8 @@ function parseIssues(message: string): { path?: PropertyKey[]; message: string }
   } catch { /* Not an issue list. */ }
   return undefined;
 }
+
+/** Text from another machine, made safe to print or log: no terminal control sequences. */
+export function printable(text: string): string {
+  return String(text).replace(/[\u0000-\u001f\u007f-\u009f]/g, "?");
+}

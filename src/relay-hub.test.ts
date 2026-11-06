@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { startRelay } from "./commands/relay.js";
 import { generateIdentity } from "./identity.js";
-import { challengeBytes, isRelayAddress, relayEndpoint, route } from "./relay-hub.js";
+import { challengeBytes, isRelayAddress, MAX_DIALS_PER_ADDRESS, redactRelay, relayEndpoint, route } from "./relay-hub.js";
 import { LOOPBACK } from "./test-support.js";
 
 /** A test socket that records messages and can wait for one. */
@@ -33,19 +33,22 @@ const external = process.env.CNS_TEST_RELAY_URL;
 /** What a dialer would get, without opening a socket. */
 const dialStatus = async (url: string) => (await fetch(url.replace(/^ws/, "http"), { headers: { Upgrade: "websocket", Connection: "Upgrade", "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Version": "13" } })).status;
 
-async function register(base: string, identity: ReturnType<typeof generateIdentity>, sign = identity) {
+async function register(base: string, identity: ReturnType<typeof generateIdentity>, sign = identity, host?: string) {
   const url = relayEndpoint(base, "accept", identity.publicKey);
   const listener = await open(url);
   const challenge = await listener.json();
   assert.equal(challenge.t, "challenge");
-  const sig = Buffer.from(sign.sign(await challengeBytes(new URL(url).host, identity.publicKey, challenge.nonce))).toString("base64url");
+  const sig = Buffer.from(sign.sign(await challengeBytes(host ?? new URL(url).host, identity.publicKey, challenge.nonce))).toString("base64url");
   listener.socket.send(JSON.stringify({ t: "proof", sig }));
   return listener;
 }
 
 test("relay URLs and routes", () => {
   const key = generateIdentity().publicKey;
-  assert.equal(relayEndpoint("https://relay.example/base/?token=t", "dial", key), `wss://relay.example/base/v1/dial/${key}?token=t`);
+  assert.equal(relayEndpoint("https://relay.example/base/?token=t", "accept", key), `wss://relay.example/base/v1/accept/${key}?token=t`);
+  // Only registering carries the token; dial addresses are shared with paired devices.
+  assert.equal(relayEndpoint("https://relay.example/base/?token=t", "dial", key), `wss://relay.example/base/v1/dial/${key}`);
+  assert.equal(redactRelay("wss://relay.example/?token=s3cret&x=1"), "wss://relay.example/?token=…&x=1");
   assert.equal(relayEndpoint("ws://127.0.0.1:47380", "answer", key, "A".repeat(22)), `ws://127.0.0.1:47380/v1/answer/${key}/${"A".repeat(22)}`);
   assert.throws(() => relayEndpoint("ftp://x", "dial", key));
   assert.throws(() => relayEndpoint("wss://user:pass@x", "dial", key));
@@ -124,13 +127,48 @@ test("a dial refused while a daemon proves its key does not lose the registratio
   listener.socket.close();
 });
 
-test("a relay with a token refuses requests without it", { skip: !!external }, async (t) => {
+test("a relay's token gates registering, not dialing", { skip: !!external }, async (t) => {
   const relay = startRelay({ bind: LOOPBACK, port: 0, token: "s3cret-token" });
   t.after(() => relay.stop());
   const studio = generateIdentity();
-  assert.equal((await fetch(relayEndpoint(relay.url, "dial", studio.publicKey).replace("ws", "http"))).status, 401);
-  assert.equal((await fetch(relayEndpoint(`${relay.url}/?token=wrong`, "dial", studio.publicKey).replace("ws", "http"))).status, 401);
+  for (const base of [relay.url, `${relay.url}/?token=wrong`]) {
+    assert.equal(await open(relayEndpoint(base, "accept", studio.publicKey)).then(() => "open", () => "refused"), "refused");
+  }
   const listener = await register(`${relay.url}/?token=s3cret-token`, studio);
   assert.deepEqual(await listener.json(), { t: "ready" });
+  // A dialer needs no token: it can only reach a registered device, which authenticates it.
+  const dialer = await open(relayEndpoint(`${relay.url}/?token=s3cret-token`, "dial", studio.publicKey));
+  assert.equal((await listener.json()).t, "incoming");
+  dialer.socket.close();
   listener.socket.close();
+});
+
+test("one address cannot fill a device's relay connections, and a departing daemon frees its dialers", { skip: !!external }, async (t) => {
+  const relay = startRelay({ bind: LOOPBACK, port: 0 });
+  t.after(() => relay.stop());
+  const studio = generateIdentity();
+  const listener = await register(relay.url, studio);
+  assert.deepEqual(await listener.json(), { t: "ready" });
+  const dialers = [];
+  for (let index = 0; index < MAX_DIALS_PER_ADDRESS; index++) dialers.push(await open(relayEndpoint(relay.url, "dial", studio.publicKey)));
+  assert.equal(await dialStatus(relayEndpoint(relay.url, "dial", studio.publicKey)), 429);
+  listener.socket.close();
+  // Nobody will answer them now: they are closed at once, not after the answer timeout.
+  const started = Date.now();
+  for (const dialer of dialers) assert.equal((await dialer.closed).code, 4004);
+  assert.ok(Date.now() - started < 2000);
+});
+
+test("with a public host, only proofs for that host register", { skip: !!external }, async (t) => {
+  const relay = startRelay({ bind: LOOPBACK, port: 0, publicHost: "relay.example.com" });
+  t.after(() => relay.stop());
+  const studio = generateIdentity();
+  // Signed for the address dialed, or for another relay: refused, whatever Host header was sent.
+  for (const host of [undefined, "other-relay.example"]) {
+    const wrong = await register(relay.url, studio, studio, host);
+    assert.equal((await wrong.closed).code, 4003);
+  }
+  const right = await register(relay.url, studio, studio, "relay.example.com");
+  assert.deepEqual(await right.json(), { t: "ready" });
+  right.socket.close();
 });

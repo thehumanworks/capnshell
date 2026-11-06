@@ -75,16 +75,20 @@ export function createCli(): Command {
     .description("Run a relay for paired devices that cannot reach each other directly")
     .option("--bind <address>", "Interface to listen on (default: 127.0.0.1)")
     .option("--port <port>", "TCP port (default: 47380)")
-    .addHelpText("after", "\nThe relay forwards encrypted links it cannot read. A daemon registers by proving its key;\nany device may dial a registered key, and the daemon then authenticates it as usual.\nSet CNS_RELAY_TOKEN to require ?token=TOKEN on every request. Serve wss:// through a TLS proxy.\nThe Cloudflare Worker in relay/ is the same relay without a machine to keep running.")
-    .action(async (options: { bind?: string; port?: string }) => {
+    .option("--public-host <host>", "The host[:port] devices use for this relay, as in wss://HOST; required beyond loopback")
+    .addHelpText("after", "\nThe relay forwards encrypted links it cannot read. A daemon registers by proving its key for\nthe relay's public host; any device may dial a registered key, and the daemon then authenticates\nit as usual. Set CNS_RELAY_TOKEN to require ?token=TOKEN for registering, so only your devices can.\nServe wss:// through a TLS proxy. The Cloudflare Worker in relay/ is the same relay without a machine to keep running.")
+    .action(async (options: { bind?: string; port?: string; publicHost?: string }) => {
       const { startRelay } = await import("./commands/relay.js");
       const { isIP } = await import("node:net");
+      const { isLoopback } = await import("./options.js");
       const bind = options.bind ?? "127.0.0.1";
       if (!isIP(bind)) throw new Error("--bind requires a numeric IPv4 or IPv6 address.");
       const port = Number(options.port ?? 47380);
       if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("--port requires an integer from 1 to 65535.");
-      const relay = startRelay({ bind, port, token: process.env.CNS_RELAY_TOKEN || undefined });
-      console.log(`Relay listening at ${relay.url}${process.env.CNS_RELAY_TOKEN ? " (token required)" : ""}.`);
+      if (!isLoopback(bind) && !options.publicHost) throw new Error("A relay beyond loopback needs --public-host: the host[:port] devices use for it, which their proofs must name.");
+      if (options.publicHost !== undefined && !/^[A-Za-z0-9.-]+(:\d{1,5})?$|^\[[0-9A-Fa-f:.]+\](:\d{1,5})?$/.test(options.publicHost)) throw new Error("--public-host takes host or host:port, as in wss://HOST.");
+      const relay = startRelay({ bind, port, token: process.env.CNS_RELAY_TOKEN || undefined, publicHost: options.publicHost?.toLowerCase() });
+      console.log(`Relay listening at ${relay.url}${options.publicHost ? ` for wss://${options.publicHost}` : ""}${process.env.CNS_RELAY_TOKEN ? " (registering needs the token)" : ""}.`);
       await new Promise<void>((resolve) => {
         const end = () => { void relay.stop().then(resolve); };
         process.once("SIGINT", end);

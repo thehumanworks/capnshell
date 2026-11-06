@@ -2,7 +2,7 @@ import os from "node:os";
 import readline from "node:readline";
 import { AuthError } from "../auth.js";
 import { connectFirst, connectSecure, rpcSession, type SecureChannel } from "../secure.js";
-import { isRelayAddress, relayEndpoint } from "../relay-hub.js";
+import { isRelayAddress, redactRelay, relayEndpoint } from "../relay-hub.js";
 import { errorMessage } from "../errors.js";
 import { ensureIdentity, fingerprint as fingerprintOf, identityPath, loadIdentity } from "../identity.js";
 import { endpointUrl, isLoopback } from "../options.js";
@@ -99,7 +99,7 @@ async function pairedDaemon(options: { bind?: string; port?: string; relay?: str
       const status = await running.remote.status();
       if (!status.paired) throw new Error("A daemon that is not for paired devices is running. Stop it with cns stop, then run cns up.");
       const relay = options.relay ?? process.env.CNS_RELAY;
-      if (relay && relay !== status.relay) console.error(`The running daemon ${status.relay ? `uses the relay ${status.relay}` : "uses no relay"}; run cns stop, then cns up --relay ${relay}, to change it.`);
+      if (relay && relay !== status.relay) console.error(`The running daemon ${status.relay ? `uses the relay ${redactRelay(status.relay)}` : "uses no relay"}; run cns stop, then cns up --relay URL, to change it.`);
       return { control: running, started: false };
     } catch (error) {
       running.close();
@@ -110,7 +110,10 @@ async function pairedDaemon(options: { bind?: string; port?: string; relay?: str
   const port = Number(options.port ?? process.env.CNS_PORT ?? 47381);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("--port requires an integer from 1 to 65535.");
   const relay = options.relay ?? process.env.CNS_RELAY;
-  if (relay) relayEndpoint(relay, "accept", "A".repeat(43)); // Refuse a malformed relay URL before starting anything.
+  if (relay) {
+    relayEndpoint(relay, "accept", "A".repeat(43)); // Refuse a malformed relay URL before starting anything.
+    if (new URL(relay).protocol === "ws:" && !isLoopback(new URL(relay).hostname)) console.error("The relay URL is ws://, so the relay token and registration travel unencrypted; links themselves stay encrypted. Use wss:// for a relay beyond this machine.");
+  }
   const daemon = await startDaemon({ bind, port, url: endpointUrl(bind, port), remote: !isLoopback(bind), state: options.state, paired: true, ...relay ? { relay } : {} });
   if (!quiet) console.error(`Started the peer daemon (pid ${daemon.pid}) listening at ${daemon.url}. Log: ${daemon.log}`);
   return { control: await connectControl(options.state), started: true };
@@ -124,7 +127,7 @@ export async function up(options: UpOptions): Promise<void> {
     const peers = await control.controller.peers();
     console.log(`${started ? "Started" : "Running"} as ${status.identity?.fingerprint} (pid ${status.pid}), listening at ${status.url}.`);
     if (status.addresses?.length) console.log(`Reachable at ${status.addresses.join(", ")}.`);
-    if (status.relay) console.log(`Relay: ${status.relay}${status.relayRegistered ? ", registered" : ", registering"}.`);
+    if (status.relay) console.log(`Relay: ${redactRelay(status.relay)}${status.relayRegistered ? ", registered" : ", registering"}.`);
     const paired = listPeers().filter((peer) => peer.kind === "paired");
     console.log(paired.length
       ? `Paired devices: ${paired.map((peer) => `${peer.name}${peers.some((connected) => connected.peer?.daemon && connected.peer.fingerprint === peer.fingerprint) ? " (online)" : ""}`).join(", ")}.`
@@ -285,7 +288,7 @@ export async function status(options: StatusOptions): Promise<void> {
   if (control) {
     try {
       const info = await control.remote.status();
-      daemon = { pid: info.pid, url: info.url, paired: !!info.paired, addresses: info.addresses ?? [], relay: info.relay ?? null, relayRegistered: info.relayRegistered ?? null, startedAt: new Date(info.startedAt).toISOString() };
+      daemon = { pid: info.pid, url: info.url, paired: !!info.paired, addresses: info.addresses ?? [], relay: info.relay ? redactRelay(info.relay) : null, relayRegistered: info.relayRegistered ?? null, startedAt: new Date(info.startedAt).toISOString() };
       for (const [fingerprint, link] of await standingLinks(control)) links.push({ name: link.name, fingerprint, address: link.via, hostname: link.hostname });
     } finally { control.close(); }
   }

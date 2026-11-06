@@ -4,6 +4,7 @@ import type { ServerWebSocket } from "bun";
 import { AuthError, Initiator, refusalFor, Responder, type InitiatorOptions, type LinkMode, type ResponderOptions, type Step } from "./auth.js";
 import { closeReason, closeSocket, openSocket } from "./connect.js";
 import type { Identity, PublicKey } from "./identity.js";
+import { isRelayAddress } from "./relay-hub.js";
 
 /**
  * Encrypted, mutually authenticated connections between paired devices.
@@ -402,15 +403,17 @@ function weight(error: unknown): number {
  */
 export async function connectFirst(addresses: readonly string[], identity: Identity, options: InitiatorOptions & { signal?: AbortSignal; perAddressMs?: number; timing?: Timing } = {}): Promise<{ channel: SecureChannel; peer: PublicKey; url: string }> {
   if (!addresses.length) throw new Error("No saved address. Add one with cns peer address NAME ws://HOST:PORT.");
+  // Direct addresses first, in their saved order; relays last, however they were saved.
+  const ordered = [...addresses.filter((url) => !isRelayAddress(url)), ...addresses.filter(isRelayAddress)];
   let failure: unknown;
-  for (const [index, url] of addresses.entries()) {
+  for (const [index, url] of ordered.entries()) {
     options.signal?.throwIfAborted();
     const attempt = new AbortController();
     const outer = options.signal;
     const relay = () => attempt.abort(outer!.reason);
     outer?.addEventListener("abort", relay, { once: true });
-    const last = index === addresses.length - 1;
-    const timer = last ? undefined : setTimeout(() => attempt.abort(new Error(`Timed out connecting to ${url}.`)), options.perAddressMs ?? 4000);
+    const last = index === ordered.length - 1;
+    const timer = last ? undefined : setTimeout(() => attempt.abort(new Error(`Timed out connecting to ${url}.`)), options.perAddressMs ?? 3000);
     try {
       const opened = await connectSecure(url, identity, { ...options, signal: attempt.signal });
       return { ...opened, url };
