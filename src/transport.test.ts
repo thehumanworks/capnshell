@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -253,6 +253,58 @@ test("named tty sessions persist across CLI calls for keys, screens, attach and 
   assert.equal(missing.code, 1);
   assert.equal(missing.stderr, "No PTY session named app.\n");
   assert.equal(listener.closed, false);
+});
+
+test("a named session can be manually reattached after an abrupt client loss", { timeout: 60000, skip: process.platform === "win32" }, async (t) => {
+  const directory = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-reattach-")));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const port = await unusedPort();
+  const url = `ws://[::1]:${port}`;
+  const listener = launchCli(t, ["listen", "--bind", "::1", "--port", port, "--no-repl"]);
+  await listener.waitFor("listening at");
+  const cli = async (...args: string[]) => {
+    const child = launchCli(t, args);
+    child.child.stdin.end();
+    return { code: await child.exited, stdout: child.stdout, stderr: child.stderr };
+  };
+  const command = "printf 'READY\\n'; while IFS= read -r line; do case \"$line\" in check) printf 'PID:%s CWD:%s\\n' \"$$\" \"$PWD\";; quit) exit 6;; esac; done";
+  const started = await cli("tty", url, "--name", "work", "--cwd", directory, "--", command);
+  assert.equal(started.code, 0, started.stderr);
+  const before = JSON.parse((await cli("sessions", url, "--json")).stdout)[0];
+  assert.ok(before.pid > 0);
+  assert.equal(before.cwd, directory);
+
+  const first = launchCli(t, ["tty", url, "--attach", "work"]);
+  await first.waitFor("READY");
+  first.child.kill("SIGKILL");
+  await first.exited;
+  await eventually(async () => {
+    const result = await cli("sessions", url, "--json");
+    return result.code === 0 && JSON.parse(result.stdout)[0]?.viewers === 0;
+  }, "lost viewer detached");
+
+  const after = JSON.parse((await cli("sessions", url, "--json")).stdout)[0];
+  assert.deepEqual([after.pid, after.cwd, after.running], [before.pid, directory, true]);
+  const second = launchCli(t, ["tty", url, "--attach", "work"]);
+  await second.waitFor("READY");
+  second.child.stdin.write("check\r");
+  await second.waitFor(`PID:${before.pid} CWD:${directory}`);
+  second.child.stdin.write("quit\r");
+  assert.equal(await second.exited, 6, second.output);
+  assert.equal((await cli("kill", url, "work")).code, 0);
+  assert.deepEqual(JSON.parse((await cli("sessions", url, "--json")).stdout), []);
+
+  assert.equal((await cli("tty", url, "--name", "lost", "--", "sleep 60")).code, 0);
+  const lost = JSON.parse((await cli("sessions", url, "--json")).stdout)[0];
+  listener.child.kill("SIGTERM");
+  await listener.exited;
+  await eventually(async () => {
+    try { process.kill(lost.pid, 0); return false; }
+    catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
+  }, "host shutdown ended its session process");
+  const replacement = launchCli(t, ["listen", "--bind", "::1", "--port", port, "--no-repl"]);
+  await replacement.waitFor("listening at");
+  assert.deepEqual(JSON.parse((await cli("sessions", url, "--json")).stdout), []);
 });
 
 test("run and interactive connect report unreachable listeners as failure", { timeout: 15000 }, async (t) => {
