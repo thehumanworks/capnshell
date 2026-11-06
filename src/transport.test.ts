@@ -283,6 +283,34 @@ test("a one-way listener uses its peers' shells and refuses theirs", { timeout: 
   await listener.send(print("LISTENER_STILL_WORKS"), "LISTENER_STILL_WORKS");
 });
 
+test("one-shot run and tty can refuse reverse shell calls while using the remote shell", { timeout: 30000, skip: process.platform === "win32" }, async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "cns-one-way-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const port = await unusedPort();
+  const url = `ws://[::1]:${port}`;
+  const listener = launchCli(t, ["listen", "--bind", "::1", "--port", port]);
+  await listener.waitFor("listening at");
+
+  const run = launchCli(t, ["run", url, "--one-way", "--cwd", directory, "--", "while [ ! -f release ]; do sleep 0.05; done; printf DONE"], { env: { CNS_TEST_PEER: "RUN_SECRET" } });
+  await listener.waitFor("p1");
+  await listener.send(":use p1\n:info", `"pid": ${run.child.pid}`);
+  const runRefused = await listener.send(environment, "does not run commands");
+  assert.doesNotMatch(runRefused, /RUN_SECRET/);
+  await writeFile(path.join(directory, "release"), "");
+  assert.equal(await run.exited, 0, run.output);
+  assert.equal(run.stdout, "DONE");
+
+  const tty = launchCli(t, ["tty", url, "--one-way", "--", "printf READY; read -r line; printf 'DONE:%s' \"$line\""], { env: { CNS_TEST_PEER: "TTY_SECRET" } });
+  await tty.waitFor("READY");
+  await listener.waitFor("p2");
+  await listener.send(":use p2\n:info", `"pid": ${tty.child.pid}`);
+  const ttyRefused = await listener.send(environment, "does not run commands");
+  assert.doesNotMatch(ttyRefused, /TTY_SECRET/);
+  tty.child.stdin.write("hello\r");
+  assert.equal(await tty.exited, 0, tty.output);
+  assert.match(tty.stdout, /DONE:hello/);
+});
+
 test("a saved peer address reaches the selected listener", { timeout: 30000, skip: process.platform === "win32" }, async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "cns-peer-address-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
