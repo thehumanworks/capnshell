@@ -33,7 +33,7 @@ Use an address reachable from the other machine. This does not configure routing
 | `listen --daemon` | Start a background listener. |
 | `connect <url>` | Open a bidirectional connection and interactive console. |
 | `connect <url> --no-repl` | Connect and expose local execution without a console. |
-| `listen --one-way`, `connect <url> --one-way` | Use peers' shells without offering this machine's shell or files to them. |
+| `--one-way` on peer commands | Use the peer's shell without offering this machine's shell or files in return. |
 | `run [url] -- '<command>'` | Execute one shell command and exit with its status. |
 | `tty [url] [-- '<command>']` | Open an interactive terminal (PTY) running a login shell or one command. |
 | `tty [url] --name NAME [-- '<command>']` | Start a named PTY session in the background. |
@@ -238,7 +238,7 @@ File methods take absolute paths on the executing peer and reject with its syste
 
 `ShellApi.fork()` returns another `ShellApi` on the same peer, with its own limit of four commands and the same named sessions. Releasing the fork kills its commands, so a caller can cancel a `run` without closing its connection. Each shell has up to 32 unreleased forks; closing a shell closes them. Daemon control's `runWhileConnected(id, command, options)` uses a fork so the command ends with the control connection, as `cns mcp` needs. Its `run` leaves commands running after an attached console detaches. Peers running a `cns` without `fork` fall back to `run`. Daemon control's `shell(id)` returns a fork of a connected peer's whole `ShellApi`, proxied by the daemon, and `status()` reports the daemon's listener (`url`, `bind`, `port`, `remote`, `oneWay`), `pid`, `startedAt` and its number of peers.
 
-A peer started with `--one-way` offers its peers only the handshake's `info()`; every other method is refused. `cns mcp` does the same.
+A peer started with `--one-way` offers its peers only the handshake's `info()`; every other method is refused. This includes one-shot commands such as `cns run --one-way -- 'pwd'` and `cns tty --one-way`. Without the flag, these commands retain their bidirectional behavior. `cns mcp` always refuses reverse shell access. The flag does not authenticate the peer or encrypt a `ws://` connection; continue to use only trusted networks.
 
 On Windows peers, programs run on a ConPTY in Windows PowerShell, with the same quoting as `run`. **This path is untested.** It compiles, and `src/shell.test.ts` has a Windows-only PTY test, but it has not been run on Windows yet. The manually triggered `Windows` GitHub Actions workflow (`.github/workflows/windows.yml`) runs both test suites on `windows-latest`, including Windows versions of the named-session tests. Expected differences, from [Bun's ConPTY notes](https://bun.com/docs/runtime/child-process#platform-differences):
 

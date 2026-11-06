@@ -24,6 +24,18 @@ function withEnvironment<T>(env: NodeJS.ProcessEnv, parse: () => T): T {
 const parseOptions = (argv: string[], env: NodeJS.ProcessEnv = {}) => withEnvironment(env, () => parsePeerOptions(argv));
 const parseMcp = (argv: string[], env: NodeJS.ProcessEnv = {}) => withEnvironment(env, () => parseMcpOptions(argv));
 
+test("one-way is opt-in for all peer commands", () => {
+  const cases = [
+    ["listen"], ["connect", "ws://localhost:47381"], ["run", "--", "pwd"], ["tty"], ["sessions"],
+    ["keys", "build", "Enter"], ["screen", "build"], ["kill", "build"],
+  ];
+  for (const args of cases) {
+    assert.equal(parseOptions(args).oneWay, false, args.join(" "));
+    assert.equal(parseOptions([args[0]!, "--one-way", ...args.slice(1)]).oneWay, true, args.join(" "));
+    assert.throws(() => parseOptions([args[0]!, "--one-way", "--one-way", ...args.slice(1)]), /Duplicate option/);
+  }
+});
+
 test("mcp serves stdio for a local listener by default", () => {
   assert.deepEqual(parseMcp([]), { url: "ws://127.0.0.1:47381", daemon: false, state: undefined, cwd: undefined, http: undefined });
   assert.equal(parseMcp([], { CNS_BIND: "::1", CNS_PORT: "4000", CNS_CWD: "/srv" }).url, "ws://[::1]:4000");

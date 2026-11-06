@@ -152,9 +152,9 @@ export function addPeerCommands(program: Command, run: (config: PeerConfig) => v
     const command = program.command(role).description(descriptions[role])
       .addHelpText("after", "\nNo authentication. Remote mode is only for a temporary trusted LAN/private VPN test.");
     if (role === "listen" || role === "connect") {
-      command.option("--no-repl", "Disable the interactive command prompt")
-        .option("--one-way", "Use peers' shells without offering this machine's shell or files to them");
+      command.option("--no-repl", "Disable the interactive command prompt");
     }
+    command.option("--one-way", "Use peers' shells without offering this machine's shell or files to them");
     if (role === "sessions" || sessionRoles.has(role)) {
       command.addHelpText("after", "\nNamed sessions live in the peer's cns process: they survive this command and reconnects,\nand end when they are killed or that process stops. Start one with cns tty --name NAME.");
     }
