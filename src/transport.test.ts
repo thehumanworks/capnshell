@@ -282,3 +282,21 @@ test("a one-way listener uses its peers' shells and refuses theirs", { timeout: 
   assert.doesNotMatch(refused, /LISTENER_ONLY/);
   await listener.send(print("LISTENER_STILL_WORKS"), "LISTENER_STILL_WORKS");
 });
+
+test("a saved peer address reaches the selected listener", { timeout: 30000, skip: process.platform === "win32" }, async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "cns-peer-address-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const env = { CNS_CONFIG_DIR: directory };
+  const port = await unusedPort();
+  const listener = launchCli(t, ["listen", "--bind", "::1", "--port", port, "--no-repl"]);
+  await listener.waitFor("listening at");
+  const add = launchCli(t, ["peer", "add", "studio", `ws://[::1]:${port}`], { env });
+  assert.equal(await add.exited, 0);
+  const run = launchCli(t, ["run", "--peer", "studio", "--", print("ALIAS_TARGET")], { env });
+  assert.equal(await run.exited, 0);
+  assert.equal(run.stdout, "ALIAS_TARGET");
+  const missing = launchCli(t, ["run", "--peer", "missing", "--", print("NOT_RUN")], { env });
+  assert.notEqual(await missing.exited, 0);
+  assert.match(missing.stderr, /Unknown peer alias/);
+  assert.doesNotMatch(missing.stdout, /NOT_RUN/);
+});

@@ -1,4 +1,5 @@
 import { isIP } from "node:net";
+import { resolveAlias, validatePeerUrl } from "./aliases.js";
 import { Command, Option } from "commander";
 import { z } from "zod";
 import { MAX_SCREEN_HISTORY, MAX_TIMEOUT_MS, sessionNameSchema } from "./shell.js";
@@ -15,6 +16,7 @@ const bindSchema = (name = "--bind") => z.string().refine((value) => isIP(value)
 const dimensionSchema = (name: string) => z.string().regex(/^\d+$/, `${name} requires an integer.`)
   .transform(Number).pipe(z.int().min(1).max(1000));
 const peerOptionsSchema = z.strictObject({
+  peer: z.string().min(1).optional(),
   bind: bindSchema().default("127.0.0.1"),
   port: portSchema().default(47381),
   repl: z.boolean().default(true),
@@ -77,13 +79,7 @@ export function isLoopback(host: string): boolean {
 
 export const endpointUrl = (bind: string, port: number) => `ws://${isIP(bind) === 6 ? `[${bind}]` : bind}:${port}`;
 
-function peerUrl(destination: string): string {
-  const parsed = new URL(destination);
-  if (!["ws:", "wss:"].includes(parsed.protocol) || !parsed.hostname || parsed.username || parsed.password || parsed.hash) {
-    throw new Error("Use a ws:// or wss:// URL without credentials or a fragment.");
-  }
-  return parsed.href;
-}
+const peerUrl = validatePeerUrl;
 
 // Commander handles parsing/help; reject repeats rather than silently using
 // the last value for security-sensitive listener options.
@@ -100,6 +96,11 @@ function rejectRepeatedOptions(command: Command) {
 function resolveOptions(role: PeerRole, command: Command, destination: string | undefined): PeerConfig {
   const mode = role === "listen" ? "listen" : "connect";
   const options = { ...command.opts() };
+  if (options.peer !== undefined) {
+    if (destination !== undefined) throw new Error("Use either a URL or --peer, not both.");
+    destination = resolveAlias(options.peer);
+  }
+  delete options.peer;
   if (destination !== undefined) {
     for (const name of ["bind", "port"]) {
       if (command.getOptionValueSource(name) === "cli") {
@@ -157,6 +158,7 @@ export function addPeerCommands(program: Command, run: (config: PeerConfig) => v
     if (role === "sessions" || sessionRoles.has(role)) {
       command.addHelpText("after", "\nNamed sessions live in the peer's cns process: they survive this command and reconnects,\nand end when they are killed or that process stops. Start one with cns tty --name NAME.");
     }
+    if (role !== "listen") command.option("--peer <alias>", "Use a locally saved peer address (not an authenticated identity)");
     if (role !== "connect") {
       command.addOption(new Option("--bind <address>", `Numeric ${role === "listen" ? "interface" : "remote peer"} address (default: 127.0.0.1)`).env("CNS_BIND"))
         .addOption(new Option("--port <port>", "TCP port (default: 47381)").env("CNS_PORT"));
@@ -252,7 +254,7 @@ export function addPeerCommands(program: Command, run: (config: PeerConfig) => v
         return run({ ...resolveOptions(role, command, url), name, keys: role === "keys" ? args : undefined });
       });
     } else if (role === "connect") {
-      command.argument("<url>").action((url: string) => run(resolveOptions(role, command, url)));
+      command.argument("[url]").action((url: string | undefined) => run(resolveOptions(role, command, url)));
     } else {
       command.action(() => run(resolveOptions(role, command, undefined)));
     }

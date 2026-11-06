@@ -21,6 +21,13 @@ export function createCli(): Command {
     const { startMcp } = await import("./commands/mcp.js");
     await startMcp(config);
   });
+  const alias = program.command("peer").description("Manage locally saved peer addresses (not authenticated identities)");
+  alias.command("add <name> <url>").description("Save a new peer address without replacing an existing alias")
+    .action(async (name: string, url: string) => { const { addAlias } = await import("./aliases.js"); addAlias(name, url); console.log(`Saved ${name}.`); });
+  alias.command("remove <name>").description("Remove a saved peer address")
+    .action(async (name: string) => { const { removeAlias } = await import("./aliases.js"); removeAlias(name); console.log(`Removed ${name}.`); });
+  alias.command("list").description("List saved peer addresses")
+    .action(async () => { const { listAliases } = await import("./aliases.js"); for (const peer of listAliases()) console.log(`${peer.name}\t${peer.url}`); });
   program.command("attach")
     .description("Attach an interactive console to a local daemon")
     .option("--state <path>", "Local daemon state file")
