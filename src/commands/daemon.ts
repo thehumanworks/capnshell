@@ -25,6 +25,8 @@ export interface ListenerInfo {
   remote: boolean;
   /** Peers cannot use this machine's shell or files. */
   oneWay: boolean;
+  /** Only paired devices are accepted, after authenticating. */
+  paired?: boolean;
 }
 export interface DaemonStatus extends ListenerInfo {
   pid: number;
@@ -32,6 +34,10 @@ export interface DaemonStatus extends ListenerInfo {
   startedAt: number;
   /** Connected peers that completed their handshake. */
   peers: number;
+  /** This device's identity, when the daemon accepts paired devices. */
+  identity?: { publicKey: string; fingerprint: string };
+  /** The URLs other devices can use to reach this listener. */
+  addresses?: string[];
 }
 
 export const stateSchema = z.strictObject({
@@ -101,7 +107,7 @@ export async function removeStaleState(statePath?: string): Promise<boolean> {
   return true;
 }
 
-export type DaemonConfig = Pick<PeerConfig, "bind" | "port" | "url" | "remote" | "state"> & Partial<Pick<PeerConfig, "oneWay">>;
+export type DaemonConfig = Pick<PeerConfig, "bind" | "port" | "url" | "remote" | "state"> & Partial<Pick<PeerConfig, "oneWay" | "paired">>;
 export interface StartDaemonOptions {
   /** The executable and arguments that run `cns`; by default, this program. Embedders pass the cns executable. */
   invocation?: (args: string[]) => { file: string; args: string[] };
@@ -129,8 +135,9 @@ export async function startDaemon(config: DaemonConfig, options: StartDaemonOpti
   const logPath = `${file}.${randomBytes(6).toString("hex")}.log`;
   const log = await open(logPath, "wx", 0o600);
   const args = ["listen", "--no-repl", "--state", file, "--bind", config.bind, "--port", String(config.port)];
-  if (config.remote) args.push("--allow-remote");
+  if (config.remote && !config.paired) args.push("--allow-remote");
   if (config.oneWay) args.push("--one-way");
+  if (config.paired) args.push("--paired");
   const invocation = (options.invocation ?? selfInvocation)(args);
   const child = spawn(invocation.file, invocation.args, {
     detached: true,

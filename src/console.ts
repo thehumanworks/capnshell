@@ -7,7 +7,7 @@ import {
 } from "./shell.js";
 import { attachSession, attachTerminal, type RemoteNamedPty, type RemotePty } from "./terminal.js";
 
-export interface PeerSummary { id: string; info: ShellInfo }
+export interface PeerSummary { id: string; info: ShellInfo; /** Set for an authenticated paired device. */ peer?: { name: string; fingerprint: string } }
 export interface PeerController {
   peers(): Promise<PeerSummary[]>;
   info(id: string): Promise<ShellInfo>;
@@ -111,7 +111,7 @@ export function openConsole(controller: PeerController, onQuit: () => void) {
       const available = await peers();
       if (closed || inputEnded || busy || current !== revision) return;
       const peer = available.find((peer) => peer.id === selected);
-      lines.setPrompt(peer ? `${peer.id} (${peer.info.name})> ` : "cns (:use ID)> ");
+      lines.setPrompt(peer ? `${peer.peer?.name ?? peer.id} (${peer.info.name})> ` : "cns (:use ID)> ");
       lines.prompt();
     } catch (error) {
       if (!closed) console.error(`Error: ${errorMessage(error)}`);
@@ -132,11 +132,12 @@ export function openConsole(controller: PeerController, onQuit: () => void) {
         else if (line) {
           const available = await peers();
           if (line === ":peers") {
-            console.log(available.length ? available.map(({ id, info }) =>
-              `${id === selected ? "*" : " "} ${id} ${info.hostname} ${info.platform}/${info.shell} pid=${info.pid}`).join("\n") : "No connected peers.");
+            console.log(available.length ? available.map(({ id, info, peer }) =>
+              `${id === selected ? "*" : " "} ${id} ${peer ? `${peer.name} (paired, ${peer.fingerprint}) ` : ""}${info.hostname} ${info.platform}/${info.shell} pid=${info.pid}`).join("\n") : "No connected peers.");
           } else if (line.startsWith(":use ")) {
-            const id = line.slice(5).trim();
-            if (!available.some((peer) => peer.id === id)) throw new Error(`Unknown peer ${id}. Use :peers, then :use ID.`);
+            const wanted = line.slice(5).trim();
+            const id = available.find((peer) => peer.id === wanted)?.id ?? available.find((peer) => peer.peer?.name === wanted)?.id;
+            if (!id) throw new Error(`Unknown peer ${wanted}. Use :peers, then :use ID or :use NAME.`);
             selected = id;
             explicit = true;
             console.log(`Selected ${id}.`);

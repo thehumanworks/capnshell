@@ -26,14 +26,39 @@ export function createCli(): Command {
     .action(async (name: string, url: string) => { const { addAlias } = await import("./aliases.js"); addAlias(name, url); console.log(`Saved ${name}.`); });
   alias.command("remove <name>").description("Remove a saved peer address")
     .action(async (name: string) => { const { removeAlias } = await import("./aliases.js"); removeAlias(name); console.log(`Removed ${name}.`); });
-  alias.command("list").description("List saved peer addresses")
-    .option("--json", "Print a JSON array of { name, url } objects sorted by name, [] when there are none")
+  alias.command("list").description("List saved peers: address aliases and paired devices")
+    .option("--json", "Print a JSON array sorted by name, [] when there are none: { name, url } per alias, plus paired, fingerprint, publicKey, addresses and grants per paired device")
     .action(async (options: { json?: boolean }) => {
-      const { listAliases } = await import("./aliases.js");
-      const peers = listAliases();
+      const { listPeers } = await import("./peers.js");
+      const peers = listPeers().map((peer) => peer.kind === "address"
+        ? { name: peer.name, url: peer.url }
+        : { name: peer.name, url: peer.addresses[0] ?? null, paired: true, fingerprint: peer.fingerprint, publicKey: peer.publicKey, addresses: peer.addresses, grants: peer.grants });
       if (options.json) console.log(JSON.stringify(peers, null, 2));
-      else for (const peer of peers) console.log(`${peer.name}\t${peer.url}`);
+      else for (const peer of peers) console.log(`${peer.name}\t${peer.url ?? "-"}${"paired" in peer ? `\tpaired ${peer.fingerprint}` : ""}`);
     });
+  program.command("up")
+    .description("Run this device as a paired peer: start its daemon, or report the running one")
+    .option("--bind <address>", "Interface to listen on (default: every interface; CNS_BIND)")
+    .option("--port <port>", "TCP port (default: 47381; CNS_PORT)")
+    .option("--state <path>", "Local daemon state file")
+    .addHelpText("after", "\nOnly paired devices can connect, after authenticating; each gets what cns pair granted it.\nThe link is authenticated, not encrypted: use trusted networks. Pair with cns pair.")
+    .action(async (options) => { const { up } = await import("./commands/pairing-cli.js"); await up(options); });
+  program.command("pair")
+    .description("Pair this device with another: print an invite, or paste one from the other device")
+    .argument("[invite]", "The cns1:... invite the other device printed")
+    .option("--name <name>", "Save the other device under this name")
+    .option("--request <grants>", "What to ask for on the other device: shell, files, sessions, all, or permissions (default: all)")
+    .option("--offer <grants>", "What the other device may do here: shell, files, sessions, all, or permissions (default: none)")
+    .option("--expires <minutes>", "How long a printed invite stays valid (default: 5)")
+    .option("--yes", "Accept without asking; for scripts, after comparing fingerprints yourself")
+    .option("--state <path>", "Local daemon state file")
+    .addHelpText("after", "\nOn the device you want to reach:  cns pair          (prints an invite and waits)\nOn the other device:              cns pair 'cns1:...'\nBoth sides show the other's fingerprint and ask before saving anything.")
+    .action(async (invite: string | undefined, options) => { const { pair } = await import("./commands/pairing-cli.js"); await pair(invite, options); });
+  program.command("peers")
+    .description("List paired devices and saved addresses with their status")
+    .option("--json", "Print the list as JSON")
+    .option("--state <path>", "Local daemon state file")
+    .action(async (options) => { const { peers } = await import("./commands/pairing-cli.js"); await peers(options); });
   program.command("identity")
     .description("Show this device's identity for pairing, creating it on first use")
     .option("--json", "Print { publicKey, fingerprint, createdAt, path } as JSON")
