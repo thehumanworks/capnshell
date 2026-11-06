@@ -106,10 +106,13 @@ export function describeProposal(peer: PublicKey, proposal: Proposal): string {
  */
 export class PairingApi extends RpcTarget {
   #decide: (proposal: Proposal) => Promise<Decision>;
+  #closed?: () => void;
   #proposed = false;
-  constructor(decide: (proposal: Proposal) => Promise<Decision>) {
+  /** `closed` runs once the proposing device has gone, so nobody saves a pairing it never learns about. */
+  constructor(decide: (proposal: Proposal) => Promise<Decision>, closed?: () => void) {
     super();
     this.#decide = decide;
+    this.#closed = closed;
   }
   async propose(proposal: Proposal): Promise<Decision> {
     if (this.#proposed) throw new Error("This invite has already received a proposal.");
@@ -118,5 +121,9 @@ export class PairingApi extends RpcTarget {
     for (const address of parsed.addresses ?? []) validatePeerUrl(address);
     return await this.#decide(parsed);
   }
-  [Symbol.dispose]() {}
+  [Symbol.dispose]() {
+    const closed = this.#closed;
+    this.#closed = undefined;
+    closed?.();
+  }
 }

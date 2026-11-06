@@ -98,7 +98,8 @@ export function getPeer(name: string): PeerEntry | undefined {
 
 /** The paired device with this key, under whatever alias it was saved. */
 export function findPairedPeer(publicKey: PublicKey): (PeerEntry & { kind: "paired" }) | undefined {
-  for (const entry of listPeers()) if (entry.kind === "paired" && entry.publicKey === publicKey) return entry;
+  // Called for every connection: bad files are reported by listings, not here.
+  for (const entry of listPeers(() => {})) if (entry.kind === "paired" && entry.publicKey === publicKey) return entry;
   return undefined;
 }
 

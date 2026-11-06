@@ -19,8 +19,10 @@ export interface PairingController {
   decide(id: string, decision: Decision): Promise<Decision>;
   /** Start, or restart, dialing a saved paired device. */
   dial(name: string): Promise<void>;
-  /** Apply changed grants or addresses: drop the device's links and remake them. */
+  /** Apply a changed record: widened grants and new addresses apply in place; narrowed grants drop the device's links and remake them. */
   refresh(name: string): Promise<void>;
+  /** Drop every link and dial loop for a device that is no longer paired. */
+  forget(publicKey: string): Promise<void>;
   /** End an invite nobody will decide on, telling a waiting device so. */
   cancel(id: string): void;
 }
@@ -65,11 +67,13 @@ export class ControlApi extends RpcTarget {
   }
   awaitProposal(id: string) { return this.#paired().awaitProposal(id); }
   async decide(id: string, decision: Decision) {
+    const result = await this.#paired().decide(id, decision);
     this.#invites.delete(id);
-    return await this.#paired().decide(id, decision);
+    return result;
   }
   dial(name: string) { return this.#paired().dial(name); }
   refresh(name: string) { return this.#paired().refresh(name); }
+  forget(publicKey: string) { return this.#paired().forget(publicKey); }
   peers() { return this.#controller.peers(); }
   info(id: string) { return this.#controller.info(id); }
   /** Pending commands keep running when an attached console detaches. */

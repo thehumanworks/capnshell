@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -190,6 +190,45 @@ test("two devices pair, run commands within their grants, and refuse everyone el
   assert.match(online.stdout, /\nstudio +online +direct +shell, files, sessions +/);
   assert.match((await cli(studio, ["status", "--state", studio.state])).stdout, /Links: +laptop \(direct, /);
 
+  // Laptop uses studio through the daemons' link. Revoking reaches that link even under a renamed alias,
+  // and ends a command already running; widening applies without dropping it; unpairing ends it.
+  const waitForLink = async () => {
+    const until = Date.now() + 15000;
+    while (Date.now() < until) {
+      const current = await linkCounts();
+      if (current[0] === 1 && current[1] === 1) return;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    assert.fail("the daemons did not link again");
+  };
+  const viaLink = async (command: string) => {
+    const control = await connectControl(laptop.state);
+    try {
+      const id = (await control.controller.peers()).find((peer) => peer.peer?.daemon)!.id;
+      return await control.controller.run(id, command, {});
+    } finally { control.close(); }
+  };
+  const studioLinkIds = async () => {
+    const control = await connectControl(studio.state);
+    try { return (await control.controller.peers()).filter((peer) => peer.peer?.daemon).map((peer) => peer.id); } finally { control.close(); }
+  };
+  assert.equal((await viaLink("printf linked")).stdout, "linked");
+  // Settled at once into a value, so its rejection is never unhandled while the revocation runs.
+  const running = viaLink("sleep 20; printf finished").then((result) => result.stdout, (error: unknown) => error);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  await rename(path.join(studio.dir, "peers", "laptop"), path.join(studio.dir, "peers", "work"));
+  const started_ = Date.now();
+  assert.equal((await cli(studio, ["peer", "revoke", "work", "shell", "--state", studio.state])).code, 0);
+  const outcome = await running;
+  assert.ok(outcome instanceof Error, `the running command ended with the revocation, not with ${JSON.stringify(outcome)}`);
+  assert.ok(Date.now() - started_ < 5000, "it ended at once");
+  await waitForLink();
+  await assert.rejects(viaLink("printf x"), /Permission denied: shell not granted to work/);
+  const before = await studioLinkIds();
+  assert.equal((await cli(studio, ["peer", "grant", "work", "shell", "--state", studio.state])).code, 0);
+  assert.equal((await viaLink("printf widened")).stdout, "widened");
+  assert.deepEqual(await studioLinkIds(), before, "widening a grant keeps the link");
+
   // A changed identity behind a saved address is never accepted.
   const file = path.join(laptop.dir, "peers", "studio");
   const saved = JSON.parse(await readFile(file, "utf8"));
@@ -200,4 +239,11 @@ test("two devices pair, run commands within their grants, and refuse everyone el
   await writeFile(file, JSON.stringify(saved));
   const back = await cli(laptop, ["run", "studio", "--", "printf back"]);
   assert.equal(back.stdout, "back", `exit ${back.code}: ${back.stderr}`);
+
+  // Unpairing ends the link at once and refuses the device from then on.
+  assert.deepEqual(await cli(studio, ["peer", "remove", "work", "--state", studio.state]), { code: 0, stdout: "Removed work.\n", stderr: "", output: "Removed work.\n" });
+  const until = Date.now() + 5000;
+  while (Date.now() < until && (await studioLinkIds()).length) await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.deepEqual(await studioLinkIds(), []);
+  assert.equal((await cli(laptop, ["run", "studio", "--", "printf x"])).code, 3);
 });

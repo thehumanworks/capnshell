@@ -24,8 +24,9 @@ export function createCli(): Command {
   const alias = program.command("peer").description("Manage locally saved peer addresses (not authenticated identities)");
   alias.command("add <name> <url>").description("Save a new peer address without replacing an existing alias")
     .action(async (name: string, url: string) => { const { addAlias } = await import("./aliases.js"); addAlias(name, url); console.log(`Saved ${name}.`); });
-  alias.command("remove <name>").description("Remove a saved peer address")
-    .action(async (name: string) => { const { removeAlias } = await import("./aliases.js"); removeAlias(name); console.log(`Removed ${name}.`); });
+  alias.command("remove <name>").description("Remove a saved peer; for a paired device, its links end at once")
+    .option("--state <path>", "Local daemon state file")
+    .action(async (name: string, options: { state?: string }) => { const { removePeer } = await import("./commands/pairing-cli.js"); await removePeer(name, options); });
   alias.command("grant <name> <grants...>").description("Let a paired device use more of this device: shell, files, sessions, all or permissions")
     .option("--state <path>", "Local daemon state file")
     .action(async (name: string, grants: string[], options: { state?: string }) => { const { grant } = await import("./commands/pairing-cli.js"); await grant(name, grants, options); });
@@ -79,7 +80,7 @@ export function createCli(): Command {
     .argument("<name>", "A saved peer name")
     .option("--json", "Print the report as JSON")
     .option("--state <path>", "Local daemon state file")
-    .addHelpText("after", "\nExit 0 when an address answered as the paired device, 3 when it answered as another device or refused the pairing, 5 when none answered.")
+    .addHelpText("after", "\nExit 0 when an address answered as the paired device, 3 when it answered as another device or refused the pairing, 5 when none answered or none is saved.")
     .action(async (name: string, options) => { const { doctor } = await import("./commands/pairing-cli.js"); await doctor(name, options); });
   program.command("identity")
     .description("Show this device's identity for pairing, creating it on first use")

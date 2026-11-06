@@ -73,13 +73,16 @@ export function listenerTarget(url: string, cwd?: string, expect?: { name: strin
     label: expect ? `${expect.name} (${url})` : url,
     cwd,
     open: limitCalls(async (signal) => {
+      // A paired device: prove this device's identity and require the saved one on the other end.
+      const identity = expect ? loadIdentity() : undefined;
+      if (expect && !identity) throw new Error("This device has no identity yet; run cns identity or cns up first.");
       const socket = await openSocket(url, signal);
       if (expect) {
-        // A paired device: prove this device's identity and require the saved one on the other end.
-        const identity = loadIdentity();
-        if (!identity) { closeSocket(socket); throw new Error("This device has no identity yet; run cns identity or cns up first."); }
-        try { await authenticateClient(socket, identity, { expect: expect.publicKey }); }
+        const abort = () => closeSocket(socket, "Cancelled");
+        signal.addEventListener("abort", abort, { once: true });
+        try { await authenticateClient(socket, identity!, { expect: expect.publicKey }); }
         catch (error) { closeSocket(socket); throw error; }
+        finally { signal.removeEventListener("abort", abort); }
       }
       const remote = newWebSocketRpcSession<ShellApi>(socket, new RefusingShell());
       let closed = false;

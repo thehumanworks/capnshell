@@ -49,11 +49,15 @@ export function rewritePeerFile(name: string, content: string): void {
   const temporary = path.join(directory(), `.${name}.${randomBytes(6).toString("hex")}.tmp`);
   const fd = openSync(temporary, "wx", 0o600);
   try {
-    writeFileSync(fd, content);
-    fsyncSync(fd);
-  } finally { closeSync(fd); }
-  try { renameSync(temporary, target); }
-  catch (error) { rmSync(temporary, { force: true }); throw error; }
+    try {
+      writeFileSync(fd, content);
+      fsyncSync(fd);
+    } finally { closeSync(fd); }
+    renameSync(temporary, target);
+  } catch (error) {
+    rmSync(temporary, { force: true });
+    throw error;
+  }
 }
 
 /** Whether any file, valid or not, is saved under this name. */

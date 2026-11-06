@@ -11,7 +11,7 @@ import { plain, type RemoteNamedPty } from "../terminal.js";
 import { closeSocket, forkShell, openSocket } from "../connect.js";
 import { AuthError, type Refusal } from "../auth.js";
 import { ensureIdentity, fingerprint, type Identity, type PublicKey } from "../identity.js";
-import { GrantedShell } from "../granted-shell.js";
+import { GrantedShell, type GrantHolder } from "../granted-shell.js";
 import { authenticateClient, ServerHandshake } from "../link.js";
 import { createInvite, decisionSchema, PairingApi, suggestedName, type Decision, type Proposal } from "../pairing.js";
 import { findPairedPeer, getPeer, listPeers, savePairedPeer } from "../peers.js";
@@ -47,8 +47,12 @@ interface Session {
   info?: ShellInfo;
   /** The authenticated paired device on the other end; `daemon` marks a standing link between daemons. */
   peer?: { name: string; publicKey: PublicKey; daemon: boolean };
+  /** What the paired device may do here, shared with its GrantedShell so additions apply live. */
+  grants?: GrantHolder;
   /** A device that arrived with an invite and may only propose a pairing; not a peer to select. */
   pairing?: boolean;
+  /** When the link was made, to tell two daemons dialing at once from a link that has gone stale. */
+  since: number;
 }
 interface PendingInvite {
   secret: Uint8Array;
@@ -63,6 +67,12 @@ const REDIAL_MIN_MS = 1000;
 const REDIAL_MAX_MS = 30_000;
 /** How long the person on the inviting device has to decide once a proposal arrives. */
 const DECISION_MS = 10 * 60 * 1000;
+/**
+ * Daemon links made within this long of each other count as both devices dialing at
+ * once, settled by the key rule. A daemon dials only when it has no link, so a dial
+ * that arrives later means the link this side holds is dead on the other.
+ */
+const DIAL_RACE_MS = 5000;
 
 export async function startPeer(config: PeerConfig): Promise<void> {
   const daemonChild = process.env.CNS_DAEMON_CHILD === "1";
@@ -85,15 +95,21 @@ export async function startPeer(config: PeerConfig): Promise<void> {
   // What this process offers each peer: its shell, or with --one-way only the handshake.
   const offer = () => config.oneWay ? new RefusingShell() : new ShellApi(ptys);
   /** What this device lets an authenticated paired device do here: exactly its saved incoming grants. */
-  function offerTo(publicKey: PublicKey): { local: GrantedShell; name: string } {
+  function offerTo(publicKey: PublicKey): { local: GrantedShell; name: string; grants: GrantHolder } {
     const entry = findPairedPeer(publicKey);
     if (!entry) throw new AuthError("not-paired", "Not paired with this device.");
-    return { local: new GrantedShell(new ShellApi(ptys), entry.grants.incoming, entry.name), name: entry.name };
+    const grants: GrantHolder = { current: entry.grants.incoming };
+    return { local: new GrantedShell(new ShellApi(ptys), grants, entry.name), name: entry.name, grants };
   }
   const invites = new Map<string, PendingInvite>();
-  const links = new Map<string, { stop: () => void }>();
-  /** The standing daemon link to a paired device, if any; one command's connection does not count. */
-  const linkTo = (publicKey: PublicKey) => [...sessions.values()].find((session) => session.peer?.publicKey === publicKey && session.peer.daemon && session.info);
+  const links = new Map<string, { stop: () => void; publicKey: PublicKey }>();
+  /** The standing daemon link to a paired device, if any, answered yet or not; one command's connection does not count. */
+  const linkTo = (publicKey: PublicKey) => [...sessions.values()].find((session) => session.peer?.publicKey === publicKey && session.peer.daemon);
+  /** Drop every link and dial loop for a device: its commands end and its handles are revoked. */
+  function forget(publicKey: PublicKey) {
+    for (const session of [...sessions.values()]) if (session.peer?.publicKey === publicKey) remove(session);
+    for (const link of [...links.values()]) if (link.publicKey === publicKey) link.stop();
+  }
   /** When both devices dialed each other, the one with the smaller key keeps its outbound link. */
   const keepsOutbound = (publicKey: PublicKey) => identity!.publicKey < publicKey;
 
@@ -151,7 +167,7 @@ export async function startPeer(config: PeerConfig): Promise<void> {
   const controller: PeerController = {
     async peers() {
       return [...sessions.values()].flatMap(({ id, info, peer, pairing }) => info && !pairing
-        ? [{ id, info: { ...info }, ...peer ? { peer: { name: peer.name, fingerprint: fingerprint(peer.publicKey) } } : {} }] : []);
+        ? [{ id, info: { ...info }, ...peer ? { peer: { name: peer.name, fingerprint: fingerprint(peer.publicKey), daemon: peer.daemon } } : {} }] : []);
     },
     async info(id) { return { ...requireSession(id).info! }; },
     async run(id, command, options, signal) {
@@ -199,7 +215,7 @@ export async function startPeer(config: PeerConfig): Promise<void> {
 
   function register(socket: Session["socket"], local: Session["local"], remote: RpcStub<ShellApi>, address: string, peer?: Session["peer"]): Session {
     const id = `p${nextId++}`;
-    const session: Session = { id, address, socket, local, remote, peer, timer: setTimeout(() => {
+    const session: Session = { id, address, socket, local, remote, peer, since: Date.now(), timer: setTimeout(() => {
       if (!sessions.has(id)) return;
       console.error(`Handshake with ${describe(session)} timed out.`);
       disconnected(session, 1);
@@ -249,6 +265,11 @@ export async function startPeer(config: PeerConfig): Promise<void> {
   }
   /** What an invited device gets instead of a shell: one chance to propose a pairing. */
   function pairingFor(inviteId: string, peer: PublicKey): PairingApi {
+    // A device that leaves before the decision would never save its side: end the invite instead.
+    const left = () => {
+      const invite = invites.get(inviteId);
+      if (invite?.proposal?.peer === peer) expireInvite(invite, "The other device left before the pairing was decided.");
+    };
     return new PairingApi(async (proposal) => {
       const invite = invites.get(inviteId);
       if (!invite || invite.proposal) throw new Error("This invite is no longer open.");
@@ -261,7 +282,7 @@ export async function startPeer(config: PeerConfig): Promise<void> {
       // The alias chosen here stays here.
       const { accept, granted, reason } = await invite.decision.promise;
       return { accept, ...granted ? { granted } : {}, ...reason ? { reason } : {} };
-    });
+    }, left);
   }
   const pairing: PairingController | undefined = identity && config.mode === "listen" ? {
     identity: () => ({ publicKey: identity.publicKey, fingerprint: identity.fingerprint }),
@@ -284,7 +305,7 @@ export async function startPeer(config: PeerConfig): Promise<void> {
     },
     async decide(id, decision) {
       const invite = invites.get(id);
-      if (!invite?.proposal) throw new Error("No proposal to decide on for this invite.");
+      if (!invite?.proposal) throw new Error("The other device left, or the invite expired; nothing was saved.");
       const parsed = decisionSchema.parse(decision);
       const { peer, proposal } = invite.proposal;
       let result: Decision = { accept: false, reason: parsed.reason ?? "The other device declined." };
@@ -311,11 +332,25 @@ export async function startPeer(config: PeerConfig): Promise<void> {
     },
     dial: async (name) => { dial(name); },
     async refresh(name) {
-      // Grants and addresses are read when a link is made, so remake the device's links.
-      for (const session of [...sessions.values()]) if (session.peer?.name === name) remove(session);
-      links.get(name)?.stop();
+      // Sessions are found by key, so a renamed alias still reaches its device's links.
+      const entry = getPeer(name);
+      if (entry?.kind !== "paired") return;
+      const granted = entry.grants.incoming;
+      const live = [...sessions.values()].filter((session) => session.peer?.publicKey === entry.publicKey);
+      if (live.some((session) => session.grants?.current.some((permission) => !granted.includes(permission)))) {
+        // Something was taken away: drop the links, ending commands and handles that used it, and dial again.
+        forget(entry.publicKey);
+      } else {
+        // Only widened, or only addresses changed: apply in place, without interrupting anything.
+        for (const session of live) {
+          if (session.grants) session.grants.current = granted;
+          session.peer!.name = name;
+        }
+        for (const [other, link] of [...links]) if (link.publicKey === entry.publicKey && other !== name) link.stop();
+      }
       dial(name);
     },
+    async forget(publicKey) { forget(publicKey); },
     cancel(id) {
       const invite = invites.get(id);
       if (invite) expireInvite(invite, "The inviting device stopped waiting.");
@@ -337,7 +372,8 @@ export async function startPeer(config: PeerConfig): Promise<void> {
       timer.unref?.();
       attempt++;
     };
-    const stop = () => { stopped = true; clearTimeout(timer); links.delete(name); };
+    const handle = { stop: () => { stopped = true; clearTimeout(timer); if (links.get(name) === handle) links.delete(name); }, publicKey: expectedKey };
+    const stop = handle.stop;
     // Any failure, such as an unreadable peer file, is reported and retried; the loop never dies quietly.
     async function connect() {
       if (stopped || stopping) return;
@@ -372,13 +408,15 @@ export async function startPeer(config: PeerConfig): Promise<void> {
         else { closeSocket(socket, "Duplicate link"); return schedule(); }
       }
       attempt = 0;
-      const local = new GrantedShell(new ShellApi(ptys), current.grants.incoming, name);
+      const grants: GrantHolder = { current: current.grants.incoming };
+      const local = new GrantedShell(new ShellApi(ptys), grants, name);
       const remote = newWebSocketRpcSession<ShellApi>(socket, local);
       const session = register(socket, local, remote, new URL(url).host, { name, publicKey: current.publicKey, daemon: true });
+      session.grants = grants;
       socket.addEventListener("close", () => { disconnected(session); schedule(); });
       socket.addEventListener("error", () => { disconnected(session); });
     }
-    links.set(name, { stop });
+    links.set(name, handle);
     void connect();
   }
 
@@ -423,17 +461,19 @@ export async function startPeer(config: PeerConfig): Promise<void> {
             handshake.done.then(({ peer, invite, mode }) => {
               if (stopping) { ws.close(); return; }
               try {
-                if (!invite && mode === "daemon") {
-                  const existing = linkTo(peer);
-                  if (existing) {
-                    if (existing.socket instanceof WebSocket && keepsOutbound(peer)) { ws.close(1000, "Duplicate link"); return; }
-                    remove(existing);
-                  }
+                const existing = !invite && mode === "daemon" ? linkTo(peer) : undefined;
+                // Both daemons dialed at once: the smaller key keeps the link it dialed. A link this
+                // side dialed longer ago is dead on the other side, which only dials without one.
+                if (existing && existing.socket instanceof WebSocket && keepsOutbound(peer) && Date.now() - existing.since < DIAL_RACE_MS) {
+                  ws.close(1000, "Duplicate link");
+                  return;
                 }
-                const offered = invite ? { local: pairingFor(invite.id, peer), name: undefined } : offerTo(peer);
+                const offered = invite ? { local: pairingFor(invite.id, peer), name: undefined, grants: undefined } : offerTo(peer);
+                if (existing) remove(existing);
                 const { stub, transport } = newBunWebSocketRpcSession<ShellApi, SocketData>(ws, offered.local);
                 ws.data.transport = transport;
                 ws.data.session = register(ws, offered.local, stub, ws.data.address, offered.name ? { name: offered.name, publicKey: peer, daemon: mode === "daemon" } : undefined);
+                ws.data.session.grants = offered.grants;
                 if (invite) ws.data.session.pairing = true;
               } catch (error) {
                 // For example, the device was unpaired while it authenticated. Nothing was exported.
@@ -474,7 +514,9 @@ export async function startPeer(config: PeerConfig): Promise<void> {
         if (error instanceof AuthError) throw error;
         throw new Error(`Cannot connect to ${config.expect.name} at ${config.url}: ${errorMessage(error)}`, { cause: error });
       }
-      const local = config.oneWay ? new RefusingShell() : offerTo(config.expect.publicKey).local;
+      // One command's connection only uses the other device. The other device uses this one through
+      // the daemons' standing link, whose grants revocation can reach; this process it could not.
+      const local = new RefusingShell();
       const remote = newWebSocketRpcSession<ShellApi>(socket, local);
       const session = register(socket, local, remote, new URL(config.url).host, { name: config.expect.name, publicKey: config.expect.publicKey, daemon: false });
       socket.addEventListener("error", () => disconnected(session, 1));
