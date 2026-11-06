@@ -486,8 +486,12 @@ class Pty {
   }
 }
 
+/** Why a released handle's calls and waits fail. */
+export const HANDLE_RELEASED = "This PTY session handle has been released.";
+
 function releaseError(released: AbortSignal): Error {
-  return released.reason instanceof Error ? released.reason : new Error("This PTY session handle has been released.");
+  // A bare abort() has a DOMException reason; only a reason this module chose is shown.
+  return released.reason instanceof Error && released.reason.name !== "AbortError" ? released.reason : new Error(HANDLE_RELEASED);
 }
 
 /** Revokes a handle. Module-private so that no RPC caller can reach it. */
@@ -506,10 +510,8 @@ export class HandleScope {
   #closed: string | null = null;
   /** Why this scope closed, or null while it is open. */
   get closed() { return this.#closed; }
-  add(handle: PtyControls) {
-    if (this.#closed) revokers.get(handle)?.(this.#closed);
-    else this.#handles.add(handle);
-  }
+  /** Track an open handle. Callers check `closed` first; a handle made after that starts out revoked. */
+  add(handle: PtyControls) { if (!this.#closed) this.#handles.add(handle); }
   delete(handle: PtyControls) { this.#handles.delete(handle); }
   /** Revoke every handle issued in this scope. Closing again changes nothing. */
   close(reason: string) {
@@ -542,7 +544,11 @@ class PtyControls extends RpcTarget {
     this.#onRevoke = onRevoke;
     revokers.set(this, (reason) => this.#revoke(reason));
     accessors.set(this, this.#pty);
-    scope?.add(this);
+    if (scope?.closed) {
+      // Nothing to release yet, and the subclass has not finished constructing: just start out revoked.
+      this.#revoked = scope.closed;
+      this.#handle.abort(new Error(scope.closed));
+    } else scope?.add(this);
   }
   #revoke(reason: string) {
     if (this.#revoked) return;
@@ -562,11 +568,13 @@ class PtyControls extends RpcTarget {
   async wait(options: WaitOptions): Promise<PtyWait> { return await this.#pty().wait(options, this.#handle.signal); }
   /**
    * Cap'n Web calls this once the caller releases the handle or disconnects. Its
-   * waits end then rather than holding one of the session's few waiter slots.
+   * waits end then rather than holding one of the session's few waiter slots, and
+   * the handle no longer reaches its session. Subclasses release what they hold.
    */
   [Symbol.dispose]() {
     this.#scope?.delete(this);
-    this.#handle.abort();
+    this.#revoked ??= HANDLE_RELEASED;
+    this.#handle.abort(new Error(HANDLE_RELEASED));
   }
 }
 

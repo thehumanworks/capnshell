@@ -21,7 +21,7 @@ export {
   MAX_NAMED_PTYS, MAX_PTY_BACKLOG_BYTES, MAX_PTY_INPUT_BYTES, MAX_SCREEN_HISTORY, sessionNameSchema,
   type AttachOptions, type CaptureOptions, type KeysOptions, type PtyExit, type PtyOptions, type PtyScreen,
   type PtySessionInfo, type PtySessionOptions, type PtySink, type PtyWait, type WaitOptions,
-  HandleScope, NamedPty, PtyAttachment, PtyRegistry, PtySession,
+  HANDLE_RELEASED, HandleScope, NamedPty, PtyAttachment, PtyRegistry, PtySession,
 } from "./pty.js";
 
 export const MAX_OUTPUT_BYTES = 1024 * 1024;

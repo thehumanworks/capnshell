@@ -6,7 +6,7 @@ import test, { type TestContext } from "node:test";
 import { Terminal as Screen } from "@xterm/headless";
 import {
   MAX_EXEC_CHUNK_BYTES, MAX_FILE_CHUNK_BYTES, MAX_FORKS, MAX_NAMED_PTYS, MAX_OUTPUT_BYTES, MAX_PTY_BACKLOG_BYTES, MAX_PTY_INPUT_BYTES, MAX_SCREEN_HISTORY,
-  MAX_TIMEOUT_MS, MAX_WRITE_BYTES, HANDLES_REVOKED, PtyRegistry, ShellApi, type ExecSink, type PtyExit,
+  MAX_TIMEOUT_MS, MAX_WRITE_BYTES, HANDLE_RELEASED, HANDLES_REVOKED, PtyRegistry, ShellApi, type ExecSink, type PtyExit,
 } from "./shell.js";
 
 async function temporaryDirectory(t: TestContext): Promise<string> {
@@ -549,6 +549,8 @@ test("closing a fork revokes the named handles and attachments it issued, not th
   await viewer.waitFor("READY");
   assert.equal(started.info().viewers, 1);
   const pending = handle.wait({ text: "never shown" });
+  // Let the wait register its waiter, so revocation ends a waiting call, not one still rendering.
+  await new Promise((resolve) => setTimeout(resolve, 50));
   const revoked = { message: HANDLES_REVOKED };
   fork[Symbol.dispose]();
   // Every handle the fork issued stops reaching the session, with the reason; its waits end with it too.
@@ -586,6 +588,25 @@ test("closing a fork revokes the named handles and attachments it issued, not th
   assert.throws(() => own.info(), revoked);
   assert.throws(() => started.info(), revoked);
   assert.deepEqual([theirs.info().command, theirs.info().running], ["sleep 60", true]);
+});
+
+test("releasing a handle ends its waits with the release reason and leaves it inert", { skip: windows }, async (t) => {
+  const { connect } = registryFor(t);
+  const shell = connect();
+  shell.startPtySession("idle", { command: "sleep 60" })[Symbol.dispose]();
+  const handle = shell.ptySession("idle");
+  const pending = handle.wait({ text: "never shown" });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  handle[Symbol.dispose]();
+  const released = { message: HANDLE_RELEASED };
+  await assert.rejects(pending, released);
+  assert.throws(() => handle.info(), released);
+  await assert.rejects(handle.wait({ text: "x" }), released);
+  // Closing the shell afterwards neither revives the handle nor lets it add a viewer.
+  shell[Symbol.dispose]();
+  assert.throws(() => handle.attach(ptySink().sink), released);
+  const other = connect().ptySession("idle");
+  assert.deepEqual([other.info().viewers, other.info().running], [0, true]);
 });
 
 test("attaching redraws the current screen, then streams; detaching leaves the program running", { skip: windows }, async (t) => {
