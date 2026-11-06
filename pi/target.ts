@@ -1,4 +1,5 @@
 import { isIP } from "node:net";
+import { peerFileExists } from "../src/aliases.js";
 import { getPeer } from "../src/peers.js";
 
 /** The port `cns listen` uses unless told otherwise. */
@@ -15,13 +16,22 @@ export type Target =
   /** A device paired with this one (`cns pair`), reached by its saved addresses over an encrypted link. */
   | { kind: "paired"; name: string; publicKey: string; addresses: string[] };
 
-/** The paired device saved under `name`, if any; never throws, so a stray peers file cannot break attaching. */
-function pairedDevice(name: string): Extract<Target, { kind: "paired" }> | undefined {
+/**
+ * The saved peer under `name`, if there is one: a paired device, or an address alias's
+ * URL. A name that is saved but cannot be read is an error, never a hostname: Pi would
+ * otherwise send its commands to whatever answers to that name, unauthenticated.
+ */
+function savedPeer(name: string): Target | undefined {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(name)) return undefined;
-  try {
-    const entry = getPeer(name);
-    return entry?.kind === "paired" ? { kind: "paired", name, publicKey: entry.publicKey, addresses: entry.addresses } : undefined;
-  } catch { return undefined; }
+  let saved: boolean;
+  try { saved = peerFileExists(name); } catch { saved = false; } // Saved peers are unavailable here, as on Windows.
+  if (!saved) return undefined;
+  let entry: ReturnType<typeof getPeer>;
+  try { entry = getPeer(name); }
+  catch (error) { throw new Error(`The saved peer ${name} cannot be read (${error instanceof Error ? error.message : String(error)}); fix or remove it with cns peer remove ${name}.`); }
+  if (!entry) return undefined;
+  if (entry.kind === "address") return { kind: "url", url: entry.url };
+  return { kind: "paired", name, publicKey: entry.publicKey, addresses: entry.addresses };
 }
 
 /** The port for `host` without one: CNS_PORT, as `cns run` uses, else the default. */
@@ -39,11 +49,11 @@ export function parseTarget(text: string, env: NodeJS.ProcessEnv = process.env):
   if (!value) throw new Error("Name a host: local, a peer such as p1, host[:port] or a ws:// URL.");
   if (value === "local") return { kind: "local" };
   if (/^p[1-9]\d*$/.test(value)) return { kind: "peer", id: value };
-  // A paired device's name comes before reading the word as a hostname.
-  const paired = pairedDevice(value);
-  if (paired) {
-    if (!paired.addresses.length) throw new Error(`Paired device ${value} has no saved address. Add one with cns peer address ${value} ws://HOST:PORT.`);
-    return paired;
+  // A saved peer's name comes before reading the word as a hostname.
+  const saved = savedPeer(value);
+  if (saved) {
+    if (saved.kind === "paired" && !saved.addresses.length) throw new Error(`Paired device ${value} has no saved address. Add one with cns peer address ${value} ws://HOST:PORT.`);
+    return saved;
   }
   if (/^wss?:\/\//i.test(value)) {
     const url = new URL(value);

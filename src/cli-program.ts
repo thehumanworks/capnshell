@@ -8,11 +8,16 @@ export function createCli(): Command {
     .exitOverride()
     .showHelpAfterError();
   addPeerCommands(program, async (config) => {
-    // A paired device's named session, `main` by default, survives connection loss.
-    if (config.role === "tty" && config.expect && !config.screen && config.command === undefined && (config.attach || config.name === undefined)) {
-      const { attachPaired } = await import("./commands/paired-tty.js");
-      process.exitCode = await attachPaired(config);
-      return;
+    // A paired device's named session survives connection loss: --attach NAME, or `main` when
+    // run at a terminal. Piped input goes to a terminal of its own, never a shared session.
+    const interactive = !!(process.stdin.isTTY && process.stdout.isTTY);
+    if (config.role === "tty" && config.expect && !config.screen && config.command === undefined && (config.attach || (config.name === undefined && interactive))) {
+      const { attachPaired, NO_SESSIONS } = await import("./commands/paired-tty.js");
+      const outcome = await attachPaired(config);
+      if (typeof outcome === "number") { process.exitCode = outcome; return; }
+      void NO_SESSIONS;
+      // The device grants no session access: a terminal that ends with the connection is what remains.
+      process.stderr.write(`[cns: ${config.expect.name} grants this device no sessions; opening a terminal that ends with the connection]\n`);
     }
     if (config.daemon) {
       const { startDaemon } = await import("./commands/daemon.js");

@@ -105,7 +105,7 @@ test("devices that cannot reach each other directly pair and link through the re
   const invocation = cliInvocation(["mcp", "--daemon", "--state", laptop.state]);
   const client = new Client({ name: "test", version: "1" });
   await client.connect(new StdioClientTransport({ command: invocation.file, args: invocation.args, env: cliEnvironment(laptop.env) as Record<string, string> }));
-  t.after(() => client.close());
+  cleanups.push(() => client.close());
   const listed = await client.callTool({ name: "list_peers", arguments: {} });
   const peers = (listed.structuredContent as { peers: Array<{ name?: string }> }).peers;
   assert.deepEqual(peers.map((peer) => peer.name), ["studio"]);

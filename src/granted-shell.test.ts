@@ -95,12 +95,19 @@ test("session handles check viewing, typing and killing separately, and owners k
   assert.equal(own.info().owner, "laptop-fingerprint");
   assert.equal((await own.wait({ text: "OWN", timeoutMs: 10000 })).matched, true);
   own.keys(["x"]);
-  assert.throws(() => creator.ptySession("host"), /sessions:view not granted/);
+  // A handle on someone else's session does nothing for it.
+  assert.throws(() => creator.ptySession("host").info(), /sessions:view not granted/);
+  assert.throws(() => creator.ptySession("host").keys(["x"]), /sessions:control not granted/);
   const reopened = creator.ptySession("mine");
   assert.equal((await reopened.kill()).signal, "SIGHUP");
   assert.deepEqual(local.ptySessions().map((session) => session.name), ["host"]);
   // Another device with the same grants does not own it.
   const other = as(["sessions:create"], "studio-fingerprint");
   other.startPtySession("theirs", { command: "sleep 30" })[Symbol.dispose]();
-  assert.throws(() => creator.ptySession("theirs"), /sessions:view not granted/);
+  assert.throws(() => creator.ptySession("theirs").info(), /sessions:view not granted/);
+  // Killing needs only sessions:kill; a device without any session permission learns nothing.
+  const killer = as(["sessions:kill"]);
+  assert.throws(() => killer.ptySession("theirs").info(), /sessions:view not granted/);
+  assert.equal((await killer.ptySession("theirs").kill()).signal, "SIGHUP");
+  assert.throws(() => as(["shell"]).ptySession("missing-or-not"), /sessions:view not granted/);
 });

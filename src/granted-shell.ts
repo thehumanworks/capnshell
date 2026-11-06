@@ -52,15 +52,15 @@ export class GrantedShell extends RpcTarget {
     this.#require("sessions:create");
     return new GrantedNamedPty(this.#shell.startPtySession(...args), this.#grants, this.#peer, this.#owner);
   }
-  /** A handle on a session: getting one needs `sessions:view`, or owning the session. */
+  /**
+   * A handle on a session, whose every use is checked: info, capture, wait and attach need
+   * `sessions:view`, typing `sessions:control`, killing `sessions:kill`, or owning the session.
+   */
   ptySession(...args: Parameters<ShellApi["ptySession"]>) {
-    // A device that can neither view sessions nor own one learns nothing, not even whether the name exists.
-    if (!this.#grants.current.includes("sessions:create")) this.#require("sessions:view");
-    const handle = this.#shell.ptySession(...args);
-    const granted = new GrantedNamedPty(handle, this.#grants, this.#peer, this.#owner);
-    try { granted.info(); } // Needs sessions:view, or owning the session.
-    catch (error) { handle[Symbol.dispose](); throw error; }
-    return granted;
+    // A device with no session permission at all learns nothing, not even whether the name exists.
+    const any = (["sessions:view", "sessions:control", "sessions:kill", "sessions:create"] as const).some((permission) => this.#grants.current.includes(permission));
+    if (!any) this.#require("sessions:view");
+    return new GrantedNamedPty(this.#shell.ptySession(...args), this.#grants, this.#peer, this.#owner);
   }
   /** Closing the view closes the shell behind it: its commands end and its handles are revoked. */
   [Symbol.dispose]() { this.#shell[Symbol.dispose](); }
@@ -89,6 +89,8 @@ class GrantedNamedPty extends RpcTarget {
   }
   /** Throw unless the peer holds `permission` for this session, by grant or by owning it. */
   #check(permission: Permission) {
+    // Grants first: only a device without the grant pays for looking up the session's owner.
+    if (this.#grants.current.includes(permission)) return;
     if (this.#owner !== null && OWNER_PERMISSIONS.has(permission) && this.#inner.info().owner === this.#owner) return;
     require(this.#grants, this.#peer, [permission]);
   }

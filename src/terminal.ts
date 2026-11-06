@@ -48,6 +48,8 @@ export interface AttachOptions {
   signal?: AbortSignal;
   /** Called after each chunk of output is written, with the program's output offset when the peer reports one. */
   onOutput?: (end: number | undefined) => void;
+  /** Called once if the peer refuses input, such as a session this device may only watch. */
+  onInputRefused?: (reason: string) => void;
   /** Print nothing while it runs; return the rendered screen from when it ended. */
   screen?: CaptureOptions;
   /** For named sessions: this byte typed at a local terminal detaches instead of being sent. */
@@ -92,7 +94,7 @@ class OutputSink extends RpcTarget implements PtySink {
  * input is forwarded verbatim; its end is not translated into a keystroke, because
  * Ctrl-D would also quit TUIs started with stdin closed.
  */
-export async function attachTerminal(open: OpenPty, options: PtyOptions, { signal, screen, detachKey, alternateScreen, onOutput }: AttachOptions = {}): Promise<AttachResult> {
+export async function attachTerminal(open: OpenPty, options: PtyOptions, { signal, screen, detachKey, alternateScreen, onOutput, onInputRefused }: AttachOptions = {}): Promise<AttachResult> {
   const input = process.stdin;
   const interactive = !!(input.isTTY && process.stdout.isTTY);
   // A local terminal answers queries such as cursor-position reports only when it
@@ -147,10 +149,15 @@ export async function attachTerminal(open: OpenPty, options: PtyOptions, { signa
       for (let offset = 0; offset < data.length; offset += MAX_PTY_INPUT_BYTES) {
         const chunk = data.subarray(offset, offset + MAX_PTY_INPUT_BYTES);
         inFlight += chunk.length;
-        await pty.write(chunk);
-        inFlight -= chunk.length;
+        // Settled either way: refused input is not input that may still arrive.
+        try { await pty.write(chunk); }
+        finally { inFlight -= chunk.length; }
       }
-    }).catch(() => { /* The exit or broken-connection path reports the outcome. */ });
+    }).catch((error: unknown) => {
+      // The exit or broken-connection path reports other outcomes.
+      const message = error instanceof Error ? error.message : String(error);
+      if (/Permission denied/.test(message) && onInputRefused) { onInputRefused(message); onInputRefused = undefined; }
+    });
     return writing;
   };
   const onData = (chunk: Buffer | string) => {

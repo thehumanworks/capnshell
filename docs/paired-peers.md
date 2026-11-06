@@ -78,9 +78,9 @@ A grant lists the operations one device may perform on another. The granting dev
 | --- | --- |
 | `shell` | `run`, `exec`, `openPty`, `fork` (a fork inherits the grant) |
 | `files` | `stat`, `access`, `readdir`, `mkdir`, `glob`, `readFile`, `writeFile` |
-| `sessions:list` | `ptySessions`, `NamedPty.info` |
-| `sessions:create` | `startPtySession` |
-| `sessions:view` | `ptySession` for `capture`, `wait`, `attach` as a viewer that cannot type |
+| `sessions:list` | `ptySessions` (names, commands, sizes and owners' fingerprints) |
+| `sessions:create` | `startPtySession`; the device owns what it starts and may view, control and kill it, so this alone amounts to running commands |
+| `sessions:view` | `info`, `capture` (with up to 1000 lines of scrollback), `wait`, `attach` as a viewer that cannot type |
 | `sessions:control` | `write`, `keys`, `resize` on a handle or attachment |
 | `sessions:kill` | `NamedPty.kill` |
 

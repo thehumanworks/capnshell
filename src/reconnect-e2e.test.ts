@@ -10,7 +10,9 @@ const posix = process.platform !== "win32";
 
 test("an attached session survives losing the connection and reports what it missed", { skip: !posix, timeout: 120000 }, async (t) => {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-reconnect-")));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  // Hooks run in the order they were added: stop the daemon and proxy, then remove the directory.
+  const cleanups: Array<() => Promise<unknown>> = [];
+  t.after(async () => { for (const cleanup of cleanups.reverse()) await cleanup(); await rm(root, { recursive: true, force: true }); });
   const device = async (name: string) => {
     const dir = path.join(root, name);
     await mkdir(dir, { mode: 0o700 });
@@ -25,7 +27,7 @@ test("an attached session survives losing the connection and reports what it mis
   };
   const port = await unusedPort("127.0.0.1");
   assert.equal((await cli(studio, ["up", "--bind", "127.0.0.1", "--port", port, "--state", studio.state])).code, 0);
-  t.after(async () => { await cli(studio, ["stop", "--state", studio.state]); });
+  cleanups.push(() => cli(studio, ["stop", "--state", studio.state]));
   const inviting = launchCli(t, ["pair", "--yes", "--name", "laptop", "--grant", "all", "--state", studio.state], { env: studio.env });
   inviting.child.stdin.end();
   await inviting.waitFor("Invite: cns1:");
@@ -33,11 +35,11 @@ test("an attached session survives losing the connection and reports what it mis
   assert.equal((await cli(laptop, ["pair", invite, "--yes", "--name", "studio", "--request", "all"])).code, 0);
   assert.equal(await inviting.exited, 0);
 
-  // `cns tty studio` with no command uses the session main: a login shell, started on first use.
+  // Piped input to `cns tty studio` gets a terminal of its own, never the shared session main.
   const shell = await cli(laptop, ["tty", "studio"], "echo hi-$((40+2))\nexit 7\n");
   assert.equal(shell.code, 7, shell.stderr);
   assert.match(shell.stdout, /hi-42/);
-  assert.match(shell.stderr, /started a login shell on studio as session main/);
+  assert.doesNotMatch(shell.stderr, /session main/);
 
   // Laptop reaches studio through a proxy that can cut connections and refuse new ones.
   let refusing = false;
@@ -52,7 +54,7 @@ test("an attached session survives losing the connection and reports what it mis
     upstream.on("error", () => client.destroy());
   });
   await new Promise<void>((resolve) => proxy.listen(proxyPort, "127.0.0.1", resolve));
-  t.after(() => { for (const socket of pairs) socket.destroy(); proxy.close(); });
+  cleanups.push(async () => { for (const socket of pairs) socket.destroy(); proxy.close(); });
   const file = path.join(laptop.dir, "peers", "studio");
   const record = JSON.parse(await readFile(file, "utf8"));
   await writeFile(file, JSON.stringify({ ...record, addresses: [`ws://127.0.0.1:${proxyPort}`] }), { mode: 0o600 });

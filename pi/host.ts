@@ -300,7 +300,8 @@ async function checked(host: Host): Promise<Host> {
       if (error instanceof TypeError || /is not a function/.test(errorMessage(error))) {
         throw new Error(`${host.label} runs an older cns without file operations; update cns there.`);
       }
-      throw error;
+      // A paired device that grants no file access has them all the same: bash and ! still work, and the file tools say what is missing.
+      if (!/^Permission denied: files not granted/.test(errorMessage(error))) throw error;
     }
     return host;
   } catch (error) {
