@@ -1,7 +1,9 @@
 # Paired peers
 
-Status: proposal for review, 6 November 2026. Base: `main` at `1986d6a` with the
-address book (PR 12), `peer list --json` (PR 18) and scoped handle lifetimes (PR 19).
+Status: in progress, 6 November 2026. Base: `main` at `1986d6a` with the address book
+(PR 12), `peer list --json` (PR 18) and scoped handle lifetimes (PR 19). Decisions taken so
+far: `cns up` listens on all interfaces for paired devices; both sides confirm a pairing;
+the relay is a Cloudflare Worker; slices 1 and 2 are merged as PRs 21 and 22.
 
 The requirement is **two devices I know of that have paired**. Today `cns` connects a
 listener and a connector, identifies peers by connection IDs such as `p1`, grants
@@ -56,16 +58,15 @@ Paired. Reverse shell access has not been granted.
 - Pairing and granting are **separate states**: a pairing with no grants in a direction is valid and useful (the device is recognized but may do nothing). The example above pairs both ways and grants shell access in one direction only.
 - Duplicate alias, expired or refused invite, unknown identity, and an identity change on a known alias each have a distinct error text and exit status 2.
 
-## 3. Authenticated, encrypted links
+## 3. Authenticated links
 
-Today the RPC capability is exported the moment the WebSocket opens, and the peer's `info()` is exchanged afterwards. In the paired model **nothing is exported until the handshake has succeeded**, and the link is encrypted end to end so that `ws://` on a LAN, and later a relay, carry only ciphertext.
+Today the RPC capability is exported the moment the WebSocket opens, and the peer's `info()` is exchanged afterwards. In the paired model **nothing is exported until the handshake has succeeded**: `src/auth.ts` runs a three-message mutual authentication on the connection first, and only then does Cap'n Web start.
 
-- Keys: each device derives an X25519 key from its Ed25519 identity for key agreement, and signs the handshake transcript with the Ed25519 key, so one identity file serves both.
-- Handshake: a Noise-style pattern (IK when the dialer already knows the responder's key, which is the normal case after pairing; XX during pairing), with the device keys as static keys and fresh ephemeral keys per link. Both sides end with the other's authenticated public key and shared session keys, one per direction.
-- Framing: each WebSocket message after the handshake is one AES-256-GCM record (WebCrypto, available in Bun and Node) with a per-direction counter nonce. Cap'n Web's transport is wrapped, so the RPC layer is unchanged.
-- The responder maps the authenticated key to its peers file. Unknown key: close with "not paired" and record nothing. Known key: export the **granted** shell (section 4) for that peer.
-- `info()` remains the first RPC call, but it is now data about an authenticated device, and it carries the protocol version so older peers are recognized.
-- **Decision 2 (crypto primitive set):** AES-256-GCM via WebCrypto (no dependency, hardware-accelerated) versus a Noise library with ChaCha20-Poly1305 (closer to iroh's choice, one dependency). Recommendation: WebCrypto AES-GCM with a hand-written, tested handshake based on the Noise IK/XX message patterns, keeping the compiled binary dependency-free.
+- Each side proves possession of its Ed25519 identity by signing a challenge made of both devices' nonces and public keys, so a signature from one connection is useless on another. The dialer states which identity it expects; a different one is reported as `identity-changed` and never accepted. The responder decides whether the authenticated device may connect at all; unknown devices are refused with `not-paired` before any capability exists.
+- During pairing, the dialer also proves knowledge of the invite secret with an HMAC over the same transcript, so a device that saw the invite's public part but not the secret cannot pair.
+- Refusals carry a stable code (`protocol`, `identity-changed`, `refused`, `not-paired`, `invalid-proof`) and a reason, which `cns doctor` and the CLI exit statuses use. An older `cns`, which speaks Cap'n Web first, is recognized and refused with a message saying so.
+- The handshake **authenticates but does not encrypt**. Direct links therefore keep the README's existing transport trust model: loopback, a trusted LAN or a VPN. The relay path (section 8) is TLS to the relay. End-to-end encryption of the link is a later slice and will use a vetted library rather than custom cipher code; until then, the design must not assume confidentiality on a direct `ws://` link.
+- **Decision 2 (link encryption):** settled as above: authenticate now, encrypt later with a vetted library; evaluated together with the transport decision in section 8.
 
 ## 4. Directional grants
 
@@ -157,7 +158,7 @@ Evaluation evidence to collect before **Decision 8 (transport)**: Bun N-API load
 Each slice is a PR with its own tests, merged after review, in this order unless a decision above changes it:
 
 1. **Identity file and fingerprints** (`cns identity` to show them; section 1). Tests: creation, mode checks, stable fingerprint, refusal of unsafe files.
-2. **Encrypted authenticated link** (section 3) behind a flag, with the legacy path untouched. Tests: handshake vectors, wrong key, tampered record, replay, and an RPC session running over it.
+2. **Authenticated link** (section 3), with the legacy path untouched. Tests: success, wrong identity, refusal codes, tampered and replayed messages, invite proofs.
 3. **Pairing** (section 2): invite format, `cns pair` both roles, confirmation prompts, peers file v2 with address-book compatibility, error texts and exit statuses.
 4. **Grants** (section 4): `GrantedShell`, derived handles, `cns peers grant/revoke`, live revocation through `HandleScope`, expiry.
 5. **Peer daemon and CLI** (section 5): `up`, link dedup, positional targets, `peers`, `status`, `doctor`, `--json` outputs, exit statuses; MCP and Pi target resolution.
@@ -169,8 +170,8 @@ Each slice is a PR with its own tests, merged after review, in this order unless
 
 ## Decisions to settle
 
-1. Key storage: file under `~/.cns` (recommended) or OS keychain.
-2. Crypto: WebCrypto AES-256-GCM with a Noise-pattern handshake (recommended) or a Noise library with ChaCha20-Poly1305.
+1. Key storage: settled as a file under `~/.cns` (`src/identity.ts`); the OS keychain can come later.
+2. Link encryption: settled. Authentication first (`src/auth.ts`); end-to-end encryption later with a vetted library, decided with the transport in section 8.
 3. Grant granularity: seven permissions with three presets (recommended) or three coarse grants.
 4. Revocation kills running commands at once (recommended) or lets them finish.
 5. `cns tty studio` without a name uses the `main` named session (recommended) or an unnamed PTY.
