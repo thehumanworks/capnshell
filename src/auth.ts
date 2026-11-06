@@ -7,18 +7,19 @@ import { publicKeyBytes, verify, type Identity, type PublicKey } from "./identit
  * starts, so that nothing is exported to a device that has not proved its identity.
  *
  * Each side proves possession of its Ed25519 key by signing a challenge made of both
- * nonces and both public keys. During pairing, the initiator also proves that it
- * knows the invite secret. The handshake authenticates; it does not encrypt. Use it
- * on connections whose transport you trust, as the README's security section says.
+ * nonces, both identity keys and both ephemeral key-exchange keys. During pairing,
+ * the initiator also proves that it knows the invite secret. The ephemeral keys
+ * (`kx`, libsodium crypto_kx) give the session keys that secure.ts encrypts the
+ * connection with; signing them binds those keys to the authenticated identities.
  *
- * Wire: three JSON text messages, then the connection belongs to Cap'n Web.
- *   initiator -> { t: "hello", v: 1, key, nonce, invite?, mode? }   mode: "daemon" for a standing link between daemons
- *   responder -> { t: "hello", v: 1, key, nonce, sig }      or { t: "refused", reason }
+ * Wire: four JSON text messages, then secure.ts takes over the connection.
+ *   initiator -> { t: "hello", v: 2, key, nonce, kx, invite?, mode? }   mode: "daemon" for a standing link between daemons
+ *   responder -> { t: "hello", v: 2, key, nonce, kx, sig }      or { t: "refused", code, reason }
  *   initiator -> { t: "auth", sig, proof? }
- *   responder -> { t: "ok" }                                 or { t: "refused", reason }
+ *   responder -> { t: "ok" }                                     or { t: "refused", code, reason }
  */
 
-export const AUTH_VERSION = 1;
+export const AUTH_VERSION = 2;
 const NONCE_BYTES = 16;
 const base64url = /^[A-Za-z0-9_-]+$/;
 const keySchema = z.string().regex(base64url).refine((value) => Buffer.from(value, "base64url").length === 32);
@@ -27,7 +28,7 @@ const signatureSchema = z.string().regex(base64url).refine((value) => Buffer.fro
 const inviteIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
 const modeSchema = z.enum(["daemon", "client"]);
 export type LinkMode = z.infer<typeof modeSchema>;
-const helloSchema = z.strictObject({ t: z.literal("hello"), v: z.literal(AUTH_VERSION), key: keySchema, nonce: nonceSchema, invite: inviteIdSchema.optional(), mode: modeSchema.optional(), sig: signatureSchema.optional() });
+const helloSchema = z.strictObject({ t: z.literal("hello"), v: z.literal(AUTH_VERSION), key: keySchema, nonce: nonceSchema, kx: keySchema, invite: inviteIdSchema.optional(), mode: modeSchema.optional(), sig: signatureSchema.optional() });
 const authSchema = z.strictObject({ t: z.literal("auth"), sig: signatureSchema, proof: z.string().regex(base64url).optional() });
 const codeSchema = z.enum(["protocol", "identity-changed", "refused", "not-paired", "invalid-proof", "closed"]);
 const refusedSchema = z.strictObject({ t: z.literal("refused"), code: codeSchema, reason: z.string().max(512) });
@@ -67,11 +68,27 @@ export interface InitiatorOptions {
   mode?: LinkMode;
 }
 
-export interface Step { send?: string; peer?: PublicKey; invite?: { id: string }; /** The initiator's declared link mode, on the responder's final step. */ mode?: LinkMode }
+export interface Step {
+  send?: string;
+  /** Set on the final step: the authenticated device and its ephemeral key-exchange key. */
+  peer?: PublicKey;
+  peerKx?: Uint8Array;
+  invite?: { id: string };
+  /** The initiator's declared link mode, on the responder's final step. */
+  mode?: LinkMode;
+}
 
-function transcript(initiatorNonce: Buffer, responderNonce: Buffer, initiatorKey: PublicKey, responderKey: PublicKey): Buffer {
-  return createHash("sha256").update("cns-auth-1").update(initiatorNonce).update(responderNonce)
-    .update(publicKeyBytes(initiatorKey)).update(publicKeyBytes(responderKey)).digest();
+/** An ephemeral key-exchange public key is 32 bytes. */
+export const KX_BYTES = 32;
+
+function transcript(initiatorNonce: Buffer, responderNonce: Buffer, initiatorKey: PublicKey, responderKey: PublicKey, initiatorKx: Uint8Array, responderKx: Uint8Array): Buffer {
+  return createHash("sha256").update("cns-auth-2").update(initiatorNonce).update(responderNonce)
+    .update(publicKeyBytes(initiatorKey)).update(publicKeyBytes(responderKey))
+    .update(initiatorKx).update(responderKx).digest();
+}
+function kxBytes(value: Uint8Array): Uint8Array {
+  if (value.length !== KX_BYTES) throw new Error("A key-exchange key is 32 bytes.");
+  return value;
 }
 function challenge(role: "initiator" | "responder", base: Buffer): Buffer {
   return createHash("sha256").update(base).update(role).digest();
@@ -98,14 +115,21 @@ export class Initiator {
   #state: "new" | "hello" | "auth" | "done" = "new";
   #base?: Buffer;
   #peer?: PublicKey;
-  constructor(identity: Identity, options: InitiatorOptions = {}) {
+  #kx: Uint8Array;
+  #peerKx?: Uint8Array;
+  /** `kx` is this side's ephemeral key-exchange public key for this connection. */
+  constructor(identity: Identity, kx: Uint8Array, options: InitiatorOptions = {}) {
     this.#identity = identity;
+    this.#kx = kxBytes(kx);
     this.#options = options;
   }
   start(): string {
     if (this.#state !== "new") throw new AuthError("protocol", "The handshake has already started.");
     this.#state = "hello";
-    return JSON.stringify({ t: "hello", v: AUTH_VERSION, key: this.#identity.publicKey, nonce: this.#nonce.toString("base64url"), ...this.#options.invite ? { invite: this.#options.invite.id } : {}, ...this.#options.mode ? { mode: this.#options.mode } : {} });
+    return JSON.stringify({
+      t: "hello", v: AUTH_VERSION, key: this.#identity.publicKey, nonce: this.#nonce.toString("base64url"), kx: Buffer.from(this.#kx).toString("base64url"),
+      ...this.#options.invite ? { invite: this.#options.invite.id } : {}, ...this.#options.mode ? { mode: this.#options.mode } : {},
+    });
   }
   /** Returns what to send next, and `peer` once the other device is authenticated. */
   receive(text: string): Step {
@@ -117,10 +141,12 @@ export class Initiator {
         this.#state = "done";
         throw new AuthError("identity-changed", "The peer's identity is not the one saved for it. Pair with it again if the device was replaced.");
       }
-      const base = transcript(this.#nonce, Buffer.from(message.nonce, "base64url"), this.#identity.publicKey, message.key);
+      const peerKx = Buffer.from(message.kx, "base64url");
+      const base = transcript(this.#nonce, Buffer.from(message.nonce, "base64url"), this.#identity.publicKey, message.key, this.#kx, peerKx);
       if (!verify(message.key, challenge("responder", base), Buffer.from(message.sig, "base64url"))) throw new AuthError("protocol", "The peer could not prove its identity.");
       this.#base = base;
       this.#peer = message.key;
+      this.#peerKx = peerKx;
       this.#state = "auth";
       const sig = Buffer.from(this.#identity.sign(challenge("initiator", base))).toString("base64url");
       const proof = this.#options.invite ? proofOf(this.#options.invite.secret, base).toString("base64url") : undefined;
@@ -129,7 +155,7 @@ export class Initiator {
     if (this.#state === "auth") {
       if (message.t !== "ok") throw new AuthError("protocol", "The peer sent an invalid handshake message.");
       this.#state = "done";
-      return { peer: this.#peer! };
+      return { peer: this.#peer!, peerKx: this.#peerKx! };
     }
     throw new AuthError("protocol", "The handshake is over.");
   }
@@ -145,8 +171,12 @@ export class Responder {
   #peer?: PublicKey;
   #invite?: string;
   #mode: LinkMode = "client";
-  constructor(identity: Identity, options: ResponderOptions) {
+  #kx: Uint8Array;
+  #peerKx?: Uint8Array;
+  /** `kx` is this side's ephemeral key-exchange public key for this connection. */
+  constructor(identity: Identity, kx: Uint8Array, options: ResponderOptions) {
     this.#identity = identity;
+    this.#kx = kxBytes(kx);
     this.#options = options;
   }
   /** Returns what to send next; `peer` is set once the other device is authenticated and authorized. A thrown AuthError's `send`, if any, has already been returned. */
@@ -162,14 +192,16 @@ export class Responder {
     if (this.#state === "hello") {
       if (message.t !== "hello" || message.sig !== undefined) return this.#refuse("protocol", "The peer sent an invalid handshake message.");
       if (message.invite !== undefined && !this.#options.secretFor?.(message.invite)) return this.#refuse("refused", "Unknown or expired invite.");
-      const base = transcript(Buffer.from(message.nonce, "base64url"), this.#nonce, message.key, this.#identity.publicKey);
+      const peerKx = Buffer.from(message.kx, "base64url");
+      const base = transcript(Buffer.from(message.nonce, "base64url"), this.#nonce, message.key, this.#identity.publicKey, peerKx, this.#kx);
       this.#base = base;
       this.#peer = message.key;
+      this.#peerKx = peerKx;
       this.#invite = message.invite;
       this.#mode = message.mode ?? "client";
       this.#state = "auth";
       const sig = Buffer.from(this.#identity.sign(challenge("responder", base))).toString("base64url");
-      return { send: JSON.stringify({ t: "hello", v: AUTH_VERSION, key: this.#identity.publicKey, nonce: this.#nonce.toString("base64url"), sig }) };
+      return { send: JSON.stringify({ t: "hello", v: AUTH_VERSION, key: this.#identity.publicKey, nonce: this.#nonce.toString("base64url"), kx: Buffer.from(this.#kx).toString("base64url"), sig }) };
     }
     if (this.#state === "auth") {
       if (message.t !== "auth") return this.#refuse("protocol", "The peer sent an invalid handshake message.");
@@ -185,7 +217,7 @@ export class Responder {
       const reason = await this.#options.authorize(this.#peer!, invite);
       if (reason !== undefined) return this.#refuse(typeof reason === "string" ? "refused" : reason.code, typeof reason === "string" ? reason : reason.reason);
       this.#state = "done";
-      return { send: JSON.stringify({ t: "ok" }), peer: this.#peer!, invite, mode: this.#mode };
+      return { send: JSON.stringify({ t: "ok" }), peer: this.#peer!, peerKx: this.#peerKx!, invite, mode: this.#mode };
     }
     throw new AuthError("protocol", "The handshake is over.");
   }

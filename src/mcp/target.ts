@@ -3,7 +3,7 @@ import { connectControl } from "../commands/daemon.js";
 import { closeSocket, openSocket } from "../connect.js";
 import type { PeerController } from "../console.js";
 import { loadIdentity } from "../identity.js";
-import { authenticateClient } from "../link.js";
+import { connectFirst, rpcSession } from "../secure.js";
 import { RefusingShell } from "../refusing-shell.js";
 import type { ShellApi } from "../shell.js";
 import { plain, type RemoteNamedPty } from "../terminal.js";
@@ -68,7 +68,7 @@ function limitCalls(open: (signal: AbortSignal) => Promise<Link>): (signal: Abor
  * does. Closing a call's connection makes the listener kill its commands and
  * end its waits.
  */
-export function listenerTarget(url: string, cwd?: string, expect?: { name: string; publicKey: string }): McpTarget {
+export function listenerTarget(url: string, cwd?: string, expect?: { name: string; publicKey: string; addresses: string[] }): McpTarget {
   return {
     label: expect ? `${expect.name} (${url})` : url,
     cwd,
@@ -76,15 +76,18 @@ export function listenerTarget(url: string, cwd?: string, expect?: { name: strin
       // A paired device: prove this device's identity and require the saved one on the other end.
       const identity = expect ? loadIdentity() : undefined;
       if (expect && !identity) throw new Error("This device has no identity yet; run cns identity or cns up first.");
-      const socket = await openSocket(url, signal);
+      let hangUp: (reason: string) => void;
+      let remote: ReturnType<typeof newWebSocketRpcSession<ShellApi>>;
       if (expect) {
-        const abort = () => closeSocket(socket, "Cancelled");
-        signal.addEventListener("abort", abort, { once: true });
-        try { await authenticateClient(socket, identity!, { expect: expect.publicKey }); }
-        catch (error) { closeSocket(socket); throw error; }
-        finally { signal.removeEventListener("abort", abort); }
+        // An encrypted channel to the paired device, at the first saved address that answers as it.
+        const { channel } = await connectFirst(expect.addresses, identity!, { expect: expect.publicKey, signal });
+        remote = rpcSession<ShellApi>(channel, new RefusingShell());
+        hangUp = (reason) => channel.close(reason);
+      } else {
+        const socket = await openSocket(url, signal);
+        remote = newWebSocketRpcSession<ShellApi>(socket, new RefusingShell());
+        hangUp = (reason) => closeSocket(socket, reason);
       }
-      const remote = newWebSocketRpcSession<ShellApi>(socket, new RefusingShell());
       let closed = false;
       let lost = false;
       remote.onRpcBroken(() => { if (!closed) lost = true; });
@@ -111,7 +114,7 @@ export function listenerTarget(url: string, cwd?: string, expect?: { name: strin
           if (closed) return;
           closed = true;
           remote[Symbol.dispose]();
-          closeSocket(socket, "MCP call ended");
+          hangUp("MCP call ended");
         },
       };
     }),

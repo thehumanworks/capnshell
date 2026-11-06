@@ -65,8 +65,9 @@ Today the RPC capability is exported the moment the WebSocket opens, and the pee
 - Each side proves possession of its Ed25519 identity by signing a challenge made of both devices' nonces and public keys, so a signature from one connection is useless on another. The dialer states which identity it expects; a different one is reported as `identity-changed` and never accepted. The responder decides whether the authenticated device may connect at all; unknown devices are refused with `not-paired` before any capability exists.
 - During pairing, the dialer also proves knowledge of the invite secret with an HMAC over the same transcript, so a device that saw the invite's public part but not the secret cannot pair.
 - Refusals carry a stable code (`protocol`, `identity-changed`, `refused`, `not-paired`, `invalid-proof`) and a reason, which `cns doctor` and the CLI exit statuses use. An older `cns`, which speaks Cap'n Web first, is recognized and refused with a message saying so.
-- The handshake **authenticates but does not encrypt**. Direct links therefore keep the README's existing transport trust model: loopback, a trusted LAN or a VPN. The relay path (section 8) is TLS to the relay. End-to-end encryption of the link is a later slice and will use a vetted library rather than custom cipher code; until then, the design must not assume confidentiality on a direct `ws://` link.
-- **Decision 2 (link encryption):** settled as above: authenticate now, encrypt later with a vetted library; evaluated together with the transport decision in section 8.
+- **Encryption** (`src/secure.ts`). Each hello also carries a fresh libsodium `crypto_kx` public key, and the transcript both signatures cover includes both of them (auth version 2). `crypto_kx` then derives one session key per direction. Each side sends a `secretstream` header, and every later message is a libsodium `secretstream` record (XChaCha20-Poly1305): encrypted, authenticated, in order and never accepted twice. No cipher is implemented here; the code composes libsodium's constructions. A record that fails to open, a replayed one, or a plaintext message after the handshake closes the link. Session keys and stream states are zeroed and freed when the link closes.
+- **Records** carry 64 KiB fragments of Cap'n Web messages (so a relay that limits message size still works) and heartbeats. Each side sends a heartbeat every 15 s when idle; a link that delivers nothing for 45 s is closed as lost, and the daemon redials.
+- **Decision 2 (link encryption):** settled: libsodium (`libsodium-wrappers`, pinned) for key exchange and the stream, Ed25519 identities from section 1 for authentication.
 
 ## 4. Directional grants
 
@@ -171,7 +172,7 @@ Each slice is a PR with its own tests, merged after review, in this order unless
 ## Decisions to settle
 
 1. Key storage: settled as a file under `~/.cns` (`src/identity.ts`); the OS keychain can come later.
-2. Link encryption: settled. Authentication first (`src/auth.ts`); end-to-end encryption later with a vetted library, decided with the transport in section 8.
+2. Link encryption: settled. libsodium `crypto_kx` and `secretstream`, bound to the authenticated handshake (`src/secure.ts`).
 3. Grant granularity: seven permissions with three presets (recommended) or three coarse grants.
 4. Revocation kills running commands at once (recommended) or lets them finish.
 5. `cns tty studio` without a name uses the `main` named session (recommended) or an unnamed PTY.

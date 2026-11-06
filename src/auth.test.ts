@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { randomBytes } from "node:crypto";
+const kx = () => randomBytes(32);
 import { AuthError, Initiator, Responder, refusalFor, type InitiatorOptions, type ResponderOptions } from "./auth.js";
 import { generateIdentity } from "./identity.js";
 
@@ -10,8 +11,8 @@ const stranger = generateIdentity();
 
 /** Run a whole handshake in process, optionally tampering with each message in flight. */
 async function handshake(initiator: InitiatorOptions, responder: ResponderOptions, tamper: (text: string, index: number) => string = (text) => text) {
-  const a = new Initiator(laptop, initiator);
-  const b = new Responder(studio, responder);
+  const a = new Initiator(laptop, kx(), initiator);
+  const b = new Responder(studio, kx(), responder);
   let index = 0;
   let toB = tamper(a.start(), index++);
   for (;;) {
@@ -57,13 +58,13 @@ test("forged or tampered messages fail the handshake", async () => {
     return JSON.stringify({ ...JSON.parse(text), key: stranger.publicKey });
   }), (error: AuthError) => error.code === "protocol");
   // Not a handshake at all: an older cns speaks Cap'n Web first.
-  const responder = new Responder(studio, { authorize: () => undefined });
+  const responder = new Responder(studio, kx(), { authorize: () => undefined });
   await assert.rejects(responder.receive('["push",1]'), (error: AuthError) => error.code === "protocol" && /older cns/.test(error.message) && refusalFor(error) !== undefined);
   await assert.rejects(responder.receive("{}"), (error: AuthError) => error.code === "protocol");
   // A replayed responder hello from another run does not verify against fresh nonces.
-  const first = new Responder(studio, { authorize: () => undefined });
-  const replay = (await first.receive(new Initiator(laptop).start())).send!;
-  const second = new Initiator(laptop);
+  const first = new Responder(studio, kx(), { authorize: () => undefined });
+  const replay = (await first.receive(new Initiator(laptop, kx()).start())).send!;
+  const second = new Initiator(laptop, kx());
   second.start();
   assert.throws(() => second.receive(replay), (error: AuthError) => error.code === "protocol");
 });
@@ -86,8 +87,8 @@ test("pairing proves knowledge of the invite secret", async () => {
 });
 
 test("a finished or refused handshake accepts nothing further", async () => {
-  const a = new Initiator(laptop);
-  const b = new Responder(studio, { authorize: () => undefined });
+  const a = new Initiator(laptop, kx());
+  const b = new Responder(studio, kx(), { authorize: () => undefined });
   const hello = (await b.receive(a.start())).send!;
   const auth = a.receive(hello).send!;
   const done = await b.receive(auth);

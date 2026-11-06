@@ -130,10 +130,10 @@ export function isSavedPeer(name: string): boolean {
 }
 
 /** What `--peer NAME` or a positional NAME means: an address to dial and, for a paired device, the identity to expect. */
-export function resolvePeer(name: string): { url: string; peer?: { name: string; publicKey: PublicKey; outgoing: Permission[] } } {
+export function resolvePeer(name: string): { url: string; peer?: { name: string; publicKey: PublicKey; outgoing: Permission[]; addresses: string[] } } {
   const entry = getPeer(name);
   if (!entry) throw new Error(`Unknown peer alias: ${name}`);
   if (entry.kind === "address") return { url: entry.url };
   if (!entry.addresses.length) throw new Error(`Paired device ${name} has no saved address. Add one with cns peer address ${name} ws://HOST:PORT`);
-  return { url: entry.addresses[0]!, peer: { name, publicKey: entry.publicKey, outgoing: entry.grants.outgoing } };
+  return { url: entry.addresses[0]!, peer: { name, publicKey: entry.publicKey, outgoing: entry.grants.outgoing, addresses: entry.addresses } };
 }

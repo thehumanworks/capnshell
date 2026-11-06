@@ -37,7 +37,7 @@ test.skipIf(process.platform === "win32")("paired devices live beside address al
   expect(() => savePairedPeer("other", { publicKey: studio.publicKey, addresses: [], pairedAt: new Date().toISOString(), grants: { incoming: [], outgoing: [] } })).toThrow("already paired as studio");
   expect(() => savePairedPeer("studio", { publicKey: generateIdentity().publicKey, addresses: [], pairedAt: new Date().toISOString(), grants: { incoming: [], outgoing: [] } })).toThrow();
   // Targets: a paired device resolves to its address and expected identity; an alias to its URL alone.
-  expect(resolvePeer("studio")).toEqual({ url: "ws://192.168.1.10:47381", peer: { name: "studio", publicKey: studio.publicKey, outgoing: expandGrants(["all"]) } });
+  expect(resolvePeer("studio")).toEqual({ url: "ws://192.168.1.10:47381", peer: { name: "studio", publicKey: studio.publicKey, outgoing: expandGrants(["all"]), addresses: ["ws://192.168.1.10:47381"] } });
   expect(resolvePeer("build")).toEqual({ url: "ws://127.0.0.1:47381/" });
   expect(() => resolvePeer("missing")).toThrow("Unknown peer alias");
   expect(() => resolveAlias("studio")).toThrow("paired device");
