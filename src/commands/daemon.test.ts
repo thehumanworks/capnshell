@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { spyOn } from "bun:test";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import * as fs from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -59,6 +61,68 @@ async function unusedPort(): Promise<string> {
   await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   return String(address.port);
 }
+
+test("daemon control rejects unsafe and malformed state files", async (t) => {
+  const statePath = await temporaryState(t);
+  const state = JSON.stringify({ version: 1, pid: process.pid, port: 12345, token: "a".repeat(64) });
+  await mkdir(statePath);
+  await assert.rejects(() => connectControl(statePath), /private file/);
+  await rm(statePath, { recursive: true });
+  await writeFile(statePath, "not JSON", { mode: 0o600 });
+  await assert.rejects(() => connectControl(statePath));
+  await writeFile(statePath, state);
+  if (process.platform !== "win32") {
+    await chmod(statePath, 0o644);
+    await assert.rejects(() => connectControl(statePath), /private file/);
+    await chmod(statePath, 0o600);
+    const link = `${statePath}.link`;
+    await symlink(statePath, link);
+    await assert.rejects(() => connectControl(link), /private file/);
+  }
+});
+
+test("daemon state is validated and read from the same opened file", { skip: process.platform === "win32" }, async (t) => {
+  const statePath = await temporaryState(t);
+  const replacement = `${statePath}.replacement`;
+  await writeFile(statePath, "not JSON", { mode: 0o600 });
+  await writeFile(replacement, JSON.stringify({ version: 1, pid: process.pid, port: 12345, token: "a".repeat(64) }), { mode: 0o600 });
+  const originalOpen = fs.open;
+  let replaced = false;
+  const spy = spyOn(fs, "open").mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+    const handle = await originalOpen(...args);
+    if (args[0] === statePath) {
+      await rename(replacement, statePath);
+      replaced = true;
+    }
+    return handle;
+  });
+  try {
+    await assert.rejects(() => connectControl(statePath), SyntaxError);
+    assert.equal(replaced, true);
+  } finally { spy.mockRestore(); }
+});
+
+test("daemon state refuses a symlink substituted after its initial check", { skip: process.platform === "win32" }, async (t) => {
+  const statePath = await temporaryState(t);
+  const replacement = `${statePath}.replacement`;
+  await writeFile(statePath, "{}", { mode: 0o600 });
+  await writeFile(replacement, "{}", { mode: 0o600 });
+  const originalLstat = fs.lstat;
+  let replaced = false;
+  const spy = spyOn(fs, "lstat").mockImplementation((async (...args: Parameters<typeof fs.lstat>) => {
+    const result = await originalLstat(...args);
+    if (args[0] === statePath) {
+      await rm(statePath);
+      await symlink(replacement, statePath);
+      replaced = true;
+    }
+    return result;
+  }) as typeof fs.lstat);
+  try {
+    await assert.rejects(() => connectControl(statePath), { code: "ELOOP" });
+    assert.equal(replaced, true);
+  } finally { spy.mockRestore(); }
+});
 
 test("local control authenticates before upgrade and exclusively owns private state", async (t) => {
   const statePath = await temporaryState(t);
