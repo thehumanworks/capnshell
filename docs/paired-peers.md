@@ -1,0 +1,179 @@
+# Paired peers
+
+Status: proposal for review, 6 November 2026. Base: `main` at `1986d6a` with the
+address book (PR 12), `peer list --json` (PR 18) and scoped handle lifetimes (PR 19).
+
+The requirement is **two devices I know of that have paired**. Today `cns` connects a
+listener and a connector, identifies peers by connection IDs such as `p1`, grants
+every connection unauthenticated shell access in both directions unless it is
+one-way, and loses attachments when a connection drops. This document specifies the
+remaining product work from the handover as independently verifiable slices, with
+the design choices that are still open marked **Decision** so they can be settled
+before the slice that needs them.
+
+## Vocabulary
+
+| Term | Meaning |
+| --- | --- |
+| Device | One installation of `cns` for one OS user, with its own identity. |
+| Identity | A device's long-lived Ed25519 key pair. Its public key is the device's name on the wire; its fingerprint is what people compare. |
+| Alias | The local, human-readable name a device gives another device: `studio`, `laptop`. Aliases never travel on the wire. |
+| Pairing | The one-time exchange in which two devices learn and confirm each other's identity. |
+| Grant | What one device permits a paired device to do on it. Grants are directional and enforced by the device that grants them. |
+| Peer daemon | The one `cns` process per device that listens, dials, hosts sessions and serves local clients. |
+| Session host | The peer daemon whose OS user runs a command or terminal. |
+| Link | One authenticated connection between two peer daemons, whichever dialed. |
+
+## 1. Identity
+
+- `cns up` creates `~/.cns/identity.json` (`0600`) on first use: `{ "version": 1, "publicKey", "privateKey", "createdAt" }`, keys as base64url Ed25519. The file lives under the same trusted configuration path as the address book and gets the same ownership and mode checks (PR 12, PR 13).
+- The **fingerprint** is `SHA-256(publicKey)`, shown as groups of base32, e.g. `k7qm-3h2x-...`. It is what `cns pair` asks people to compare and what `cns peers` shows.
+- A paired device is recorded in `~/.cns/peers/<alias>` as JSON: `{ "version": 2, "publicKey", "fingerprint", "addresses": [...], "pairedAt", "grants": { "incoming": [...], "outgoing": [...] } }`. The plain-URL files PR 12 writes stay valid as **unpaired address-book entries**; `cns peer list` shows both kinds and marks which is which.
+- Trust is keyed by the public key, so renaming an alias (`cns peer rename old new`) changes nothing about trust. Two aliases for the same key are refused; a key seen under a new alias is reported as the existing alias.
+- **Identity change**: a device that presents a different key under a known address is treated as an unknown device, never silently re-trusted. `cns peers` shows `identity changed`; the user must pair again. Rotation is therefore "pair again", and there is no automatic migration of grants to a new key.
+- **Lost local state** (identity or peers directory gone) means the device is new to everyone and must pair again. Documented, not recovered.
+- **Decision 1 (key storage):** plain file under `~/.cns` with mode checks (as the daemon token today), or the OS keychain where available. Recommendation: file first, keychain later, because the daemon token already sets the precedent and Nix/compiled builds have no keychain dependency.
+
+## 2. Pairing
+
+The flow follows the handover's walkthrough:
+
+```text
+studio $ cns pair
+Invite: cns1:...  (expires in 5 minutes)
+
+laptop $ cns pair 'cns1:...' --name studio
+Pair with studio? Fingerprint: k7qm-3h2x-...
+Request permission to use studio's shell? [Y/n] y
+
+studio: Allow laptop (fingerprint j4ra-...) to use this machine's shell? [y/N] y
+Paired. Reverse shell access has not been granted.
+```
+
+- An **invite** is `cns1:` plus base64url JSON: `{ "v": 1, "key": <inviter public key>, "addr": [<URLs the inviter is reachable at>], "secret": <128-bit random>, "exp": <unix time> }`. It is single-use and expires after five minutes by default (`--expires`). The inviter's daemon keeps the pending invite in memory only.
+- The invitee dials each address in turn and runs the **handshake** (section 3). The handshake proves possession of both keys. The invitee additionally proves knowledge of the invite secret by including an HMAC of the transcript, so a device that intercepted the invite's public part but not the secret cannot pair.
+- Each side **confirms interactively**, showing the other's fingerprint and the grants being requested. Non-interactive acceptance (`--yes`, `--grant shell,files`) exists for scripted setups and is spelled out as such in the output.
+- Pairing and granting are **separate states**: a pairing with no grants in a direction is valid and useful (the device is recognized but may do nothing). The example above pairs both ways and grants shell access in one direction only.
+- Duplicate alias, expired or refused invite, unknown identity, and an identity change on a known alias each have a distinct error text and exit status 2.
+
+## 3. Authenticated, encrypted links
+
+Today the RPC capability is exported the moment the WebSocket opens, and the peer's `info()` is exchanged afterwards. In the paired model **nothing is exported until the handshake has succeeded**, and the link is encrypted end to end so that `ws://` on a LAN, and later a relay, carry only ciphertext.
+
+- Keys: each device derives an X25519 key from its Ed25519 identity for key agreement, and signs the handshake transcript with the Ed25519 key, so one identity file serves both.
+- Handshake: a Noise-style pattern (IK when the dialer already knows the responder's key, which is the normal case after pairing; XX during pairing), with the device keys as static keys and fresh ephemeral keys per link. Both sides end with the other's authenticated public key and shared session keys, one per direction.
+- Framing: each WebSocket message after the handshake is one AES-256-GCM record (WebCrypto, available in Bun and Node) with a per-direction counter nonce. Cap'n Web's transport is wrapped, so the RPC layer is unchanged.
+- The responder maps the authenticated key to its peers file. Unknown key: close with "not paired" and record nothing. Known key: export the **granted** shell (section 4) for that peer.
+- `info()` remains the first RPC call, but it is now data about an authenticated device, and it carries the protocol version so older peers are recognized.
+- **Decision 2 (crypto primitive set):** AES-256-GCM via WebCrypto (no dependency, hardware-accelerated) versus a Noise library with ChaCha20-Poly1305 (closer to iroh's choice, one dependency). Recommendation: WebCrypto AES-GCM with a hand-written, tested handshake based on the Noise IK/XX message patterns, keeping the compiled binary dependency-free.
+
+## 4. Directional grants
+
+A grant lists the operations one device may perform on another. The granting device stores it in its peers file under `grants.incoming` and enforces it locally; it also stores what it was granted (`grants.outgoing`) for display only, because the other device enforces that.
+
+| Permission | ShellApi operations it allows |
+| --- | --- |
+| `shell` | `run`, `exec`, `openPty`, `fork` (a fork inherits the grant) |
+| `files` | `stat`, `access`, `readdir`, `mkdir`, `glob`, `readFile`, `writeFile` |
+| `sessions:list` | `ptySessions`, `NamedPty.info` |
+| `sessions:create` | `startPtySession` |
+| `sessions:view` | `ptySession` for `capture`, `wait`, `attach` as a viewer that cannot type |
+| `sessions:control` | `write`, `keys`, `resize` on a handle or attachment |
+| `sessions:kill` | `NamedPty.kill` |
+
+- Presets: `shell` and `files` as above; `sessions` means all five session permissions; `all` means everything.
+- Enforcement is a `GrantedShell` in the manner of `RefusingShell`: every `ShellApi` method is present, permitted ones delegate, others throw `Permission denied: <permission> not granted to <alias>`. Session handles returned through a grant are **derived capabilities**: a handle issued without `sessions:control` has `write`, `keys` and `resize` refuse. Denied operations have no side effects, as PR 16's tests already require for one-way refusal.
+- **Revocation**: `cns peers revoke studio [permission...]` rewrites the file and tells the running daemon, which closes the `HandleScope` of every shell exported to that device under the revoked permission (PR 19's mechanism), so live handles and attachments fail with "access revoked" and viewers are detached with that reason. Commands and unnamed PTYs started under a revoked `shell` grant are killed, as releasing a fork does today.
+- **Expiry**: a grant may carry `expiresAt`; the daemon applies expiry like revocation.
+- Legacy connections (`cns listen` and `cns connect` without identities) keep today's behavior, unauthenticated and bidirectional unless `--one-way`, and the README keeps calling them that. They are refused by a daemon that is `up` unless it was started with `--allow-unpaired`, which prints the existing warning.
+- **Decision 3 (grant granularity):** the table above (seven permissions, three presets) versus the three coarse grants `shell`, `files`, `sessions`. Recommendation: implement the seven internally and expose the presets in prompts, so the CLI stays simple while scripts can be precise.
+- **Decision 4 (revocation and running work):** kill commands started under a revoked grant immediately (recommended, matches fork release) or let them finish while refusing new ones.
+
+## 5. Symmetric peer daemon and CLI
+
+- `cns up [--name NAME] [--bind ADDRESS] [--port PORT]` starts the peer daemon, or reports the running one. It creates the identity if needed, listens for paired peers, and dials the saved addresses of paired peers to bring links up. There is one daemon per device (the existing `~/.cns/daemon.json` arbitration), and `listen --daemon`, `attach` and `stop` become aliases of the same lifecycle.
+- A link between two devices is one connection whichever side dialed. If both dial at once, the daemon with the lexically smaller public key keeps its outbound link and drops the inbound duplicate; the other does the opposite. Named sessions, grants and reconnection are properties of the pair, not of who dialed.
+- Every peer command takes a **target**: `cns tty studio`, `cns run studio -- 'git status'`, `cns sessions studio`, `cns screen studio main`. Resolution order: paired alias, then unpaired address-book alias (with today's unauthenticated semantics and a warning), then a `ws://` or `wss://` URL. An unknown name fails with `Unknown peer studio. Pair with: cns pair ...`; nothing falls back to another peer. `--peer NAME` and URL arguments keep working for scripts written against PR 12.
+- `cns tty studio` with no `--name` creates or attaches to the session named `main` on that peer (**Decision 5**: default session name and whether `tty` without a name should attach to `main` or open an unnamed PTY as today; recommended: `main`, because the walkthrough and recovery both depend on a named session).
+- `cns peers [--json]` lists paired and address-book peers:
+
+  ```text
+  NAME      STATUS      CONNECTION   ACCESS
+  studio    online      direct       shell, files
+  modal     offline     —            shell
+  build     unpaired    —            —
+  ```
+
+  `ACCESS` shows only what this device has been granted on the peer. `--json` emits `[{ name, fingerprint, status, connection, access: [...], addresses: [...], lastSeen }]` with stable field names; `cns peer list --json` (PR 18) stays as the address-book view.
+- `cns status [--json]`: this device's alias, fingerprint, daemon PID, listening addresses, link count, and the sessions it hosts. `cns doctor NAME`: for one peer, each address tried and its result, the handshake result (not paired, identity changed, refused, ok), grants in both directions, clock skew, and the peer's `cns` version.
+- Exit statuses are stable for scripts: 0 ok, 1 command or runtime failure, 2 usage or unknown target, 3 not paired or identity changed, 4 permission denied, 5 peer offline, 124 timeout (unchanged).
+- MCP (`cns mcp`) and the Pi extension accept the same targets and show the same `status` fields; MCP's `list_peers` returns alias, fingerprint, status and access, and Pi's `/cns attach studio` resolves aliases before daemon IDs.
+
+## 6. Session ownership and continuity
+
+- Named sessions are hosted by the peer daemon, in both roles: a session exists in the host's `PtyRegistry` and ends only when killed, when its `--timeout` passes, or when the daemon stops. That is today's behavior, made symmetric because both devices run the same daemon.
+- Each session records its **owner**: the device (public key) that created it, or `local` for sessions created from the host's own console. `sessions:list` shows every session on the host; `sessions:kill` is needed to kill another device's session, while an owner may always kill its own.
+- Viewers remain many; writers are not coordinated beyond today's "last keystroke wins" (**Decision 6**: whether to add an exclusive-control lease, recommended no for the first release).
+- Handles follow PR 19: they belong to the issuing shell, which now means to one device's link. When the link drops, the device's handles are revoked and its viewers detached; the session keeps running. Reconnection (section 7) obtains new handles.
+- Host-process restart does not recover sessions, and nothing about them is written to disk. **Decision 7**: keep it that way for this plan (recommended) or add a `tmux`-style resurrect later.
+
+## 7. Reconnect and output recovery
+
+Client-visible states, shown in the console footer, in `cns peers`, and as stable `cns doctor` words: `connected`, `interrupted`, `reconnecting`, `reattached`, `access-revoked`, `session-expired`, `host-lost`.
+
+- The daemon keeps a link to each online paired peer and re-dials with exponential backoff (1 s doubling to 30 s) while any local client wants that peer. The walkthrough's `Reconnecting… Reattached to studio/main via relay.` is the console rendering of `interrupted → reconnecting → reattached`.
+- An attachment that loses its link is re-established automatically after the link is back: the host redraws the current screen, as a manual reattach does today, and then streams. Every chunk a session emits carries a sequence number; the client remembers the last one it rendered, and the redraw reports how many bytes it skipped, shown as `[cns: N bytes of output missed]`. Retained scrollback stays bounded at 1000 lines and is available with `--history`; nothing beyond it is replayed.
+- Input in flight: the host acknowledges each `write`/`keys` by sequence. Input not acknowledged when the link dropped is reported as uncertain (`[cns: 1 keystroke may not have arrived]`) and is **never resent automatically**.
+- Repeated recovery never creates a second session or a second viewer for the same client; the client re-attaches by session name and owner.
+- `access-revoked` and `session-expired` end recovery with that reason and a non-zero exit; `host-lost` (the host daemon is gone, so its sessions are gone) does too.
+
+## 8. Transport: direct, relayed, and iroh/QUIC
+
+The link design in section 3 is transport-independent: identity and grants hold over any byte stream, and session continuity belongs to the host, not the connection. That lets the transport be decided on evidence.
+
+| Option | Direct | Relay | Bun fit | Compiled binary | Cost and ownership |
+| --- | --- | --- | --- | --- | --- |
+| WebSocket as today | LAN, VPN, port forward | none | native | yes | none |
+| WebSocket plus a `cns` relay | as above | small Bun or Cloudflare Worker that forwards ciphertext between two device IDs | native | yes | one hosted process, user-run |
+| iroh (QUIC, hole punching, public relays) | direct across NATs | iroh's relays or self-hosted | N-API addon (`@number0/iroh`) per platform; Bun's N-API support must be verified for the binary | native addon must be bundled per target | relay traffic goes through n0's or your own servers |
+
+Evaluation evidence to collect before **Decision 8 (transport)**: Bun N-API loading of the iroh addon inside `bun build --compile` for each target in the flake; binary size and startup time; direct-connection success rate between two home NATs with and without a relay; latency added by a Cloudflare Worker relay versus an iroh relay; metadata each relay sees (device IDs and traffic volume only, with section 3's encryption); operating cost. Recommendation: ship end-to-end encryption over WebSocket first (it is needed regardless), add the small self-hosted relay as the second transport with the fallback order direct then relay, and adopt iroh only if the N-API packaging proves clean, because it then adds hole punching without changing identity or grants.
+
+## 9. Compatibility and migration
+
+| Existing | After this plan |
+| --- | --- |
+| `cns listen` / `cns connect URL` | Unchanged legacy mode; refused by a daemon that is `up` unless `--allow-unpaired`. |
+| `--one-way` | Unchanged for legacy connections; paired links express the same thing as an empty incoming grant. |
+| `cns peer add/remove/list [--json]` | Unchanged as the address book; paired entries appear in it marked `paired`. |
+| `--peer NAME`, URL arguments | Unchanged; positional targets are added, not substituted. |
+| Named sessions, `keys`, `screen`, `kill`, `tty --attach` | Unchanged semantics; targets may be aliases; handles follow PR 19. |
+| Daemon control (`attach`, `stop`, `~/.cns/daemon.json`) | Same daemon; `up` is its new front door. |
+| MCP, Pi | Same tools and commands; targets accept aliases; `list_peers` and `/cns status` gain identity and access fields. |
+| Older `cns` on one side | Recognized at the handshake by the missing protocol version; legacy unauthenticated behavior only, and `cns doctor` says so. |
+
+## 10. Slices
+
+Each slice is a PR with its own tests, merged after review, in this order unless a decision above changes it:
+
+1. **Identity file and fingerprints** (`cns identity` to show them; section 1). Tests: creation, mode checks, stable fingerprint, refusal of unsafe files.
+2. **Encrypted authenticated link** (section 3) behind a flag, with the legacy path untouched. Tests: handshake vectors, wrong key, tampered record, replay, and an RPC session running over it.
+3. **Pairing** (section 2): invite format, `cns pair` both roles, confirmation prompts, peers file v2 with address-book compatibility, error texts and exit statuses.
+4. **Grants** (section 4): `GrantedShell`, derived handles, `cns peers grant/revoke`, live revocation through `HandleScope`, expiry.
+5. **Peer daemon and CLI** (section 5): `up`, link dedup, positional targets, `peers`, `status`, `doctor`, `--json` outputs, exit statuses; MCP and Pi target resolution.
+6. **Session ownership** (section 6): owner on `PtySessionInfo`, `main` default, kill rules.
+7. **Reconnect and recovery** (section 7): link backoff, re-attach with gap and uncertain-input markers, state words everywhere.
+8. **Relay** (section 8): the small relay, `cns up --relay URL`, fallback order, `doctor` showing the path.
+9. **iroh evaluation** (section 8): a spike that records the evidence table; adoption is a separate decision.
+10. **Release matrix**: macOS, Linux, Windows where applicable, compiled binary, Pi package, Nix check, with runtime versions recorded per result as the handover asks.
+
+## Decisions to settle
+
+1. Key storage: file under `~/.cns` (recommended) or OS keychain.
+2. Crypto: WebCrypto AES-256-GCM with a Noise-pattern handshake (recommended) or a Noise library with ChaCha20-Poly1305.
+3. Grant granularity: seven permissions with three presets (recommended) or three coarse grants.
+4. Revocation kills running commands at once (recommended) or lets them finish.
+5. `cns tty studio` without a name uses the `main` named session (recommended) or an unnamed PTY.
+6. Exclusive-control lease for sessions: not in the first release (recommended).
+7. Session persistence across host restart: not in this plan (recommended).
+8. Transport order: encrypted WebSocket, then a self-hosted relay, then iroh on evidence (recommended), or iroh first.
