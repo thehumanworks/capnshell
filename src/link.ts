@@ -1,5 +1,5 @@
 import type { ServerWebSocket } from "bun";
-import { AuthError, Initiator, Responder, refusalFor, type InitiatorOptions, type ResponderOptions, type Step } from "./auth.js";
+import { AuthError, Initiator, Responder, refusalFor, type InitiatorOptions, type LinkMode, type ResponderOptions, type Step } from "./auth.js";
 import type { Identity, PublicKey } from "./identity.js";
 
 /** How long a peer may take to finish authenticating. */
@@ -51,10 +51,10 @@ export class ServerHandshake<T> {
   #queue: string[] = [];
   #busy = false;
   #settled = false;
-  #resolve!: (result: { peer: PublicKey; invite?: { id: string } }) => void;
+  #resolve!: (result: { peer: PublicKey; invite?: { id: string }; mode: LinkMode }) => void;
   #reject!: (error: unknown) => void;
   #timer: ReturnType<typeof setTimeout>;
-  readonly done: Promise<{ peer: PublicKey; invite?: { id: string } }>;
+  readonly done: Promise<{ peer: PublicKey; invite?: { id: string }; mode: LinkMode }>;
   constructor(private readonly ws: ServerWebSocket<T>, identity: Identity, options: ResponderOptions) {
     this.#responder = new Responder(identity, options);
     this.done = new Promise((resolve, reject) => { this.#resolve = resolve; this.#reject = reject; });
@@ -85,7 +85,7 @@ export class ServerHandshake<T> {
         if (step.peer) {
           this.#settled = true;
           clearTimeout(this.#timer);
-          this.#resolve({ peer: step.peer, invite: step.invite });
+          this.#resolve({ peer: step.peer, invite: step.invite, mode: step.mode ?? "client" });
         }
       }
     } finally { this.#busy = false; }

@@ -19,6 +19,10 @@ export interface PairingController {
   decide(id: string, decision: Decision): Promise<Decision>;
   /** Start, or restart, dialing a saved paired device. */
   dial(name: string): Promise<void>;
+  /** Apply changed grants or addresses: drop the device's links and remake them. */
+  refresh(name: string): Promise<void>;
+  /** End an invite nobody will decide on, telling a waiting device so. */
+  cancel(id: string): void;
 }
 import { daemonStatePath, removeOwnedState, stateSchema, type DaemonStatus, type ListenerInfo } from "./daemon.js";
 
@@ -31,6 +35,8 @@ export class ControlApi extends RpcTarget {
   #listener: ListenerInfo | undefined;
   #startedAt: number;
   #pairing: PairingController | undefined;
+  /** Invites made through this control connection that are not decided yet. */
+  #invites = new Set<string>();
   #closed = new AbortController();
   constructor(controller: PeerController, stop: () => void, listener: ListenerInfo | undefined, startedAt: number, pairing?: PairingController) {
     super();
@@ -52,10 +58,18 @@ export class ControlApi extends RpcTarget {
     if (!this.#pairing) throw new Error("This daemon does not accept paired devices. Start it with cns up.");
     return this.#pairing;
   }
-  invite(ttlMs: number) { return this.#paired().invite(ttlMs); }
+  async invite(ttlMs: number) {
+    const created = await this.#paired().invite(ttlMs);
+    this.#invites.add(created.id);
+    return created;
+  }
   awaitProposal(id: string) { return this.#paired().awaitProposal(id); }
-  decide(id: string, decision: Decision) { return this.#paired().decide(id, decision); }
+  async decide(id: string, decision: Decision) {
+    this.#invites.delete(id);
+    return await this.#paired().decide(id, decision);
+  }
   dial(name: string) { return this.#paired().dial(name); }
+  refresh(name: string) { return this.#paired().refresh(name); }
   peers() { return this.#controller.peers(); }
   info(id: string) { return this.#controller.info(id); }
   /** Pending commands keep running when an attached console detaches. */
@@ -77,7 +91,12 @@ export class ControlApi extends RpcTarget {
     setTimeout(this.#stop, 25);
   }
   /** Cap'n Web calls this when the control connection ends. */
-  [Symbol.dispose]() { this.#closed.abort(new Error("The control connection closed.")); }
+  [Symbol.dispose]() {
+    this.#closed.abort(new Error("The control connection closed."));
+    // A cns pair that went away leaves nobody to decide: end its invites, so no device waits for an answer.
+    for (const id of this.#invites) this.#pairing?.cancel(id);
+    this.#invites.clear();
+  }
 }
 
 export async function serveControl(controller: PeerController, stop: () => void, statePath?: string, listener?: ListenerInfo, pairing?: PairingController): Promise<() => Promise<void>> {

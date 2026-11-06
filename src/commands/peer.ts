@@ -45,8 +45,10 @@ interface Session {
   remote: RpcStub<ShellApi>;
   timer: ReturnType<typeof setTimeout>;
   info?: ShellInfo;
-  /** The authenticated paired device on the other end. */
-  peer?: { name: string; publicKey: PublicKey };
+  /** The authenticated paired device on the other end; `daemon` marks a standing link between daemons. */
+  peer?: { name: string; publicKey: PublicKey; daemon: boolean };
+  /** A device that arrived with an invite and may only propose a pairing; not a peer to select. */
+  pairing?: boolean;
 }
 interface PendingInvite {
   secret: Uint8Array;
@@ -90,6 +92,10 @@ export async function startPeer(config: PeerConfig): Promise<void> {
   }
   const invites = new Map<string, PendingInvite>();
   const links = new Map<string, { stop: () => void }>();
+  /** The standing daemon link to a paired device, if any; one command's connection does not count. */
+  const linkTo = (publicKey: PublicKey) => [...sessions.values()].find((session) => session.peer?.publicKey === publicKey && session.peer.daemon && session.info);
+  /** When both devices dialed each other, the one with the smaller key keeps its outbound link. */
+  const keepsOutbound = (publicKey: PublicKey) => identity!.publicKey < publicKey;
 
   function describe(session: Session): string {
     const who = session.peer ? `${session.peer.name} (paired)` : session.info?.hostname;
@@ -144,7 +150,7 @@ export async function startPeer(config: PeerConfig): Promise<void> {
   }
   const controller: PeerController = {
     async peers() {
-      return [...sessions.values()].flatMap(({ id, info, peer }) => info
+      return [...sessions.values()].flatMap(({ id, info, peer, pairing }) => info && !pairing
         ? [{ id, info: { ...info }, ...peer ? { peer: { name: peer.name, fingerprint: fingerprint(peer.publicKey) } } : {} }] : []);
     },
     async info(id) { return { ...requireSession(id).info! }; },
@@ -252,14 +258,16 @@ export async function startPeer(config: PeerConfig): Promise<void> {
       for (const waiter of invite.waiters) waiter.resolve({ peer, fingerprint: fingerprint(peer), proposal });
       invite.waiters = [];
       announce(`Pairing proposal from ${proposal.name} (${fingerprint(peer)}); waiting for cns pair to decide.`);
-      return await invite.decision.promise;
+      // The alias chosen here stays here.
+      const { accept, granted, reason } = await invite.decision.promise;
+      return { accept, ...granted ? { granted } : {}, ...reason ? { reason } : {} };
     });
   }
   const pairing: PairingController | undefined = identity && config.mode === "listen" ? {
     identity: () => ({ publicKey: identity.publicKey, fingerprint: identity.fingerprint }),
     addresses: () => listeningAddresses(config.bind, config.port),
     async invite(ttlMs) {
-      const invite = createInvite(identity.publicKey, listeningAddresses(config.bind, config.port), ttlMs);
+      const invite = createInvite(identity.publicKey, listeningAddresses(config.bind, config.port), ttlMs, suggestedName(os.hostname()));
       const pending: PendingInvite = {
         secret: invite.secret, expiresAt: invite.expiresAt, waiters: [], decision: Promise.withResolvers<Decision>(),
         timer: setTimeout(() => expireInvite(pending, "The invite expired before another device used it."), ttlMs),
@@ -279,21 +287,39 @@ export async function startPeer(config: PeerConfig): Promise<void> {
       if (!invite?.proposal) throw new Error("No proposal to decide on for this invite.");
       const parsed = decisionSchema.parse(decision);
       const { peer, proposal } = invite.proposal;
-      let result: Decision;
+      let result: Decision = { accept: false, reason: parsed.reason ?? "The other device declined." };
+      let failure: unknown;
       if (parsed.accept) {
         const name = parsed.name ?? proposal.name;
         const granted = (parsed.granted ?? []).filter((permission) => proposal.requests.includes(permission));
-        savePairedPeer(name, { publicKey: peer, addresses: proposal.addresses ?? [], pairedAt: new Date().toISOString(), grants: { incoming: granted, outgoing: proposal.offers } });
-        result = { accept: true, name, granted, inviter: suggestedName(os.hostname()) };
-        announce(`Paired with ${name} (${fingerprint(peer)}).`);
-      } else result = { accept: false, reason: parsed.reason ?? "The other device declined." };
+        try {
+          savePairedPeer(name, { publicKey: peer, addresses: proposal.addresses ?? [], pairedAt: new Date().toISOString(), grants: { incoming: granted, outgoing: proposal.offers } });
+          result = { accept: true, name, granted };
+          announce(`Paired with ${name} (${fingerprint(peer)}).`);
+        } catch (error) {
+          // Answer the waiting device either way, so neither side is left with half a pairing.
+          failure = error;
+          result = { accept: false, reason: "The other device could not save the pairing." };
+        }
+      }
       clearTimeout(invite.timer);
       invites.delete(id);
       invite.decision.resolve(result);
+      if (failure) throw failure;
       if (result.accept && result.name) void dial(result.name);
       return result;
     },
     dial: async (name) => { dial(name); },
+    async refresh(name) {
+      // Grants and addresses are read when a link is made, so remake the device's links.
+      for (const session of [...sessions.values()]) if (session.peer?.name === name) remove(session);
+      links.get(name)?.stop();
+      dial(name);
+    },
+    cancel(id) {
+      const invite = invites.get(id);
+      if (invite) expireInvite(invite, "The inviting device stopped waiting.");
+    },
   } : undefined;
 
   /** Keep a link to a paired device, redialing its saved addresses with backoff while this daemon runs. */
@@ -312,17 +338,25 @@ export async function startPeer(config: PeerConfig): Promise<void> {
       attempt++;
     };
     const stop = () => { stopped = true; clearTimeout(timer); links.delete(name); };
+    // Any failure, such as an unreadable peer file, is reported and retried; the loop never dies quietly.
     async function connect() {
       if (stopped || stopping) return;
+      try { await attempt_(); }
+      catch (error) {
+        announce(`${name}: ${errorMessage(error)}`);
+        schedule();
+      }
+    }
+    async function attempt_() {
       const current = getPeer(name);
       if (current?.kind !== "paired" || current.publicKey !== expectedKey || !current.addresses.length) return stop();
       // Skip while an inbound link from the same device is already up.
-      if ([...sessions.values()].some((session) => session.peer?.publicKey === current.publicKey && session.info)) return schedule();
+      if (linkTo(current.publicKey)) return schedule();
       const url = current.addresses[attempt % current.addresses.length]!;
       let socket: WebSocket;
       try {
         socket = await openSocket(url, cancelled.signal);
-        await authenticateClient(socket, identity!, { expect: current.publicKey });
+        await authenticateClient(socket, identity!, { expect: current.publicKey, mode: "daemon" });
       } catch (error) {
         if (error instanceof AuthError && (error.code === "identity-changed" || error.code === "not-paired")) {
           announce(`${name}: ${error.message}`);
@@ -331,10 +365,16 @@ export async function startPeer(config: PeerConfig): Promise<void> {
         return schedule();
       }
       if (stopped || stopping) { closeSocket(socket); return; }
+      // Both devices dialed at once: exactly one link survives, chosen the same way on both sides.
+      const inbound = linkTo(current.publicKey);
+      if (inbound) {
+        if (keepsOutbound(current.publicKey)) remove(inbound);
+        else { closeSocket(socket, "Duplicate link"); return schedule(); }
+      }
       attempt = 0;
       const local = new GrantedShell(new ShellApi(ptys), current.grants.incoming, name);
       const remote = newWebSocketRpcSession<ShellApi>(socket, local);
-      const session = register(socket, local, remote, new URL(url).host, { name, publicKey: current.publicKey });
+      const session = register(socket, local, remote, new URL(url).host, { name, publicKey: current.publicKey, daemon: true });
       socket.addEventListener("close", () => { disconnected(session); schedule(); });
       socket.addEventListener("error", () => { disconnected(session); });
     }
@@ -380,12 +420,26 @@ export async function startPeer(config: PeerConfig): Promise<void> {
             // Nothing is exported until the device has authenticated and been authorized.
             const handshake = new ServerHandshake(ws, identity, { authorize, secretFor });
             ws.data.handshake = handshake;
-            handshake.done.then(({ peer, invite }) => {
+            handshake.done.then(({ peer, invite, mode }) => {
               if (stopping) { ws.close(); return; }
-              const offered = invite ? { local: pairingFor(invite.id, peer), name: undefined } : offerTo(peer);
-              const { stub, transport } = newBunWebSocketRpcSession<ShellApi, SocketData>(ws, offered.local);
-              ws.data.transport = transport;
-              ws.data.session = register(ws, offered.local, stub, ws.data.address, offered.name ? { name: offered.name, publicKey: peer } : undefined);
+              try {
+                if (!invite && mode === "daemon") {
+                  const existing = linkTo(peer);
+                  if (existing) {
+                    if (existing.socket instanceof WebSocket && keepsOutbound(peer)) { ws.close(1000, "Duplicate link"); return; }
+                    remove(existing);
+                  }
+                }
+                const offered = invite ? { local: pairingFor(invite.id, peer), name: undefined } : offerTo(peer);
+                const { stub, transport } = newBunWebSocketRpcSession<ShellApi, SocketData>(ws, offered.local);
+                ws.data.transport = transport;
+                ws.data.session = register(ws, offered.local, stub, ws.data.address, offered.name ? { name: offered.name, publicKey: peer, daemon: mode === "daemon" } : undefined);
+                if (invite) ws.data.session.pairing = true;
+              } catch (error) {
+                // For example, the device was unpaired while it authenticated. Nothing was exported.
+                announce(`Refused ${ws.data.address}: ${errorMessage(error)}`);
+                try { ws.close(1011, "Not accepted"); } catch { /* Already closed. */ }
+              }
             }, (error) => { if (!stopping) announce(`Refused ${ws.data.address}: ${errorMessage(error)}`); });
           },
           message(ws, message) {
@@ -422,7 +476,7 @@ export async function startPeer(config: PeerConfig): Promise<void> {
       }
       const local = config.oneWay ? new RefusingShell() : offerTo(config.expect.publicKey).local;
       const remote = newWebSocketRpcSession<ShellApi>(socket, local);
-      const session = register(socket, local, remote, new URL(config.url).host, { name: config.expect.name, publicKey: config.expect.publicKey });
+      const session = register(socket, local, remote, new URL(config.url).host, { name: config.expect.name, publicKey: config.expect.publicKey, daemon: false });
       socket.addEventListener("error", () => disconnected(session, 1));
       socket.addEventListener("close", () => disconnected(session));
     } else {

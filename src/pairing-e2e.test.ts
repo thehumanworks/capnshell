@@ -4,7 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { generateIdentity } from "./identity.js";
+import { suggestedName } from "./pairing.js";
 import { savePairedPeer } from "./peers.js";
+import { connectControl } from "./commands/daemon.js";
 import { launchCli, unusedPort } from "./test-support.js";
 
 const posix = process.platform !== "win32";
@@ -28,6 +30,8 @@ test("two devices pair, run commands within their grants, and refuse everyone el
     return { code: await child.exited, stdout: child.stdout, stderr: child.stderr, output: child.output };
   };
 
+  // A daemon that crashed leaves its state file behind; cns up recovers from it, as listen --daemon does.
+  await writeFile(studio.state, JSON.stringify({ version: 1, pid: 2147483646, port: Number(await unusedPort("127.0.0.1")), token: "a".repeat(64) }), { mode: 0o600 });
   // Studio runs the paired daemon on loopback for this test.
   const up = await cli(studio, ["up", "--bind", "127.0.0.1", "--port", port, "--state", studio.state]);
   assert.equal(up.code, 0, up.stderr);
@@ -36,25 +40,50 @@ test("two devices pair, run commands within their grants, and refuse everyone el
   const again = await cli(studio, ["up", "--bind", "127.0.0.1", "--port", port, "--state", studio.state]);
   assert.match(again.stdout, /^Running as/);
 
-  /** Studio prints an invite and waits; `other` pastes it. Returns both results. */
-  async function pairWith(other: typeof laptop, studioArgs: string[], otherArgs: string[]) {
+  /** Studio prints an invite and waits for a device to use it. */
+  async function startInvite(studioArgs: string[]) {
     const inviting = launchCli(t, ["pair", "--yes", "--state", studio.state, ...studioArgs], { env: studio.env });
     inviting.child.stdin.end();
     await inviting.waitFor("Invite: cns1:");
     const invite = /Invite: (cns1:[A-Za-z0-9_-]+)/.exec(inviting.stdout)![1]!;
+    return { invite, inviting, finished: async () => ({ code: await inviting.exited, stdout: inviting.stdout, stderr: inviting.stderr }) };
+  }
+  /** Studio prints an invite and waits; `other` pastes it. Returns both results. */
+  async function pairWith(other: typeof laptop, studioArgs: string[], otherArgs: string[]) {
+    const { invite, finished } = await startInvite(studioArgs);
     const accepting = await cli(other, ["pair", invite, "--yes", "--state", other.state, ...otherArgs]);
-    const code = await inviting.exited;
-    return { inviting: { code, stdout: inviting.stdout, stderr: inviting.stderr }, accepting };
+    return { inviting: await finished(), accepting };
   }
 
   // Laptop gets everything on studio and lets studio use its shell.
-  const first = await pairWith(laptop, ["--name", "laptop"], ["--name", "studio", "--request", "all", "--offer", "shell"]);
+  const first = await pairWith(laptop, ["--name", "laptop", "--grant", "all"], ["--name", "studio", "--request", "all", "--grant", "shell"]);
   assert.equal(first.accepting.code, 0, first.accepting.stderr);
   assert.match(first.accepting.stdout, /^Paired with studio \([a-z2-7-]+\)\. This device may use its: shell, files, sessions\. It may use this device's: shell\.$/m);
   assert.equal(first.inviting.code, 0, first.inviting.stderr);
   assert.match(first.inviting.stdout, /Paired with laptop \([a-z2-7-]+\)\. It may use this machine's: shell, files, sessions\. This machine may use its: shell\./);
   const studioIdentity = JSON.parse((await cli(studio, ["identity", "--json"])).stdout);
   assert.match(first.accepting.stdout, new RegExp(studioIdentity.fingerprint));
+
+  // Names in use are refused before anyone waits: the inviting side before printing an invite,
+  // and a device already paired before it connects. An invite whose cns pair went away is void.
+  const clash = await cli(studio, ["pair", "--yes", "--name", "laptop", "--state", studio.state]);
+  assert.deepEqual([clash.code, clash.stdout], [1, ""]);
+  assert.match(clash.stderr, /already named laptop/);
+  const abandoned = await startInvite(["--name", "anyone"]);
+  const twice = await cli(laptop, ["pair", abandoned.invite, "--yes", "--name", "studio2"]);
+  assert.equal(twice.code, 1, twice.stderr);
+  assert.match(twice.stderr, /already paired with it as studio/);
+  abandoned.inviting.child.kill();
+  await abandoned.finished();
+  await new Promise((resolve) => setTimeout(resolve, 500)); // Let the daemon see its control connection close.
+  const late = await cli(stranger, ["pair", abandoned.invite, "--yes", "--name", "studio"]);
+  assert.equal(late.code, 3, late.stderr);
+  assert.match(late.stderr, /Unknown or expired invite/);
+  assert.equal((await cli(stranger, ["peer", "list"])).stdout, "", "a refused pairing saves nothing");
+
+  // One unreadable file in the peers directory does not stop the paired devices from working.
+  await writeFile(path.join(studio.dir, "peers", ".DS_Store"), "x", { mode: 0o600 });
+  await writeFile(path.join(studio.dir, "peers", "junk"), "{ not json", { mode: 0o600 });
 
   // Commands name the paired device and run within its grants.
   const run = await cli(laptop, ["run", "studio", "--", "printf ok; printf err >&2; exit 3"]);
@@ -76,14 +105,52 @@ test("two devices pair, run commands within their grants, and refuse everyone el
   assert.match(studioPeers.stdout, /^NAME +STATUS +CONNECTION +ACCESS +FINGERPRINT\nlaptop +offline +- +shell +[a-z2-7-]+\n$/);
   assert.match((await cli(laptop, ["peer", "list"])).stdout, /^studio\t/);
 
+  // Status and doctor describe this device, its daemon and how it reaches a peer.
+  const status = await cli(studio, ["status", "--state", studio.state]);
+  assert.match(status.stdout, new RegExp(`^This device: ${studioIdentity.fingerprint}\nDaemon: +pid \\d+ at ws://127\\.0\\.0\\.1:${port}, reachable at ws://127\\.0\\.0\\.1:${port}\nPaired: +1 device: laptop\nLinks: +none\n$`));
+  const laptopStatus = JSON.parse((await cli(laptop, ["status", "--json", "--state", laptop.state])).stdout);
+  assert.deepEqual([laptopStatus.daemon, laptopStatus.links, laptopStatus.paired], [null, [], 1]);
+  const doctor = await cli(laptop, ["doctor", "studio", "--state", laptop.state]);
+  assert.equal(doctor.code, 0, doctor.stderr);
+  assert.match(doctor.stdout, new RegExp(`^studio: paired device ${studioIdentity.fingerprint}\n  This device may use its:  shell, files, sessions\n  It may use this device's: shell\n  Daemon link: no daemon running here \\(cns up\\)\n  ws://127\\.0\\.0\\.1:${port}: ok \\(`));
+  const doctorJson = JSON.parse((await cli(laptop, ["doctor", "studio", "--json", "--state", laptop.state])).stdout);
+  assert.equal(doctorJson.attempts[0].result, "ok");
+
+  // Grants change after pairing, and apply to the next connection.
+  const revoked = await cli(studio, ["peer", "revoke", "laptop", "shell", "--state", studio.state]);
+  assert.deepEqual([revoked.code, revoked.stdout], [0, "laptop may use this device's: files, sessions.\n"]);
+  assert.equal((await cli(laptop, ["run", "studio", "--", "printf x"])).code, 4);
+  const granted = await cli(studio, ["peer", "grant", "laptop", "shell,files", "--state", studio.state]);
+  assert.deepEqual([granted.code, granted.stdout], [0, "laptop may use this device's: shell, files, sessions.\n"]);
+  assert.equal((await cli(laptop, ["run", "studio", "--", "printf regranted"])).stdout, "regranted");
+  const addressed = await cli(studio, ["peer", "address", "laptop", "ws://127.0.0.1:1", "--state", studio.state]);
+  assert.deepEqual([addressed.code, addressed.stdout], [0, "laptop is dialed at: ws://127.0.0.1:1/.\n"]);
+  assert.equal((await cli(studio, ["peer", "address", "laptop", "ws://127.0.0.1:1", "--remove", "--state", studio.state])).stdout, "laptop has no saved address.\n");
+
   // A device granted only files cannot run commands, and the refusal has its own exit status.
-  const second = await pairWith(reader, ["--name", "reader"], ["--name", "studio", "--request", "files", "--offer", ""]);
+  // Its first attempt names an alias it already uses, so it stops before connecting and the invite stays open.
+  assert.equal((await cli(reader, ["peer", "add", "studio", "ws://127.0.0.1:1"])).code, 0);
+  const readerInvite = await startInvite(["--name", "reader", "--grant", "all"]);
+  const taken = await cli(reader, ["pair", readerInvite.invite, "--yes", "--name", "studio", "--request", "files"]);
+  assert.equal(taken.code, 1, taken.stderr);
+  assert.match(taken.stderr, /already named studio/);
+  assert.equal((await cli(reader, ["peer", "remove", "studio"])).code, 0);
+  const second = { accepting: await cli(reader, ["pair", readerInvite.invite, "--yes", "--name", "studio", "--request", "files"]), inviting: await readerInvite.finished() };
   assert.equal(second.accepting.code, 0, second.accepting.stderr);
   assert.match(second.inviting.stdout, /It may use this machine's: files\. This machine may use its: none\./);
   const denied = await cli(reader, ["run", "studio", "--", "printf x"]);
   assert.equal(denied.code, 4, denied.stderr);
   assert.match(denied.stderr, /Permission denied: shell not granted to reader/);
   assert.equal((await cli(reader, ["sessions", "studio"])).code, 4);
+
+  // --yes alone grants nothing; the invited device saves the other under the name the invite suggests.
+  const guest = await device("guest");
+  const third = await pairWith(guest, ["--name", "guest"], []);
+  const inviterName = suggestedName(os.hostname());
+  assert.equal(third.accepting.code, 0, third.accepting.stderr);
+  assert.match(third.accepting.stdout, new RegExp(`^Paired with ${inviterName} \\([a-z2-7-]+\\)\\. This device may use its: none\\. It may use this device's: none\\.$`, "m"));
+  assert.match(third.inviting.stdout, /Paired with guest \([a-z2-7-]+\)\. It may use this machine's: none\. This machine may use its: none\./);
+  assert.equal((await cli(guest, ["run", inviterName, "--", "printf x"])).code, 4);
 
   // A device studio never paired with is refused before anything is exported, as is a legacy cns.
   process.env.CNS_CONFIG_DIR = stranger.dir;
@@ -96,6 +163,33 @@ test("two devices pair, run commands within their grants, and refuse everyone el
   assert.notEqual(legacy.code, 0);
   assert.equal(legacy.stdout, "");
 
+  // When both devices run daemons and dial each other, exactly one link survives on each side.
+  const laptopPort = await unusedPort("127.0.0.1");
+  const laptopUp = await cli(laptop, ["up", "--bind", "127.0.0.1", "--port", laptopPort, "--state", laptop.state]);
+  assert.equal(laptopUp.code, 0, laptopUp.stderr);
+  t.after(async () => { await cli(laptop, ["stop", "--state", laptop.state]); });
+  assert.equal((await cli(studio, ["peer", "address", "laptop", `ws://127.0.0.1:${laptopPort}`, "--state", studio.state])).code, 0);
+  const linkCounts = async () => {
+    const counts: number[] = [];
+    for (const dev of [studio, laptop]) {
+      const control = await connectControl(dev.state);
+      try { counts.push((await control.controller.peers()).filter((peer) => peer.peer).length); } finally { control.close(); }
+    }
+    return counts;
+  };
+  const deadline = Date.now() + 15000;
+  let counts = await linkCounts();
+  while (Date.now() < deadline && !(counts[0] === 1 && counts[1] === 1)) {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    counts = await linkCounts();
+  }
+  assert.deepEqual(counts, [1, 1], "one link between the two daemons");
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  assert.deepEqual(await linkCounts(), [1, 1], "the link stays single");
+  const online = await cli(laptop, ["peers", "--state", laptop.state]);
+  assert.match(online.stdout, /\nstudio +online +direct +shell, files, sessions +/);
+  assert.match((await cli(studio, ["status", "--state", studio.state])).stdout, /Links: +laptop \(direct, /);
+
   // A changed identity behind a saved address is never accepted.
   const file = path.join(laptop.dir, "peers", "studio");
   const saved = JSON.parse(await readFile(file, "utf8"));
@@ -104,5 +198,6 @@ test("two devices pair, run commands within their grants, and refuse everyone el
   assert.equal(changed.code, 3, changed.stderr);
   assert.match(changed.stderr, /identity is not the one saved/);
   await writeFile(file, JSON.stringify(saved));
-  assert.equal((await cli(laptop, ["run", "studio", "--", "printf back"])).stdout, "back");
+  const back = await cli(laptop, ["run", "studio", "--", "printf back"]);
+  assert.equal(back.stdout, "back", `exit ${back.code}: ${back.stderr}`);
 });

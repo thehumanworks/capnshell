@@ -291,6 +291,8 @@ export function parseOptions(argv: string[]): PeerConfig {
 export interface McpConfig {
   /** The listener whose peer the tools use, unless they use the daemon's peers. */
   url: string;
+  /** The paired device the listener must be, when the target was a paired name. */
+  expect?: { name: string; publicKey: string };
   daemon: boolean;
   state?: string;
   cwd?: string;
@@ -329,8 +331,14 @@ function resolveMcpOptions(command: Command, destination: string | undefined): M
   if (http !== undefined && !isLoopback(address) && !allowRemote) {
     throw new Error("A non-loopback MCP endpoint exposes shell access. Add --allow-remote only for a trusted LAN/VPN.");
   }
+  let expect: McpConfig["expect"];
+  if (destination !== undefined && !/^wss?:\/\//i.test(destination)) {
+    const resolved = resolvePeer(destination);
+    destination = resolved.url;
+    expect = resolved.peer && { name: resolved.peer.name, publicKey: resolved.peer.publicKey };
+  }
   return {
-    url: destination !== undefined ? peerUrl(destination) : endpointUrl(bind, port), daemon, state, cwd,
+    url: destination !== undefined ? peerUrl(destination) : endpointUrl(bind, port), ...expect ? { expect } : {}, daemon, state, cwd,
     http: http === undefined ? undefined : { bind: address, port: http, remote: !isLoopback(address) },
   };
 }
@@ -338,8 +346,8 @@ function resolveMcpOptions(command: Command, destination: string | undefined): M
 export function addMcpCommand(program: Command, run: (config: McpConfig) => void | Promise<void>): void {
   const command = program.command("mcp")
     .description("Serve MCP tools that run commands and terminal sessions on peers")
-    .usage("[url] [options]")
-    .argument("[url]", "ws:// or wss:// URL of the listener to use")
+    .usage("[target] [options]")
+    .argument("[target]", "A paired device's name, a saved alias or the ws:// URL of the listener to use")
     .addOption(new Option("--bind <address>", "Numeric listener address (default: 127.0.0.1)").env("CNS_BIND"))
     .addOption(new Option("--port <port>", "Listener TCP port (default: 47381)").env("CNS_PORT"))
     .option("--daemon", "Use the peers connected to the local daemon instead of a listener")

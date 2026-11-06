@@ -12,7 +12,7 @@ import { publicKeyBytes, verify, type Identity, type PublicKey } from "./identit
  * on connections whose transport you trust, as the README's security section says.
  *
  * Wire: three JSON text messages, then the connection belongs to Cap'n Web.
- *   initiator -> { t: "hello", v: 1, key, nonce, invite? }
+ *   initiator -> { t: "hello", v: 1, key, nonce, invite?, mode? }   mode: "daemon" for a standing link between daemons
  *   responder -> { t: "hello", v: 1, key, nonce, sig }      or { t: "refused", reason }
  *   initiator -> { t: "auth", sig, proof? }
  *   responder -> { t: "ok" }                                 or { t: "refused", reason }
@@ -25,7 +25,9 @@ const keySchema = z.string().regex(base64url).refine((value) => Buffer.from(valu
 const nonceSchema = z.string().regex(base64url).refine((value) => Buffer.from(value, "base64url").length === NONCE_BYTES);
 const signatureSchema = z.string().regex(base64url).refine((value) => Buffer.from(value, "base64url").length === 64);
 const inviteIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
-const helloSchema = z.strictObject({ t: z.literal("hello"), v: z.literal(AUTH_VERSION), key: keySchema, nonce: nonceSchema, invite: inviteIdSchema.optional(), sig: signatureSchema.optional() });
+const modeSchema = z.enum(["daemon", "client"]);
+export type LinkMode = z.infer<typeof modeSchema>;
+const helloSchema = z.strictObject({ t: z.literal("hello"), v: z.literal(AUTH_VERSION), key: keySchema, nonce: nonceSchema, invite: inviteIdSchema.optional(), mode: modeSchema.optional(), sig: signatureSchema.optional() });
 const authSchema = z.strictObject({ t: z.literal("auth"), sig: signatureSchema, proof: z.string().regex(base64url).optional() });
 const codeSchema = z.enum(["protocol", "identity-changed", "refused", "not-paired", "invalid-proof", "closed"]);
 const refusedSchema = z.strictObject({ t: z.literal("refused"), code: codeSchema, reason: z.string().max(512) });
@@ -61,9 +63,11 @@ export interface InitiatorOptions {
   expect?: PublicKey;
   /** During pairing, prove knowledge of this invite's secret. */
   invite?: { id: string; secret: Uint8Array };
+  /** "daemon" for a standing link between two daemons, which they deduplicate; "client" (the default) for one command's connection. */
+  mode?: LinkMode;
 }
 
-export interface Step { send?: string; peer?: PublicKey; invite?: { id: string } }
+export interface Step { send?: string; peer?: PublicKey; invite?: { id: string }; /** The initiator's declared link mode, on the responder's final step. */ mode?: LinkMode }
 
 function transcript(initiatorNonce: Buffer, responderNonce: Buffer, initiatorKey: PublicKey, responderKey: PublicKey): Buffer {
   return createHash("sha256").update("cns-auth-1").update(initiatorNonce).update(responderNonce)
@@ -101,7 +105,7 @@ export class Initiator {
   start(): string {
     if (this.#state !== "new") throw new AuthError("protocol", "The handshake has already started.");
     this.#state = "hello";
-    return JSON.stringify({ t: "hello", v: AUTH_VERSION, key: this.#identity.publicKey, nonce: this.#nonce.toString("base64url"), ...this.#options.invite ? { invite: this.#options.invite.id } : {} });
+    return JSON.stringify({ t: "hello", v: AUTH_VERSION, key: this.#identity.publicKey, nonce: this.#nonce.toString("base64url"), ...this.#options.invite ? { invite: this.#options.invite.id } : {}, ...this.#options.mode ? { mode: this.#options.mode } : {} });
   }
   /** Returns what to send next, and `peer` once the other device is authenticated. */
   receive(text: string): Step {
@@ -140,6 +144,7 @@ export class Responder {
   #base?: Buffer;
   #peer?: PublicKey;
   #invite?: string;
+  #mode: LinkMode = "client";
   constructor(identity: Identity, options: ResponderOptions) {
     this.#identity = identity;
     this.#options = options;
@@ -161,6 +166,7 @@ export class Responder {
       this.#base = base;
       this.#peer = message.key;
       this.#invite = message.invite;
+      this.#mode = message.mode ?? "client";
       this.#state = "auth";
       const sig = Buffer.from(this.#identity.sign(challenge("responder", base))).toString("base64url");
       return { send: JSON.stringify({ t: "hello", v: AUTH_VERSION, key: this.#identity.publicKey, nonce: this.#nonce.toString("base64url"), sig }) };
@@ -179,7 +185,7 @@ export class Responder {
       const reason = await this.#options.authorize(this.#peer!, invite);
       if (reason !== undefined) return this.#refuse(typeof reason === "string" ? "refused" : reason.code, typeof reason === "string" ? reason : reason.reason);
       this.#state = "done";
-      return { send: JSON.stringify({ t: "ok" }), peer: this.#peer!, invite };
+      return { send: JSON.stringify({ t: "ok" }), peer: this.#peer!, invite, mode: this.#mode };
     }
     throw new AuthError("protocol", "The handshake is over.");
   }

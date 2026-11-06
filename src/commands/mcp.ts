@@ -15,7 +15,7 @@ const tokenPattern = /^[A-Za-z0-9._~+/-]{32,1024}=*$/;
 
 /** Serve the MCP tools on stdio or Streamable HTTP until stopped. */
 export async function startMcp(config: McpConfig): Promise<void> {
-  const target = config.daemon ? daemonTarget(config.state, config.cwd) : listenerTarget(config.url, config.cwd);
+  const target = config.daemon ? daemonTarget(config.state, config.cwd) : listenerTarget(config.url, config.cwd, config.expect);
   if (config.http) await serveHttp(target, config.http);
   else await serveOnStdio(target);
 }

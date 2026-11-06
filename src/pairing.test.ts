@@ -19,6 +19,10 @@ test("invites round-trip and expire", () => {
   expect(() => createInvite(studio.publicKey, [])).toThrow("at least one address");
   expect(() => createInvite(studio.publicKey, ["http://x"])).toThrow();
   expect(() => createInvite(studio.publicKey, ["ws://x"], MAX_INVITE_MS + 1)).toThrow();
+  // The inviting device's suggested name for itself travels with the invite.
+  expect(decodeInvite(createInvite(studio.publicKey, ["ws://x"], undefined, "studio").text).name).toBe("studio");
+  expect(decoded.name).toBeUndefined();
+  expect(() => createInvite(studio.publicKey, ["ws://x"], undefined, "../etc")).toThrow();
 });
 
 test("a pairing API takes one proposal and answers with the decision", async () => {

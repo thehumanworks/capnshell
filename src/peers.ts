@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { createPeerFile, isPairedEntry, peerFile, peerNames, readPeerFile, rewritePeerFile, validatePeerUrl } from "./aliases.js";
+import { errorMessage } from "./errors.js";
 import { fingerprint, type PublicKey } from "./identity.js";
 
 /**
@@ -66,13 +67,28 @@ function entryFor(name: string, content: string): PeerEntry {
   if (!isPairedEntry(content)) return { name, kind: "address", url: validatePeerUrl(content.trim()) };
   let parsed: unknown;
   try { parsed = JSON.parse(content); } catch { throw new Error(`Saved peer ${name} is not valid JSON.`); }
-  const peer = pairedPeerSchema.parse(parsed);
-  return { name, kind: "paired", fingerprint: fingerprint(peer.publicKey), ...peer };
+  const peer = pairedPeerSchema.safeParse(parsed);
+  if (!peer.success) throw new Error(`Saved peer ${name} is not a valid paired-device record: ${errorMessage(peer.error)}`);
+  return { name, kind: "paired", fingerprint: fingerprint(peer.data.publicKey), ...peer.data };
 }
 
-/** Every saved peer, address aliases and paired devices alike, sorted by name. */
-export function listPeers(): PeerEntry[] {
-  return peerNames().flatMap((name) => { const content = readPeerFile(name); return content === undefined ? [] : [entryFor(name, content)]; });
+const reportInvalid = (name: string, error: unknown) => console.error(`cns: skipping saved peer ${name}: ${errorMessage(error)}`);
+
+/**
+ * Every saved peer, address aliases and paired devices alike, sorted by name. A file
+ * that cannot be read as a peer is reported and skipped, so one bad file never stops
+ * the others from working; `getPeer` by name stays strict.
+ */
+export function listPeers(report: (name: string, error: unknown) => void = reportInvalid): PeerEntry[] {
+  return peerNames().flatMap((name) => {
+    try {
+      const content = readPeerFile(name);
+      return content === undefined ? [] : [entryFor(name, content)];
+    } catch (error) {
+      report(name, error);
+      return [];
+    }
+  });
 }
 
 export function getPeer(name: string): PeerEntry | undefined {

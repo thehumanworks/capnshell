@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { addAlias, listAliases, resolveAlias } from "./aliases.js";
 import { generateIdentity } from "./identity.js";
 import { describeGrants, expandGrants, findPairedPeer, getPeer, listPeers, PRESETS, resolvePeer, savePairedPeer, updatePairedPeer } from "./peers.js";
+import { peerNames } from "./aliases.js";
 
 let dir: string;
 const previous = process.env.CNS_CONFIG_DIR;
@@ -46,4 +47,34 @@ test.skipIf(process.platform === "win32")("paired devices live beside address al
   expect(() => resolvePeer("studio")).toThrow("no saved address");
   expect(() => updatePairedPeer("studio", (peer) => ({ ...peer, publicKey: generateIdentity().publicKey }))).toThrow("cannot change");
   expect(() => updatePairedPeer("build", (peer) => peer)).toThrow("saved address");
+});
+
+test.skipIf(process.platform === "win32")("stray and corrupt files in the peers directory are skipped, not fatal", () => {
+  const studio = generateIdentity();
+  savePairedPeer("studio", { publicKey: studio.publicKey, addresses: ["ws://127.0.0.1:47381"], pairedAt: new Date().toISOString(), grants: { incoming: ["shell"], outgoing: [] } });
+  const peers = path.join(dir, "peers");
+  writeFileSync(path.join(peers, ".DS_Store"), "x", { mode: 0o600 });
+  writeFileSync(path.join(peers, "broken"), "{ not json", { mode: 0o600 });
+  writeFileSync(path.join(peers, "extra"), JSON.stringify({ version: 2, publicKey: generateIdentity().publicKey, fingerprint: "x", addresses: [], pairedAt: new Date().toISOString(), grants: { incoming: [], outgoing: [] } }), { mode: 0o600 });
+  expect(peerNames()).toEqual(["broken", "extra", "studio"]);
+  const reported: string[] = [];
+  expect(listPeers((name) => reported.push(name)).map((peer) => peer.name)).toEqual(["studio"]);
+  expect(reported).toEqual(["broken", "extra"]);
+  const error = console.error;
+  console.error = () => {};
+  try { expect(findPairedPeer(studio.publicKey)?.name).toBe("studio"); }
+  finally { console.error = error; }
+  // Looking one up by name stays strict.
+  expect(() => getPeer("broken")).toThrow("not valid JSON");
+  expect(() => getPeer("extra")).toThrow("not a valid paired-device record");
+});
+
+test.skipIf(process.platform === "win32")("changing a paired device replaces its file whole and privately", () => {
+  const studio = generateIdentity();
+  savePairedPeer("studio", { publicKey: studio.publicKey, addresses: ["ws://127.0.0.1:47381"], pairedAt: new Date().toISOString(), grants: { incoming: ["shell"], outgoing: [] } });
+  updatePairedPeer("studio", (peer) => ({ ...peer, addresses: ["ws://127.0.0.1:47382"] }));
+  expect(readdirSync(path.join(dir, "peers"))).toEqual(["studio"]);
+  expect(statSync(path.join(dir, "peers", "studio")).mode & 0o777).toBe(0o600);
+  expect(resolvePeer("studio").url).toBe("ws://127.0.0.1:47382");
+  expect(() => updatePairedPeer("missing", (peer) => peer)).toThrow("Unknown peer");
 });
