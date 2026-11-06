@@ -6,7 +6,7 @@ import test from "node:test";
 import { newBunWebSocketRpcSession, newMessagePortRpcSession, newWebSocketRpcSession, RpcTarget, type BunWebSocketTransport, type RpcStub } from "capnweb";
 import { forkShell } from "./connect.js";
 import { RefusingShell } from "./refusing-shell.js";
-import { localShellInfo, ShellApi, type RunResult } from "./shell.js";
+import { HANDLES_REVOKED, localShellInfo, PtyRegistry, ShellApi, type PtyExit, type RunResult } from "./shell.js";
 import { LOOPBACK, LOOPBACK_HOST } from "./test-support.js";
 
 // Model an untrusted caller, not the typed client contract. Runtime validation
@@ -124,6 +124,46 @@ test("one-way WebSocket refuses valid reverse operations without blocking forwar
   await assert.rejects(() => stat(marker), { code: "ENOENT" });
   const result = await forward.run("printf forward-ok");
   try { assert.equal(result.stdout, "forward-ok"); } finally { result[Symbol.dispose](); }
+});
+
+test("closing a forked shell over RPC revokes its named handles and detaches their viewers", { timeout: 15000, skip: process.platform === "win32" }, async (t) => {
+  const registry = new PtyRegistry();
+  const api = new ShellApi(registry);
+  t.after(() => { api[Symbol.dispose](); registry[Symbol.dispose](); });
+  const { port1, port2 } = new MessageChannel();
+  t.after(() => { port1.close(); port2.close(); });
+  newMessagePortRpcSession(port1, api);
+  using remote = newMessagePortRpcSession<ShellApi>(port2);
+  using started = await remote.startPtySession("work", { command: "printf READY; while IFS= read -r line; do printf 'got:%s\\n' \"$line\"; done" });
+  assert.equal((await started.wait({ text: "READY", timeoutMs: 10000 })).matched, true);
+  class Sink extends RpcTarget {
+    text = "";
+    detachedWith = Promise.withResolvers<string>();
+    output(data: Uint8Array) { this.text += new TextDecoder().decode(data); }
+    exit(_result: PtyExit) {}
+    detached(reason: string) { this.detachedWith.resolve(reason); }
+  }
+  const sink = new Sink();
+  const fork = await remote.fork();
+  const handle = await fork.ptySession("work");
+  const attachment = await handle.attach(sink);
+  for (let i = 0; i < 200 && !sink.text.includes("READY"); i++) await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.match(sink.text, /READY/);
+  const pending = handle.wait({ text: "never shown" });
+  fork[Symbol.dispose]();
+  const revoked = new RegExp(HANDLES_REVOKED.replace(/[.]/g, "\\$&"));
+  await assert.rejects(async () => { await pending; }, revoked);
+  await assert.rejects(async () => { await handle.capture(); }, revoked);
+  await assert.rejects(async () => { await handle.info(); }, revoked);
+  await assert.rejects(async () => { await attachment.keys(["x"]); }, revoked);
+  assert.equal(await sink.detachedWith.promise, HANDLES_REVOKED);
+  // The session keeps running and the connection's own handle still reaches it.
+  started.keys(["hello", "Enter"]);
+  assert.equal((await started.wait({ text: "got:hello", timeoutMs: 10000 })).matched, true);
+  const [info] = await remote.ptySessions();
+  assert.deepEqual([info?.running, info?.viewers], [true, 0]);
+  assert.ok(!sink.text.includes("got:hello"), "a detached viewer receives nothing further");
+  await started.kill();
 });
 
 test("forkShell forks a current peer's shell and recognises an older peer without fork", async (t) => {

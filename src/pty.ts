@@ -282,7 +282,7 @@ class Pty {
     const screen = this.#render(history);
     if (screen.text.includes(text)) return { matched: true, running: !this.#exit, screen };
     if (this.#exit) return { matched: false, running: false, screen };
-    if (released?.aborted) throw new Error("This PTY session handle has been released.");
+    if (released?.aborted) throw releaseError(released);
     if (this.#waiters.size >= MAX_WAITERS) throw new Error("Too many callers are waiting on this PTY session.");
     return await new Promise<PtyWait>((resolve, reject) => {
       const settle = () => {
@@ -305,7 +305,7 @@ class Pty {
           reject(error);
         },
       };
-      const onRelease = () => waiter.abort(new Error("This PTY session handle has been released."));
+      const onRelease = () => waiter.abort(releaseError(released!));
       const timer = timeoutMs > 0 ? setTimeout(() => finish({ matched: false, running: !this.#exit, screen: this.#render(history) }), timeoutMs) : undefined;
       released?.addEventListener("abort", onRelease, { once: true });
       this.#waiters.add(waiter);
@@ -432,10 +432,20 @@ class Pty {
       viewer.stream = false;
       return;
     }
-    const { sink } = viewer;
-    this.unview(viewer);
+    this.detach(viewer, reason);
+  }
+
+  /** Detach a viewer and tell its sink why; the program keeps running. */
+  detach(viewer: Viewer, reason: string) {
+    if (viewer.gone) return;
+    viewer.gone = true;
+    viewer.queue = [];
+    viewer.queued = 0;
+    this.#viewers.delete(viewer);
+    // Tell the sink before releasing its stub: a released stub cannot be called.
     void (async () => {
-      try { await sink.detached?.(reason); } catch { /* The caller has gone. */ }
+      try { await viewer.sink.detached?.(reason); } catch { /* The caller has gone. */ }
+      finally { viewer.sink[Symbol.dispose]?.(); }
     })();
   }
 
@@ -476,13 +486,70 @@ class Pty {
   }
 }
 
+function releaseError(released: AbortSignal): Error {
+  return released.reason instanceof Error ? released.reason : new Error("This PTY session handle has been released.");
+}
+
+/** Revokes a handle. Module-private so that no RPC caller can reach it. */
+const revokers = new WeakMap<PtyControls, (reason: string) => void>();
+/** A handle's session accessor, which fails once the handle is revoked. */
+const accessors = new WeakMap<PtyControls, () => Pty>();
+
+/**
+ * The named-session handles and attachments a shell issued. Closing the scope, as a
+ * shell does when it closes, revokes them all: their calls fail with the reason, their
+ * pending waits reject with it and their viewers are detached with it. The sessions
+ * themselves keep running for every other caller.
+ */
+export class HandleScope {
+  #handles = new Set<PtyControls>();
+  #closed: string | null = null;
+  /** Why this scope closed, or null while it is open. */
+  get closed() { return this.#closed; }
+  add(handle: PtyControls) {
+    if (this.#closed) revokers.get(handle)?.(this.#closed);
+    else this.#handles.add(handle);
+  }
+  delete(handle: PtyControls) { this.#handles.delete(handle); }
+  /** Revoke every handle issued in this scope. Closing again changes nothing. */
+  close(reason: string) {
+    if (this.#closed) return;
+    this.#closed = reason;
+    const handles = [...this.#handles];
+    this.#handles.clear();
+    for (const handle of handles) revokers.get(handle)?.(reason);
+  }
+}
+
 /** Input, size and screen controls shared by every handle on a PTY. */
 class PtyControls extends RpcTarget {
   #pty: () => Pty;
   #handle = new AbortController();
-  constructor(pty: () => Pty) {
+  #scope?: HandleScope;
+  #revoked: string | null = null;
+  #onRevoke?: (reason: string) => void;
+  /**
+   * `scope` is the issuing shell's: closing it revokes this handle. `onRevoke` lets a
+   * subclass release what it holds, after the handle has stopped reaching its session.
+   */
+  constructor(pty: () => Pty, scope?: HandleScope, onRevoke?: (reason: string) => void) {
     super();
-    this.#pty = pty;
+    this.#pty = () => {
+      if (this.#revoked) throw new Error(this.#revoked);
+      return pty();
+    };
+    this.#scope = scope;
+    this.#onRevoke = onRevoke;
+    revokers.set(this, (reason) => this.#revoke(reason));
+    accessors.set(this, this.#pty);
+    scope?.add(this);
+  }
+  #revoke(reason: string) {
+    if (this.#revoked) return;
+    this.#revoked = reason;
+    this.#scope?.delete(this);
+    this.#handle.abort(new Error(reason));
+    this.#onRevoke?.(reason);
   }
   /** Send keystrokes or other input bytes to the program. */
   write(data: string | Uint8Array): void { this.#pty().write(data); }
@@ -497,7 +564,10 @@ class PtyControls extends RpcTarget {
    * Cap'n Web calls this once the caller releases the handle or disconnects. Its
    * waits end then rather than holding one of the session's few waiter slots.
    */
-  [Symbol.dispose]() { this.#handle.abort(); }
+  [Symbol.dispose]() {
+    this.#scope?.delete(this);
+    this.#handle.abort();
+  }
 }
 
 /** An unnamed PTY, owned by the caller that opened it. */
@@ -527,8 +597,8 @@ export class PtySession extends PtyControls {
 export class PtyAttachment extends PtyControls {
   #pty: Pty;
   #viewer: Viewer;
-  constructor(pty: () => Pty, viewer: Viewer) {
-    super(pty);
+  constructor(pty: () => Pty, viewer: Viewer, scope?: HandleScope) {
+    super(pty, scope, (reason) => this.#pty.detach(this.#viewer, reason));
     this.#pty = pty();
     this.#viewer = viewer;
   }
@@ -539,16 +609,21 @@ export class PtyAttachment extends PtyControls {
   }
 }
 
-/** A handle on a named session. Releasing the handle leaves the session running. */
+/**
+ * A handle on a named session. Releasing the handle leaves the session running.
+ * Closing the scope it was issued in revokes it and the attachments made through it.
+ */
 export class NamedPty extends PtyControls {
   #registry: PtyRegistry;
   #name: string;
   #lookup: () => Pty;
-  constructor(registry: PtyRegistry, name: string, pty: Pty) {
-    super(() => registry.resolve(name, pty));
+  #scope?: HandleScope;
+  constructor(registry: PtyRegistry, name: string, pty: Pty, scope?: HandleScope) {
+    super(() => registry.resolve(name, pty), scope);
     this.#registry = registry;
     this.#name = name;
-    this.#lookup = () => registry.resolve(name, pty);
+    this.#lookup = accessors.get(this)!;
+    this.#scope = scope;
   }
   info(): PtySessionInfo { return describe(this.#name, this.#lookup()); }
   /**
@@ -561,10 +636,10 @@ export class NamedPty extends PtyControls {
     const pty = this.#lookup();
     // The latest viewer's terminal size wins, as in tmux.
     if (cols !== undefined || rows !== undefined) pty.resize(cols ?? pty.size.cols, rows ?? pty.size.rows);
-    return new PtyAttachment(this.#lookup, pty.view(sink as SinkStub, { stream: true, answers, replay: true, owner: false }));
+    return new PtyAttachment(this.#lookup, pty.view(sink as SinkStub, { stream: true, answers, replay: true, owner: false }), this.#scope);
   }
   /** Hang up if still running and remove the session. Resolves with how it ended. */
-  kill(): Promise<PtyExit> { return this.#registry.kill(this.#name, this.#lookup()); }
+  async kill(): Promise<PtyExit> { return await this.#registry.kill(this.#name, this.#lookup()); }
 }
 
 function describe(name: string, pty: Pty): PtySessionInfo {

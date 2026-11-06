@@ -6,7 +6,7 @@ import test, { type TestContext } from "node:test";
 import { Terminal as Screen } from "@xterm/headless";
 import {
   MAX_EXEC_CHUNK_BYTES, MAX_FILE_CHUNK_BYTES, MAX_FORKS, MAX_NAMED_PTYS, MAX_OUTPUT_BYTES, MAX_PTY_BACKLOG_BYTES, MAX_PTY_INPUT_BYTES, MAX_SCREEN_HISTORY,
-  MAX_TIMEOUT_MS, MAX_WRITE_BYTES, PtyRegistry, ShellApi, type ExecSink, type PtyExit,
+  MAX_TIMEOUT_MS, MAX_WRITE_BYTES, HANDLES_REVOKED, PtyRegistry, ShellApi, type ExecSink, type PtyExit,
 } from "./shell.js";
 
 async function temporaryDirectory(t: TestContext): Promise<string> {
@@ -536,7 +536,7 @@ test("named PTY sessions outlive the connection that started them and are found 
   assert.equal(second.ptySession("work").info().command, "sleep 60");
 });
 
-test("a fork shares named sessions and releasing it does not revoke a named handle", { skip: windows }, async (t) => {
+test("closing a fork revokes the named handles and attachments it issued, not the session", { skip: windows }, async (t) => {
   const { connect } = registryFor(t);
   const shell = connect();
   const started = shell.startPtySession("work", { command: "printf READY; while IFS= read -r line; do printf 'got:%s\\n' \"$line\"; done" });
@@ -544,13 +544,48 @@ test("a fork shares named sessions and releasing it does not revoke a named hand
   const fork = shell.fork();
   assert.equal(fork.ptySessions()[0]?.pid, started.info().pid);
   const handle = fork.ptySession("work");
+  const viewer = ptySink();
+  const attachment = handle.attach(viewer.sink);
+  await viewer.waitFor("READY");
+  assert.equal(started.info().viewers, 1);
+  const pending = handle.wait({ text: "never shown" });
+  const revoked = { message: HANDLES_REVOKED };
   fork[Symbol.dispose]();
-  handle.keys(["hello", "Enter"]);
+  // Every handle the fork issued stops reaching the session, with the reason; its waits end with it too.
+  await assert.rejects(pending, revoked);
+  assert.throws(() => handle.keys(["x"]), revoked);
+  assert.throws(() => handle.info(), revoked);
+  await assert.rejects(handle.capture(), revoked);
+  await assert.rejects(handle.wait({ text: "x" }), revoked);
+  await assert.rejects(handle.kill(), revoked);
+  assert.throws(() => handle.attach(ptySink().sink), revoked);
+  assert.throws(() => attachment.write("x"), revoked);
+  // Its viewers are detached and told why, while the program keeps running.
+  assert.equal(await viewer.detached, HANDLES_REVOKED);
+  assert.deepEqual([started.info().viewers, started.info().running], [0, true]);
+  // The shell's own handles are unaffected.
+  const sibling = shell.ptySession("work");
+  sibling.keys(["hello", "Enter"]);
   assert.equal((await started.wait({ text: "got:hello", timeoutMs: 10000 })).matched, true);
-  await started.kill();
-  shell.startPtySession("work", { command: "sleep 60" });
-  assert.throws(() => handle.keys(["Enter"]), /no longer exists/);
+  assert.ok(!viewer.output.includes("got:hello"), "a detached viewer receives nothing further");
+  // Cleaning up again changes nothing.
+  fork[Symbol.dispose]();
   handle[Symbol.dispose]();
+  attachment[Symbol.dispose]();
+  attachment.detach();
+  assert.throws(() => handle.keys(["x"]), revoked);
+  assert.equal(shell.ptySessions().length, 1);
+  // A revoked handle never reaches a later session that reuses the name either.
+  await sibling.kill();
+  shell.startPtySession("work", { command: "sleep 60" });
+  assert.throws(() => handle.keys(["Enter"]), revoked);
+  // Closing the shell itself revokes its handles the same way; the session stays for other callers.
+  const own = shell.ptySession("work");
+  const theirs = connect().ptySession("work");
+  shell[Symbol.dispose]();
+  assert.throws(() => own.info(), revoked);
+  assert.throws(() => started.info(), revoked);
+  assert.deepEqual([theirs.info().command, theirs.info().running], ["sleep 60", true]);
 });
 
 test("attaching redraws the current screen, then streams; detaching leaves the program running", { skip: windows }, async (t) => {
