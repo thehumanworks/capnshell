@@ -3,7 +3,7 @@
 Status: in progress, 6 November 2026. Base: `main` at `1986d6a` with the address book
 (PR 12), `peer list --json` (PR 18) and scoped handle lifetimes (PR 19). Decisions taken so
 far: `cns up` listens on all interfaces for paired devices; both sides confirm a pairing;
-the relay is a Cloudflare Worker; slices 1 and 2 are merged as PRs 21 and 22; slice 3 (pairing, peers file v2, `cns up`, `cns pair`, `cns peers`, named targets and grant enforcement at the method level) is PR 23; `status`, `doctor`, grant and address changes with live refresh, link deduplication, paired MCP targets and the fixes from PR 23's review are PR 24.
+the relay is a Cloudflare Worker; slices 1 and 2 are merged as PRs 21 and 22; encryption is PR 25, the relay PR 26, and session permissions with reconnecting terminals PR 27; slice 3 (pairing, peers file v2, `cns up`, `cns pair`, `cns peers`, named targets and grant enforcement at the method level) is PR 23; `status`, `doctor`, grant and address changes with live refresh, link deduplication, paired MCP targets and the fixes from PR 23's review are PR 24.
 
 The requirement is **two devices I know of that have paired**. Today `cns` connects a
 listener and a connector, identifies peers by connection IDs such as `p1`, grants
@@ -78,9 +78,9 @@ A grant lists the operations one device may perform on another. The granting dev
 | --- | --- |
 | `shell` | `run`, `exec`, `openPty`, `fork` (a fork inherits the grant) |
 | `files` | `stat`, `access`, `readdir`, `mkdir`, `glob`, `readFile`, `writeFile` |
-| `sessions:list` | `ptySessions`, `NamedPty.info` |
-| `sessions:create` | `startPtySession` |
-| `sessions:view` | `ptySession` for `capture`, `wait`, `attach` as a viewer that cannot type |
+| `sessions:list` | `ptySessions` (names, commands, sizes and owners' fingerprints) |
+| `sessions:create` | `startPtySession`; the device owns what it starts and may view, control and kill it, so this alone amounts to running commands |
+| `sessions:view` | `info`, `capture` (with up to 1000 lines of scrollback), `wait`, `attach` as a viewer that cannot type |
 | `sessions:control` | `write`, `keys`, `resize` on a handle or attachment |
 | `sessions:kill` | `NamedPty.kill` |
 
@@ -181,4 +181,4 @@ Each slice is a PR with its own tests, merged after review, in this order unless
 5. `cns tty studio` without a name uses the `main` named session (recommended) or an unnamed PTY.
 6. Exclusive-control lease for sessions: not in the first release (recommended).
 7. Session persistence across host restart: not in this plan (recommended).
-8. Transport order: encrypted WebSocket, then a self-hosted relay, then iroh on evidence (recommended), or iroh first.
+8. Transport order: settled. Encrypted WebSocket, direct first and the relay (Cloudflare Worker or `cns relay`) last; iroh evaluated and deferred, see [iroh-evaluation.md](iroh-evaluation.md).

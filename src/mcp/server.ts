@@ -23,7 +23,7 @@ const instructions = `cns runs commands and terminal programs on other machines 
 - When several peers are connected, pass peer to choose one.`;
 
 const peer = z.string().min(1).max(64).optional()
-  .describe("Peer ID from list_peers. May be omitted when only one peer is connected.");
+  .describe("Peer ID from list_peers, or a paired device's name. May be omitted when only one peer is connected.");
 const name = sessionNameSchema.describe("Session name: 1-64 letters, digits, '.', '_' or '-'.");
 const cwd = z.string().min(1).max(4096).optional()
   .describe("Absolute working directory on the peer, in its own path syntax. Defaults to the peer user's home directory.");
@@ -70,6 +70,8 @@ const viewSchema = {
 
 const peerSchema = z.object({
   id: z.string(),
+  name: z.string().optional().describe("For a device paired with this one: its saved name, which `peer` also accepts."),
+  fingerprint: z.string().optional().describe("For a paired device: its identity's fingerprint."),
   hostname: z.string(),
   platform: z.string().describe("Node.js platform name, such as linux, darwin or win32."),
   os: z.string().describe("linux, mac, windows or wsl."),
@@ -248,11 +250,12 @@ export function createMcpServer(target: McpTarget): McpServer {
     outputSchema: z.object({ peers: z.array(peerSchema) }),
     annotations: observing,
   }, async (_args, ctx) => invoke(target, ctx, undefined, async (link) => {
-    const peers = (await link.controller.peers()).map(({ id, info }) => ({
+    const peers = (await link.controller.peers()).map(({ id, info, peer }) => ({
       id, hostname: info.hostname, platform: info.platform, os: info.name, shell: info.shell, home: info.cwd, pid: info.pid,
+      ...peer ? { name: peer.name, fingerprint: peer.fingerprint } : {},
     }));
     const text = peers.length
-      ? peers.map((p) => `${p.id}  ${p.hostname}  ${p.os}  ${p.shell}  home: ${p.home}`).join("\n")
+      ? peers.map((p) => `${p.id}${p.name ? ` (${p.name}, paired)` : ""}  ${p.hostname}  ${p.os}  ${p.shell}  home: ${p.home}`).join("\n")
       : "No peers are connected.";
     return { text, structured: { peers } };
   }));

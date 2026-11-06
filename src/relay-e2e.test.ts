@@ -98,6 +98,20 @@ test("devices that cannot reach each other directly pair and link through the re
   };
   await eventually(async () => (await viaOf(laptop)).join() === "relay" && (await viaOf(studio)).join() === "relay", "a link through the relay");
   assert.match((await cli(laptop, ["peers", "--state", laptop.state])).stdout, /\nstudio +online +relay +/);
+  // MCP through laptop's daemon names the paired device and takes its name as the peer.
+  const { Client } = await import("@modelcontextprotocol/client");
+  const { StdioClientTransport } = await import("@modelcontextprotocol/client/stdio");
+  const { cliInvocation, cliEnvironment } = await import("./test-support.js");
+  const invocation = cliInvocation(["mcp", "--daemon", "--state", laptop.state]);
+  const client = new Client({ name: "test", version: "1" });
+  await client.connect(new StdioClientTransport({ command: invocation.file, args: invocation.args, env: cliEnvironment(laptop.env) as Record<string, string> }));
+  cleanups.push(() => client.close());
+  const listed = await client.callTool({ name: "list_peers", arguments: {} });
+  const peers = (listed.structuredContent as { peers: Array<{ name?: string }> }).peers;
+  assert.deepEqual(peers.map((peer) => peer.name), ["studio"]);
+  const ran = await client.callTool({ name: "run_command", arguments: { peer: "studio", command: "printf mcp-by-name" } });
+  assert.equal((ran.structuredContent as { stdout: string }).stdout, "mcp-by-name");
+  await client.close();
   assert.match((await cli(studio, ["status", "--state", studio.state])).stdout, /Links: +laptop \(relay, /);
 
   if (!relay) return;

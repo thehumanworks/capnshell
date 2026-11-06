@@ -112,13 +112,22 @@ export interface PtySessionInfo {
   exit: PtyExit | null;
   /** Callers currently attached and receiving output. */
   viewers: number;
+  /** Bytes the program has written so far, the offset `output` reports. */
+  outputBytes: number;
+  /** Who started it: a paired device's fingerprint, or null for this machine and unpaired peers. */
+  owner: string | null;
 }
 /**
  * Implemented by the caller and passed by reference. The executor pushes terminal
  * output to it and waits for each acknowledgement before sending more.
  */
 export interface PtySink {
-  output(data: Uint8Array): void | Promise<void>;
+  /**
+   * Output to show. `end` is the program's output offset after this chunk: for the redraw
+   * an attachment starts with, the offset the redraw shows. A caller that reattaches can
+   * tell from it how much output it did not see.
+   */
+  output(data: Uint8Array, end?: number): void | Promise<void>;
   exit(result: PtyExit): void | Promise<void>;
   /** A named session detached this viewer while its program keeps running. */
   detached?(reason: string): void | Promise<void>;
@@ -130,6 +139,10 @@ interface Viewer {
   stream: boolean;
   answers: boolean;
   queue: Uint8Array[];
+  /** The output offset after each queued item. */
+  ends: number[];
+  /** The offset after the last item fully delivered. */
+  lastEnd: number;
   queued: number;
   pump?: Promise<void>;
   /** Resolves once the replay, if any, is queued ahead of live output. */
@@ -165,6 +178,10 @@ class Pty {
   readonly command: string | null;
   readonly cwd: string;
   readonly startedAt = new Date();
+  /** Who started it, as PtySessionInfo.owner says. */
+  owner: string | null = null;
+  /** Bytes the program has written so far. */
+  #emitted = 0;
   readonly exited: Promise<PtyExit>;
   #process: Bun.Subprocess;
   #terminal: Bun.Terminal;
@@ -242,6 +259,7 @@ class Pty {
   get title() { return this.#title; }
   get size() { return { cols: this.#screen.cols, rows: this.#screen.rows }; }
   get viewers() { return [...this.#viewers].filter((viewer) => viewer.stream).length; }
+  get outputBytes() { return this.#emitted; }
 
   write(data: string | Uint8Array): void {
     ptyInputSchema.parse(data);
@@ -320,9 +338,11 @@ class Pty {
     this.#live();
     if (this.#viewers.size >= MAX_VIEWERS) throw new Error("Too many viewers are attached to this PTY session.");
     let ready!: () => void;
+    // The replay shows exactly the output received before this viewer was added.
+    const at = this.#emitted;
     const viewer: Viewer = {
       // Parameters are released after the call returns; keep our own reference.
-      sink: sink.dup?.() ?? sink, stream, answers, owner, queue: [], queued: 0,
+      sink: sink.dup?.() ?? sink, stream, answers, owner, queue: [], ends: [], lastEnd: at, queued: 0,
       ready: new Promise((resolve) => { ready = resolve; }), paused: replay, gone: false,
     };
     this.#viewers.add(viewer);
@@ -333,6 +353,7 @@ class Pty {
         if (!viewer.gone) {
           const data = encoder.encode(redraw(this.#screen, this.#serializer));
           viewer.queue.unshift(data);
+          viewer.ends.unshift(at);
           viewer.queued += data.length;
           viewer.paused = false;
           viewer.pump ??= this.#drain(viewer);
@@ -349,6 +370,7 @@ class Pty {
     if (viewer.gone) return;
     viewer.gone = true;
     viewer.queue = [];
+    viewer.ends = [];
     viewer.queued = 0;
     this.#viewers.delete(viewer);
     if (viewer.owner) this.hangUp();
@@ -411,10 +433,12 @@ class Pty {
 
   #push(data: Uint8Array) {
     if (this.#error) return;
+    this.#emitted += data.length;
     this.#screen.write(data, this.#waiters.size ? () => { for (const waiter of [...this.#waiters]) waiter.check(); } : undefined);
     for (const viewer of this.#viewers) {
       if (!viewer.stream || viewer.gone) continue;
       viewer.queue.push(data);
+      viewer.ends.push(this.#emitted);
       viewer.queued += data.length;
       if (viewer.queued > MAX_PTY_BACKLOG_BYTES) this.#lose(viewer, "PTY output backlog exceeded; the caller stopped reading.");
       else if (!viewer.paused) viewer.pump ??= this.#drain(viewer);
@@ -425,6 +449,7 @@ class Pty {
   #lose(viewer: Viewer, reason: string) {
     if (viewer.gone) return;
     viewer.queue = [];
+    viewer.ends = [];
     viewer.queued = 0;
     if (viewer.owner) {
       // The owner's sink still receives exit() with the reason.
@@ -440,6 +465,7 @@ class Pty {
     if (viewer.gone) return;
     viewer.gone = true;
     viewer.queue = [];
+    viewer.ends = [];
     viewer.queued = 0;
     this.#viewers.delete(viewer);
     // Tell the sink before releasing its stub: a released stub cannot be called.
@@ -454,11 +480,14 @@ class Pty {
       // Coalesce small reads so a fast program does not cost one round trip per read.
       const chunks: Uint8Array[] = [];
       let length = 0;
+      let end = viewer.lastEnd;
       while (viewer.queue.length && length + viewer.queue[0]!.length <= PTY_CHUNK_BYTES) {
         length += viewer.queue[0]!.length;
         chunks.push(viewer.queue.shift()!);
+        end = viewer.lastEnd = viewer.ends.shift()!;
       }
       if (!chunks.length) {
+        // Part of one large item: the offset moves only once the whole item is delivered.
         const first = viewer.queue[0]!;
         chunks.push(first.subarray(0, PTY_CHUNK_BYTES));
         viewer.queue[0] = first.subarray(PTY_CHUNK_BYTES);
@@ -466,7 +495,7 @@ class Pty {
       }
       viewer.queued -= length;
       try {
-        await viewer.sink.output(chunks.length === 1 ? chunks[0]! : Buffer.concat(chunks));
+        await viewer.sink.output(chunks.length === 1 ? chunks[0]! : Buffer.concat(chunks), end);
       } catch {
         this.#lose(viewer, "The caller stopped receiving PTY output.");
       }
@@ -646,6 +675,7 @@ function describe(name: string, pty: Pty): PtySessionInfo {
   return {
     name, command: pty.command, cwd: pty.cwd, pid: pty.pid, ...pty.size, title: pty.title,
     startedAt: pty.startedAt.toISOString(), running: !pty.exit, exit: pty.exit, viewers: pty.viewers,
+    outputBytes: pty.outputBytes, owner: pty.owner,
   };
 }
 
@@ -656,12 +686,13 @@ function describe(name: string, pty: Pty): PtySessionInfo {
 export class PtyRegistry {
   #sessions = new Map<string, Pty>();
 
-  start(name: string, options: PtySessionOptions = {}): Pty {
+  start(name: string, options: PtySessionOptions = {}, owner: string | null = null): Pty {
     sessionNameSchema.parse(name);
     const parsed = programOptionsSchema.parse(options);
     if (this.#sessions.has(name)) throw new Error(`A PTY session named ${name} already exists. Kill it first.`);
     if (this.#sessions.size >= MAX_NAMED_PTYS) throw new Error("Too many named PTY sessions; kill finished ones first.");
     const pty = new Pty(parsed);
+    pty.owner = owner;
     this.#sessions.set(name, pty);
     return pty;
   }

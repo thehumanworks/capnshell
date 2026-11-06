@@ -163,9 +163,13 @@ export function daemonTarget(statePath?: string, cwd?: string): McpTarget {
         },
         get lost() { return lost; },
         async peer(requested) {
-          const ids = (await connection.controller.peers()).map((peer) => peer.id);
+          const connected = await connection.controller.peers();
+          const ids = connected.map((peer) => peer.id);
           if (requested !== undefined) {
             if (ids.includes(requested)) return requested;
+            // A paired device's name selects its standing link to the daemon; a command's one-off connection offers nothing.
+            const named = connected.find((peer) => peer.peer?.name === requested && peer.peer.daemon);
+            if (named) return named.id;
             throw new Error(`Unknown peer ${requested}. ${ids.length ? `Connected peers: ${ids.join(", ")}.` : "No peers are connected to the daemon."}`);
           }
           if (ids.length === 1) return ids[0]!;

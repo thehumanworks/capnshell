@@ -300,7 +300,8 @@ async function checked(host: Host): Promise<Host> {
       if (error instanceof TypeError || /is not a function/.test(errorMessage(error))) {
         throw new Error(`${host.label} runs an older cns without file operations; update cns there.`);
       }
-      throw error;
+      // A paired device that grants no file access has them all the same: bash and ! still work, and the file tools say what is missing.
+      if (!/^Permission denied: files not granted/.test(errorMessage(error))) throw error;
     }
     return host;
   } catch (error) {
@@ -336,6 +337,40 @@ export async function connectUrl(target: Extract<Target, { kind: "url" }>, signa
     async fork() {
       const fork = await forkShell(shell);
       if (!fork) throw new Error(`${target.url} runs a cns without fork; update it.`);
+      return fork;
+    },
+  });
+  shell.onRpcBroken((error) => host.markLost(errorMessage(error) || "the connection closed"));
+  return checked(host);
+}
+
+/**
+ * Connect to a paired device over an encrypted link, at the first saved address that
+ * answers as that device. Pi offers it nothing but the handshake, and the device's own
+ * grants decide what Pi's tools may do there.
+ */
+export async function connectPaired(target: Extract<Target, { kind: "paired" }>, signal: AbortSignal): Promise<Host> {
+  const { loadIdentity } = await import("../src/identity.js");
+  const { connectFirst, rpcSession } = await import("../src/secure.js");
+  const identity = loadIdentity();
+  if (!identity) throw new Error(`This machine has no cns identity, so it cannot be paired with ${target.name}. Pair it first with cns pair.`);
+  const { channel } = await connectFirst(target.addresses, identity, { expect: target.publicKey, signal });
+  const shell = rpcSession<ShellApi>(channel, new RefusingShell());
+  const release = () => {
+    shell[Symbol.dispose]();
+    channel.close("Pi detached");
+  };
+  let info: ShellInfo;
+  try { info = await withTimeout(plain(shell.info()), target.name); }
+  catch (error) {
+    release();
+    throw error;
+  }
+  const host = new Host(target, info, shell, {
+    release,
+    async fork() {
+      const fork = await forkShell(shell);
+      if (!fork) throw new Error(`${target.name} runs a cns without fork; update it.`);
       return fork;
     },
   });
