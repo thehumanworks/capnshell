@@ -81,10 +81,16 @@ export interface Step {
 /** An ephemeral key-exchange public key is 32 bytes. */
 export const KX_BYTES = 32;
 
-function transcript(initiatorNonce: Buffer, responderNonce: Buffer, initiatorKey: PublicKey, responderKey: PublicKey, initiatorKx: Uint8Array, responderKx: Uint8Array): Buffer {
+/**
+ * What both signatures cover: the protocol, both nonces, both identity keys, both
+ * ephemeral key-exchange keys, and what the initiator asked for (its link mode and the
+ * invite it is pairing with), so none of it can be changed in flight.
+ */
+function transcript(initiatorNonce: Buffer, responderNonce: Buffer, initiatorKey: PublicKey, responderKey: PublicKey, initiatorKx: Uint8Array, responderKx: Uint8Array, mode: LinkMode, invite: string | undefined): Buffer {
   return createHash("sha256").update("cns-auth-2").update(initiatorNonce).update(responderNonce)
     .update(publicKeyBytes(initiatorKey)).update(publicKeyBytes(responderKey))
-    .update(initiatorKx).update(responderKx).digest();
+    .update(initiatorKx).update(responderKx)
+    .update(`\0mode=${mode}\0invite=${invite ?? ""}\0`).digest();
 }
 function kxBytes(value: Uint8Array): Uint8Array {
   if (value.length !== KX_BYTES) throw new Error("A key-exchange key is 32 bytes.");
@@ -100,6 +106,10 @@ function parse(text: string): Message {
   try { value = JSON.parse(text); } catch { value = undefined; }
   if (typeof value !== "object" || value === null || Array.isArray(value) || typeof (value as { t?: unknown }).t !== "string") {
     throw new AuthError("protocol", "The peer did not start with an authentication handshake. It may run an older cns, or a browser.");
+  }
+  const version = (value as { t: string; v?: unknown }).t === "hello" ? (value as { v?: unknown }).v : AUTH_VERSION;
+  if (version !== AUTH_VERSION) {
+    throw new AuthError("protocol", `The other device speaks pairing protocol ${typeof version === "number" ? version : "unknown"}, this one ${AUTH_VERSION}. Update cns on both devices.`);
   }
   const parsed = messageSchema.safeParse(value);
   if (!parsed.success) throw new AuthError("protocol", "The peer sent an invalid handshake message.");
@@ -142,7 +152,7 @@ export class Initiator {
         throw new AuthError("identity-changed", "The peer's identity is not the one saved for it. Pair with it again if the device was replaced.");
       }
       const peerKx = Buffer.from(message.kx, "base64url");
-      const base = transcript(this.#nonce, Buffer.from(message.nonce, "base64url"), this.#identity.publicKey, message.key, this.#kx, peerKx);
+      const base = transcript(this.#nonce, Buffer.from(message.nonce, "base64url"), this.#identity.publicKey, message.key, this.#kx, peerKx, this.#options.mode ?? "client", this.#options.invite?.id);
       if (!verify(message.key, challenge("responder", base), Buffer.from(message.sig, "base64url"))) throw new AuthError("protocol", "The peer could not prove its identity.");
       this.#base = base;
       this.#peer = message.key;
@@ -193,7 +203,7 @@ export class Responder {
       if (message.t !== "hello" || message.sig !== undefined) return this.#refuse("protocol", "The peer sent an invalid handshake message.");
       if (message.invite !== undefined && !this.#options.secretFor?.(message.invite)) return this.#refuse("refused", "Unknown or expired invite.");
       const peerKx = Buffer.from(message.kx, "base64url");
-      const base = transcript(Buffer.from(message.nonce, "base64url"), this.#nonce, message.key, this.#identity.publicKey, peerKx, this.#kx);
+      const base = transcript(Buffer.from(message.nonce, "base64url"), this.#nonce, message.key, this.#identity.publicKey, peerKx, this.#kx, message.mode ?? "client", message.invite);
       this.#base = base;
       this.#peer = message.key;
       this.#peerKx = peerKx;

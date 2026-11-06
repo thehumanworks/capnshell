@@ -70,7 +70,7 @@ function limitCalls(open: (signal: AbortSignal) => Promise<Link>): (signal: Abor
  */
 export function listenerTarget(url: string, cwd?: string, expect?: { name: string; publicKey: string; addresses: string[] }): McpTarget {
   return {
-    label: expect ? `${expect.name} (${url})` : url,
+    label: expect ? expect.name : url,
     cwd,
     open: limitCalls(async (signal) => {
       // A paired device: prove this device's identity and require the saved one on the other end.

@@ -26,7 +26,7 @@ async function handshake(initiator: InitiatorOptions, responder: ResponderOption
   }
 }
 
-test("paired devices authenticate each other in three messages", async () => {
+test("paired devices authenticate each other in four messages", async () => {
   const seen: string[] = [];
   const peer = await handshake({ expect: studio.publicKey }, { authorize: (key) => { seen.push(key); return undefined; } });
   assert.equal(peer, studio.publicKey);

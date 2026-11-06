@@ -16,8 +16,13 @@ import type { Identity, PublicKey } from "./identity.js";
  * Nothing in this file implements a cipher; it composes libsodium's constructions.
  *
  * Wire after the handshake, as binary WebSocket messages:
- *   each side -> its secretstream header (24 bytes)
+ *   each side -> its secretstream header (24 bytes), then a heartbeat record at once
  *   then      -> records: secretstream(kind byte + payload)
+ * A side is open only once the other's first record has opened under the derived keys,
+ * which confirms that both sides hold them.
+ *
+ * Close frames travel outside the encryption, so the channel sends only fixed reasons
+ * and keeps the details for `done`.
  */
 
 /** How long a device has to finish authenticating. */
@@ -26,7 +31,7 @@ export const HANDSHAKE_MS = 10_000;
 export const HEARTBEAT_MS = 15_000;
 /** A link that delivers nothing authenticated for this long is closed as lost. */
 export const LINK_TIMEOUT_MS = 45_000;
-/** Cap'n Web messages travel in records of at most this many bytes, which every relay accepts. */
+/** Cap'n Web messages travel in records carrying at most this many bytes each; a record adds 18 bytes. */
 export const FRAGMENT_BYTES = 64 * 1024;
 /** A reassembled Cap'n Web message may be at most this large. */
 export const MAX_MESSAGE_BYTES = 32 * 1024 * 1024;
@@ -73,7 +78,7 @@ export class SecureChannel implements RpcTransport {
   #auth: Initiator | Responder;
   #kx: { publicKey: Uint8Array; privateKey: Uint8Array };
   #mode: LinkMode;
-  #phase: "auth" | "header" | "open" | "closed" = "auth";
+  #phase: "auth" | "header" | "confirm" | "open" | "closed" = "auth";
   #established?: Established;
   #rx?: Uint8Array;
   #push?: number;
@@ -123,6 +128,8 @@ export class SecureChannel implements RpcTransport {
   }
 
   get established(): Established | undefined { return this.#established; }
+  /** Read the phase afresh, after an await may have changed it. */
+  #closed(): boolean { return this.#phase === "closed"; }
   get open(): boolean { return this.#phase === "open"; }
 
   /** Hand the channel a message the socket received. Messages are processed in order. */
@@ -138,7 +145,10 @@ export class SecureChannel implements RpcTransport {
     this.#finish(new AuthError("closed", reason), reason);
   }
 
-  /** Close the channel and its socket. */
+  /**
+   * Close the channel and its socket. `reason` goes to the other side in the clear, so
+   * pass a fixed phrase, never text from the other side or from an error.
+   */
   close(reason = "Connection ended", code = 1000): void {
     if (this.#phase === "closed") return;
     this.#finish(new AuthError("closed", reason), reason);
@@ -166,8 +176,12 @@ export class SecureChannel implements RpcTransport {
     return new Promise((resolve, reject) => this.#waiters.push({ resolve, reject }));
   }
 
+  /** Cap'n Web gave up on the session. Its reason stays here: close frames are not encrypted. */
   abort(reason: unknown): void {
-    this.close(reason instanceof Error ? reason.message : "The RPC session ended.", 1011);
+    if (this.#phase === "closed") return;
+    const detail = reason instanceof Error ? reason.message : "The RPC session ended.";
+    this.#finish(new AuthError("closed", detail), detail);
+    try { this.#wire.close(1011, "RPC session ended"); } catch { /* Already closed. */ }
   }
 
   // ---- internals ----
@@ -191,9 +205,11 @@ export class SecureChannel implements RpcTransport {
       try { step = this.#role === "initiator" ? (this.#auth as Initiator).receive(data) : await (this.#auth as Responder).receive(data); }
       catch (error) {
         const refusal = refusalFor(error);
-        if (refusal) this.#send(refusal);
+        if (refusal && !this.#closed()) this.#send(refusal);
         throw error;
       }
+      // The channel may have closed while the responder decided; then nothing more is sent.
+      if (this.#closed()) return;
       if (step.send) this.#send(step.send);
       if (step.peer && step.peerKx) this.#keys(step);
       return;
@@ -205,6 +221,23 @@ export class SecureChannel implements RpcTransport {
       if (bytes.length !== sodium.crypto_secretstream_xchacha20poly1305_HEADERBYTES) throw new AuthError("protocol", "The peer sent an invalid stream header.");
       this.#pull = sodium.crypto_secretstream_xchacha20poly1305_init_pull(bytes, this.#rx!) as unknown as number;
       this.#rx!.fill(0);
+      this.#phase = "confirm";
+      return;
+    }
+    if (this.#phase !== "open" && this.#phase !== "confirm") return;
+    let opened: { message: Uint8Array; tag: number } | false;
+    try { opened = sodium.crypto_secretstream_xchacha20poly1305_pull(this.#pull as never, bytes, null); }
+    catch { opened = false; }
+    if (!opened || !opened.message.length) {
+      throw this.#phase === "confirm"
+        ? new AuthError("protocol", "The other side does not hold this connection's keys; the link was closed.")
+        : new Error("A message on the secure link failed authentication; the link was closed.");
+    }
+    const kind = opened.message[0];
+    const payload = opened.message.subarray(1);
+    if (this.#phase === "confirm") {
+      // The first record proves the other side derived the same keys: only then is the channel open.
+      if (kind !== PING) throw new AuthError("protocol", "The peer sent an invalid first record.");
       this.#phase = "open";
       clearTimeout(this.#handshakeTimer);
       this.#heartbeat = setInterval(() => this.#tick(), Math.max(50, Math.floor(this.#timing.heartbeatMs / 3)));
@@ -212,13 +245,6 @@ export class SecureChannel implements RpcTransport {
       this.#resolveReady(this.#established!);
       return;
     }
-    if (this.#phase !== "open") return;
-    let opened: { message: Uint8Array; tag: number } | false;
-    try { opened = sodium.crypto_secretstream_xchacha20poly1305_pull(this.#pull as never, bytes, null); }
-    catch { opened = false; }
-    if (!opened || !opened.message.length) throw new Error("A message on the secure link failed authentication; the link was closed.");
-    const kind = opened.message[0];
-    const payload = opened.message.subarray(1);
     if (kind === PING) return;
     if (kind !== MORE && kind !== LAST) throw new Error("The peer sent an unknown record on the secure link.");
     this.#fragmentBytes += payload.length;
@@ -246,6 +272,8 @@ export class SecureChannel implements RpcTransport {
     this.#established = { peer: step.peer!, ...step.invite ? { invite: step.invite } : {}, mode: this.#role === "responder" ? step.mode ?? "client" : this.#mode };
     this.#phase = "header";
     this.#send(pushed.header);
+    // Key confirmation: a record only the holder of these keys could have made.
+    this.#record(PING, new Uint8Array(0));
   }
 
   #record(kind: number, payload: Uint8Array) {
@@ -276,8 +304,10 @@ export class SecureChannel implements RpcTransport {
   #fail(error: unknown) {
     if (this.#phase === "closed") return;
     const reason = error instanceof Error ? error.message : String(error);
+    const authenticating = this.#phase === "auth" || this.#phase === "header" || this.#phase === "confirm";
     this.#finish(error instanceof Error ? error : new Error(reason), reason);
-    try { this.#wire.close(1008, reason); } catch { /* Already closed. */ }
+    // The details stay here; the frame says only what kind of failure it was.
+    try { this.#wire.close(1008, authenticating ? "Authentication failed" : "Protocol error"); } catch { /* Already closed. */ }
   }
 
   #finish(error: Error, reason: string) {
@@ -351,7 +381,8 @@ export async function connectSecure(url: string, identity: Identity, options: In
     return { channel, peer };
   } catch (error) {
     channel.close("Authentication failed");
-    throw error;
+    // A timeout or cancellation is reported as itself, not as the closing it caused.
+    throw signal.aborted && signal.reason instanceof Error ? signal.reason : error;
   } finally {
     signal.removeEventListener("abort", abort);
   }
@@ -373,6 +404,7 @@ export async function connectFirst(addresses: readonly string[], identity: Ident
   if (!addresses.length) throw new Error("No saved address. Add one with cns peer address NAME ws://HOST:PORT.");
   let failure: unknown;
   for (const [index, url] of addresses.entries()) {
+    options.signal?.throwIfAborted();
     const attempt = new AbortController();
     const outer = options.signal;
     const relay = () => attempt.abort(outer!.reason);

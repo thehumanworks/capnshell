@@ -39,12 +39,15 @@ export function terminateSocket(socket: WebSocket) {
   else socket.close();
 }
 
-/** Close a socket politely, then forcibly if the peer does not answer. */
-/** A close reason that fits a WebSocket close frame: at most 123 bytes of UTF-8. */
+/**
+ * A close reason that fits a WebSocket close frame: at most 123 bytes of UTF-8, cut
+ * at a whole character. Only a bounded prefix is examined, so a huge reason costs
+ * no more than a short one.
+ */
 export function closeReason(reason: string): string {
-  let text = reason;
-  while (Buffer.byteLength(text) > 123) text = text.slice(0, -1);
-  return text;
+  const characters = Array.from(String(reason).slice(0, 123));
+  while (Buffer.byteLength(characters.join("")) > 123) characters.pop();
+  return characters.join("");
 }
 
 /**

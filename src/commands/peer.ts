@@ -126,9 +126,11 @@ export async function startPeer(config: PeerConfig): Promise<void> {
   function remove(session: Session) {
     if (!sessions.delete(session.id)) return;
     clearTimeout(session.timer);
+    // Close first: releasing the stub afterwards then finds the session already ended
+    // rather than reporting an aborted one to the other side.
+    session.close("Shell session ended");
     session.local[Symbol.dispose]();
     session.remote[Symbol.dispose]();
-    session.close("Shell session ended");
     if (!stopping) {
       announce(`Disconnected from ${describe(session)}.`);
       void input?.refresh();
