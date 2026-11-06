@@ -6,7 +6,7 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { execa } from "execa";
 import { commandExitCode } from "./commands/peer.js";
-import { PROJECT_ROOT, unusedPort } from "./test-support.js";
+import { LOOPBACK, PROJECT_ROOT, unusedPort } from "./test-support.js";
 
 test("shutdown during daemon startup cleans up subsequently acquired control resources", { timeout: 15000 }, async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "cns-startup-"));
@@ -19,7 +19,7 @@ test("shutdown during daemon startup cleans up subsequently acquired control res
     import { startPeer } from ${JSON.stringify(pathToFileURL(path.join(PROJECT_ROOT, "src/commands/peer.ts")).href)};
     import { parseOptions } from ${JSON.stringify(pathToFileURL(path.join(PROJECT_ROOT, "src/options.ts")).href)};
     process.env.CNS_DAEMON_CHILD = '1';
-    const task = startPeer(parseOptions(${JSON.stringify(["listen", "--no-repl", "--bind", "::1", "--port", port, "--state", state])}));
+    const task = startPeer(parseOptions(${JSON.stringify(["listen", "--no-repl", "--bind", LOOPBACK, "--port", port, "--state", state])}));
     process.emit('SIGTERM');
     await task;
   `;

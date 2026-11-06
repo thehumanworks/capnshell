@@ -376,7 +376,7 @@ bun run test
 bun run test:compiled
 ```
 
-The Bun version is pinned, and a pre-commit hook rejects changes that break the pin. Run this once in a checkout to install it, with the tools in `mise.toml`:
+Tests bind the IPv6 loopback address where the machine has one and `127.0.0.1` otherwise, so they also run in containers without IPv6. The Bun version is pinned, and a pre-commit hook rejects changes that break the pin. Run this once in a checkout to install it, with the tools in `mise.toml`:
 
 ```sh
 mise install
