@@ -54,8 +54,8 @@ export interface PeerConfig {
   oneWay: boolean;
   /** Accept only paired devices, after they authenticate; `cns up` runs such a listener. */
   paired: boolean;
-  /** The paired device this connection must reach, from a saved peer name. */
-  expect?: { name: string; publicKey: string; outgoing: Permission[] };
+  /** The paired device this connection must reach, from a saved peer name, and every address saved for it. */
+  expect?: { name: string; publicKey: string; outgoing: Permission[]; addresses: string[] };
   daemon: boolean;
   state?: string;
   /** The shell string for run; optional for tty, which otherwise starts a login shell. */
@@ -292,7 +292,7 @@ export interface McpConfig {
   /** The listener whose peer the tools use, unless they use the daemon's peers. */
   url: string;
   /** The paired device the listener must be, when the target was a paired name. */
-  expect?: { name: string; publicKey: string };
+  expect?: { name: string; publicKey: string; addresses: string[] };
   daemon: boolean;
   state?: string;
   cwd?: string;
@@ -335,7 +335,7 @@ function resolveMcpOptions(command: Command, destination: string | undefined): M
   if (destination !== undefined && !/^wss?:\/\//i.test(destination)) {
     const resolved = resolvePeer(destination);
     destination = resolved.url;
-    expect = resolved.peer && { name: resolved.peer.name, publicKey: resolved.peer.publicKey };
+    expect = resolved.peer && { name: resolved.peer.name, publicKey: resolved.peer.publicKey, addresses: resolved.peer.addresses };
   }
   return {
     url: destination !== undefined ? peerUrl(destination) : endpointUrl(bind, port), ...expect ? { expect } : {}, daemon, state, cwd,

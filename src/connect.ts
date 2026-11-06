@@ -39,9 +39,25 @@ export function terminateSocket(socket: WebSocket) {
   else socket.close();
 }
 
-/** Close a socket politely, then forcibly if the peer does not answer. */
-export function closeSocket(socket: WebSocket, reason = "Connection ended") {
-  socket.close(1000, reason);
+/**
+ * A close reason that fits a WebSocket close frame: at most 123 bytes of UTF-8, cut
+ * at a whole character. Only a bounded prefix is examined, so a huge reason costs
+ * no more than a short one.
+ */
+export function closeReason(reason: string): string {
+  const characters = Array.from(String(reason).slice(0, 123));
+  while (Buffer.byteLength(characters.join("")) > 123) characters.pop();
+  return characters.join("");
+}
+
+/**
+ * Close a socket politely, then forcibly if the peer does not answer. Clients may only
+ * send 1000 or 4000-4999, so another code is sent as 4000 plus its last three digits.
+ */
+export function closeSocket(socket: WebSocket, reason = "Connection ended", code = 1000) {
+  if (socket.readyState === WebSocket.CLOSED) return;
+  try { socket.close(code === 1000 || (code >= 3000 && code <= 4999) ? code : 4000 + (code % 1000), closeReason(reason)); }
+  catch { terminateSocket(socket); return; }
   const timer = setTimeout(() => terminateSocket(socket), 750);
   timer.unref();
   socket.addEventListener("close", () => clearTimeout(timer), { once: true });

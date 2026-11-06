@@ -1,11 +1,9 @@
 import os from "node:os";
 import readline from "node:readline";
-import { newWebSocketRpcSession } from "capnweb";
 import { AuthError } from "../auth.js";
-import { closeSocket, openSocket } from "../connect.js";
+import { connectFirst, connectSecure, rpcSession, type SecureChannel } from "../secure.js";
 import { errorMessage } from "../errors.js";
 import { ensureIdentity, fingerprint as fingerprintOf, identityPath, loadIdentity } from "../identity.js";
-import { authenticateClient } from "../link.js";
 import { endpointUrl, isLoopback } from "../options.js";
 import { decisionSchema, decodeInvite, DEFAULT_INVITE_MS, MAX_INVITE_MS, suggestedName, type Decision, type Invite, type PairingApi, type Proposal } from "../pairing.js";
 import { peerFileExists, peerNamePattern, removeAlias, validatePeerUrl } from "../aliases.js";
@@ -193,7 +191,7 @@ async function acceptInvite(text: string, options: PairOptions): Promise<void> {
   const offers = parseGrants(options.grant, []);
   let prompt: Prompt | undefined;
   let control: ControlConnection | undefined;
-  let socket: WebSocket | undefined;
+  let channel: SecureChannel | undefined;
   try {
     prompt = prompter(options.yes);
     const { identity, created } = ensureIdentity();
@@ -222,27 +220,15 @@ async function acceptInvite(text: string, options: PairOptions): Promise<void> {
         if (status.paired) addresses = status.addresses;
       } catch { /* Not a daemon this device can use; pair without dialing back. */ }
     }
-    const cancelled = new AbortController();
-    let failure: unknown;
-    for (const address of invite.addresses) {
-      try {
-        const candidate = await openSocket(address, cancelled.signal);
-        await authenticateClient(candidate, identity, { expect: invite.key, invite: { id: invite.id, secret: invite.secret } });
-        socket = candidate;
-        break;
-      } catch (error) {
-        failure = error;
-        if (error instanceof AuthError && error.code !== "closed") break;
-      }
+    try { ({ channel } = await connectFirst(invite.addresses, identity, { expect: invite.key, invite: { id: invite.id, secret: invite.secret } })); }
+    catch (error) {
+      process.exitCode = error instanceof AuthError && error.code !== "closed" ? 3 : 1;
+      throw error;
     }
-    if (!socket) {
-      process.exitCode = failure instanceof AuthError && failure.code !== "closed" ? 3 : 1;
-      throw failure instanceof Error ? failure : new Error("Could not reach the inviting device at any of its addresses.");
-    }
-    const remote = newWebSocketRpcSession<PairingApi>(socket, new RefusingShell());
+    const remote = rpcSession<PairingApi>(channel, new RefusingShell());
     console.error("Connected. Waiting for the other device to confirm...");
-    const open = socket;
-    const timer = setTimeout(() => closeSocket(open, "Pairing timed out"), PROPOSAL_WAIT_MS);
+    const open = channel;
+    const timer = setTimeout(() => open.close("Pairing timed out"), PROPOSAL_WAIT_MS);
     let answer: unknown;
     try { answer = await plain(remote.propose({ name: suggestedName(os.hostname()), requests, offers, ...addresses?.length ? { addresses } : {} })); }
     catch (error) {
@@ -265,7 +251,7 @@ async function acceptInvite(text: string, options: PairOptions): Promise<void> {
     console.log(`Paired with ${name} (${peerFingerprint}). This device may use its: ${describeGrants(decision.granted ?? [])}. It may use this device's: ${describeGrants(offers)}.`);
     if (control && pairedDaemonRuns) await control.remote.dial(name);
   } finally {
-    if (socket) closeSocket(socket);
+    channel?.close();
     control?.close();
     prompt?.close();
   }
@@ -339,19 +325,18 @@ export async function doctor(name: string, options: DoctorOptions): Promise<void
       // The deadline covers the whole attempt: connecting, authenticating and the first call.
       const timer = setTimeout(() => cancelled.abort(new Error("Timed out after 10 s.")), 10_000);
       try {
-        const socket = await openSocket(address, cancelled.signal);
-        const hangUp = () => closeSocket(socket, "Timed out");
+        const { channel } = await connectSecure(address, identity, { expect: entry.publicKey, signal: cancelled.signal });
+        const hangUp = () => channel.close("Timed out");
         cancelled.signal.addEventListener("abort", hangUp, { once: true });
         try {
-          await authenticateClient(socket, identity, { expect: entry.publicKey });
-          const remote = newWebSocketRpcSession<ShellApi>(socket, new RefusingShell());
+          const remote = rpcSession<ShellApi>(channel, new RefusingShell());
           try {
             const info = await plain(remote.info());
-            attempts.push({ address, result: "ok", detail: printable(`${info.hostname}, ${info.platform}/${info.shell}`) });
+            attempts.push({ address, result: "ok", detail: printable(`${info.hostname}, ${info.platform}/${info.shell}, encrypted`) });
           } finally { remote[Symbol.dispose](); }
         } finally {
           cancelled.signal.removeEventListener("abort", hangUp);
-          closeSocket(socket);
+          channel.close();
         }
       } catch (error) {
         const detail = cancelled.signal.aborted ? "Timed out after 10 s." : printable(errorMessage(error));
