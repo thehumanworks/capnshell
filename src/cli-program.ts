@@ -27,7 +27,13 @@ export function createCli(): Command {
   alias.command("remove <name>").description("Remove a saved peer address")
     .action(async (name: string) => { const { removeAlias } = await import("./aliases.js"); removeAlias(name); console.log(`Removed ${name}.`); });
   alias.command("list").description("List saved peer addresses")
-    .action(async () => { const { listAliases } = await import("./aliases.js"); for (const peer of listAliases()) console.log(`${peer.name}\t${peer.url}`); });
+    .option("--json", "Print a JSON array of { name, url } objects sorted by name, [] when there are none")
+    .action(async (options: { json?: boolean }) => {
+      const { listAliases } = await import("./aliases.js");
+      const peers = listAliases();
+      if (options.json) console.log(JSON.stringify(peers, null, 2));
+      else for (const peer of peers) console.log(`${peer.name}\t${peer.url}`);
+    });
   program.command("attach")
     .description("Attach an interactive console to a local daemon")
     .option("--state <path>", "Local daemon state file")
