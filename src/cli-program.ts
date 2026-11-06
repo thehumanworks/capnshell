@@ -34,6 +34,19 @@ export function createCli(): Command {
       if (options.json) console.log(JSON.stringify(peers, null, 2));
       else for (const peer of peers) console.log(`${peer.name}\t${peer.url}`);
     });
+  program.command("identity")
+    .description("Show this device's identity for pairing, creating it on first use")
+    .option("--json", "Print { publicKey, fingerprint, createdAt, path } as JSON")
+    .action(async (options: { json?: boolean }) => {
+      const { ensureIdentity, identityPath } = await import("./identity.js");
+      const { identity, created } = ensureIdentity();
+      if (options.json) {
+        console.log(JSON.stringify({ publicKey: identity.publicKey, fingerprint: identity.fingerprint, createdAt: identity.createdAt, path: identityPath() }, null, 2));
+        return;
+      }
+      if (created) console.error(`Created this device's identity at ${identityPath()}. Keep the file private; losing it means pairing again.`);
+      console.log(`Fingerprint: ${identity.fingerprint}\nPublic key:  ${identity.publicKey}`);
+    });
   program.command("attach")
     .description("Attach an interactive console to a local daemon")
     .option("--state <path>", "Local daemon state file")

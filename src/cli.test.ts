@@ -61,6 +61,25 @@ test("compiled CLI runs outside its checkout without a JS runtime on PATH", { sk
   assert.equal(result.exitCode, 0);
 });
 
+test("the device identity is created once and reported consistently", { skip: process.platform === "win32" }, async (t) => {
+  const cwd = await temporaryDirectory(t);
+  const env = { ...cliEnvironment(), CNS_CONFIG_DIR: path.join(cwd, "config") };
+  await mkdir(env.CNS_CONFIG_DIR, { mode: 0o700 });
+  const call = (args: string[]) => { const invocation = cliInvocation(args); return execa(invocation.file, invocation.args, { cwd, env }); };
+  const first = await call(["identity"]);
+  assert.match(first.stderr, /Created this device's identity/);
+  const [fingerprintLine, keyLine] = first.stdout.split("\n");
+  assert.match(fingerprintLine!, /^Fingerprint: [a-z2-7]{4}(-[a-z2-7]{4}){5}$/);
+  assert.match(keyLine!, /^Public key:  [A-Za-z0-9_-]{43}$/);
+  const second = await call(["identity", "--json"]);
+  assert.equal(second.stderr, "");
+  const json = JSON.parse(second.stdout);
+  assert.deepEqual(Object.keys(json), ["publicKey", "fingerprint", "createdAt", "path"]);
+  assert.equal(`Public key:  ${json.publicKey}`, keyLine);
+  assert.equal(`Fingerprint: ${json.fingerprint}`, fingerprintLine);
+  assert.equal(json.path, path.join(env.CNS_CONFIG_DIR, "identity.json"));
+});
+
 test("saved peer addresses persist across CLI invocations", { skip: process.platform === "win32" }, async (t) => {
   const cwd = await temporaryDirectory(t);
   const env = { ...cliEnvironment(), CNS_CONFIG_DIR: path.join(cwd, "config") };

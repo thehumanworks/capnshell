@@ -62,6 +62,17 @@ cns peer remove studio
 
 `peer list` prints one `name<TAB>url` line per alias, sorted by name. `peer list --json` prints the same entries as a JSON array of `{ "name", "url" }` objects in that order, `[]` when there are none, for scripts and agents; errors are reported the same way as for the text listing, on stderr with a failing exit status and nothing on stdout. The alias is an address-book entry, not an authenticated identity. Peer connections remain unauthenticated; use them only on trusted networks. Saved aliases are local to this user in `~/.cns/peers` (or `$CNS_CONFIG_DIR/peers`). Existing aliases cannot be replaced by `add`: remove one first to change its address. Saved addresses cannot include paths or query strings; use an explicit URL when those are needed. Missing aliases fail instead of falling back to a default. The configuration directory and its entire path must be trusted and protected by the user from modification by other users; custom `CNS_CONFIG_DIR` directories must already exist. On Unix, untrusted owners and shared-writable ancestors other than root-owned sticky directories are rejected. These pathname checks are best-effort safeguards, not a filesystem security boundary or a guarantee against path races. Saved aliases are unavailable on Windows until filesystem ACL checks are supported; use explicit URLs there. These checks do not protect against a process running as the same user. `--peer` cannot be combined with a URL or endpoint flags. This is separate from the console's connection IDs and does not rename connected peers or change MCP and Pi selection.
 
+## Device identity
+
+Pairing (see [docs/paired-peers.md](docs/paired-peers.md)) identifies devices by a long-lived Ed25519 key pair, created on first use:
+
+```sh
+cns identity          # Fingerprint: k7qm-3h2x-...   Public key: ...
+cns identity --json   # { publicKey, fingerprint, createdAt, path }
+```
+
+The key lives in `~/.cns/identity.json` (or `$CNS_CONFIG_DIR/identity.json`), readable only by your user, under the same trusted-path checks as saved peers. The public key is this device's name on the wire; the fingerprint, SHA-256 of the public key in base32, is what people compare when pairing. The file is never replaced: deleting it makes this a new device that every peer must pair with again. Identities are unavailable on Windows until filesystem ACL checks are supported.
+
 ## Multiple peers
 
 Each console can list and select its remote peers:
