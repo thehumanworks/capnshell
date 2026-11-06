@@ -8,6 +8,12 @@ export function createCli(): Command {
     .exitOverride()
     .showHelpAfterError();
   addPeerCommands(program, async (config) => {
+    // A paired device's named session, `main` by default, survives connection loss.
+    if (config.role === "tty" && config.expect && !config.screen && config.command === undefined && (config.attach || config.name === undefined)) {
+      const { attachPaired } = await import("./commands/paired-tty.js");
+      process.exitCode = await attachPaired(config);
+      return;
+    }
     if (config.daemon) {
       const { startDaemon } = await import("./commands/daemon.js");
       const daemon = await startDaemon(config);

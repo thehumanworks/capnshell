@@ -3,7 +3,7 @@
 Status: in progress, 6 November 2026. Base: `main` at `1986d6a` with the address book
 (PR 12), `peer list --json` (PR 18) and scoped handle lifetimes (PR 19). Decisions taken so
 far: `cns up` listens on all interfaces for paired devices; both sides confirm a pairing;
-the relay is a Cloudflare Worker; slices 1 and 2 are merged as PRs 21 and 22; slice 3 (pairing, peers file v2, `cns up`, `cns pair`, `cns peers`, named targets and grant enforcement at the method level) is PR 23; `status`, `doctor`, grant and address changes with live refresh, link deduplication, paired MCP targets and the fixes from PR 23's review are PR 24.
+the relay is a Cloudflare Worker; slices 1 and 2 are merged as PRs 21 and 22; encryption is PR 25, the relay PR 26, and session permissions with reconnecting terminals PR 27; slice 3 (pairing, peers file v2, `cns up`, `cns pair`, `cns peers`, named targets and grant enforcement at the method level) is PR 23; `status`, `doctor`, grant and address changes with live refresh, link deduplication, paired MCP targets and the fixes from PR 23's review are PR 24.
 
 The requirement is **two devices I know of that have paired**. Today `cns` connects a
 listener and a connector, identifies peers by connection IDs such as `p1`, grants

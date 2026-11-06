@@ -4,7 +4,7 @@ import { MessageChannel } from "node:worker_threads";
 import { newMessagePortRpcSession, RpcTarget } from "capnweb";
 import { GrantedShell } from "./granted-shell.js";
 import { expandGrants } from "./peers.js";
-import { ShellApi } from "./shell.js";
+import { PtyRegistry, ShellApi, type PtyExit } from "./shell.js";
 
 const windows = process.platform === "win32";
 
@@ -18,7 +18,7 @@ test("a granted shell allows exactly what was granted and refuses the rest witho
   assert.deepEqual(granted.ptySessions(), []);
   await assert.rejects(async () => { await granted.run("printf x"); }, /Permission denied: shell not granted to laptop/);
   assert.throws(() => granted.fork(), /shell not granted/);
-  assert.throws(() => granted.startPtySession("work", { command: "true" }), /sessions:create, sessions:view, sessions:control, sessions:kill not granted/);
+  assert.throws(() => granted.startPtySession("work", { command: "true" }), /sessions:create not granted/);
   assert.throws(() => granted.ptySession("work"), /sessions:view/);
   assert.deepEqual(shell.ptySessions(), [], "a refused start created nothing");
   const full = new GrantedShell(new ShellApi(), expandGrants(["all"]), "laptop");
@@ -49,4 +49,58 @@ test("grants are enforced over RPC, and closing the view closes the shell behind
   await assert.rejects(async () => { await remote.ptySessions(); }, /sessions:list/);
   const pty = await remote.openPty(new Sink(), { command: "sleep 30" });
   pty[Symbol.dispose]();
+});
+
+test("session handles check viewing, typing and killing separately, and owners keep their own sessions", { skip: windows }, async (t) => {
+  const registry = new PtyRegistry();
+  t.after(() => registry[Symbol.dispose]());
+  const local = new ShellApi(registry);
+  t.after(() => local[Symbol.dispose]());
+  const host = local.startPtySession("host", { command: "printf READY; while IFS= read -r line; do printf 'got:%s\\n' \"$line\"; done" });
+  await host.wait({ text: "READY", timeoutMs: 10000 });
+  const as = (grants: string[], owner = "laptop-fingerprint") => {
+    const shell = new GrantedShell(new ShellApi(registry, { owner }), expandGrants(grants), "laptop", owner);
+    t.after(() => shell[Symbol.dispose]());
+    return shell;
+  };
+
+  // View only: read the screen and watch, but not type, resize or kill.
+  const viewer = as(["sessions:list", "sessions:view"]);
+  assert.equal(viewer.ptySessions()[0]?.owner, null, "a session started on the host has no paired owner");
+  const watched = viewer.ptySession("host");
+  assert.match((await watched.capture()).text, /READY/);
+  assert.throws(() => watched.keys(["x"]), /sessions:control not granted to laptop/);
+  assert.throws(() => watched.resize(100, 40), /sessions:control/);
+  await assert.rejects(async () => { await watched.kill(); }, /sessions:kill/);
+  const output: string[] = [];
+  const sink = { output(data: Uint8Array) { output.push(new TextDecoder().decode(data)); }, exit(_: PtyExit) {} };
+  const before = host.info();
+  const attachment = watched.attach(sink, { cols: 120, rows: 50 });
+  assert.deepEqual([host.info().cols, host.info().rows], [before.cols, before.rows], "a viewer cannot resize the session");
+  assert.throws(() => attachment.write("x"), /sessions:control/);
+  host.keys(["seen", "Enter"]);
+  await host.wait({ text: "got:seen", timeoutMs: 10000 });
+  attachment.detach();
+  assert.throws(() => as(["sessions:list"]).ptySession("host"), /sessions:view not granted/);
+
+  // Control: type, but not kill someone else's session.
+  const typist = as(["sessions:view", "sessions:control"]);
+  typist.ptySession("host").keys(["typed", "Enter"]);
+  assert.equal((await host.wait({ text: "got:typed", timeoutMs: 10000 })).matched, true);
+  await assert.rejects(async () => { await typist.ptySession("host").kill(); }, /sessions:kill not granted/);
+
+  // Create only: the device owns what it starts, so it may view, type into and kill that, and only that.
+  const creator = as(["sessions:create"]);
+  const own = creator.startPtySession("mine", { command: "printf OWN; sleep 30" });
+  assert.equal(own.info().owner, "laptop-fingerprint");
+  assert.equal((await own.wait({ text: "OWN", timeoutMs: 10000 })).matched, true);
+  own.keys(["x"]);
+  assert.throws(() => creator.ptySession("host"), /sessions:view not granted/);
+  const reopened = creator.ptySession("mine");
+  assert.equal((await reopened.kill()).signal, "SIGHUP");
+  assert.deepEqual(local.ptySessions().map((session) => session.name), ["host"]);
+  // Another device with the same grants does not own it.
+  const other = as(["sessions:create"], "studio-fingerprint");
+  other.startPtySession("theirs", { command: "sleep 30" })[Symbol.dispose]();
+  assert.throws(() => creator.ptySession("theirs"), /sessions:view not granted/);
 });

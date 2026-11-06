@@ -114,7 +114,8 @@ export async function startPeer(config: PeerConfig): Promise<void> {
     const entry = findPairedPeer(publicKey);
     if (!entry) throw new AuthError("not-paired", "Not paired with this device.");
     const grants: GrantHolder = { current: entry.grants.incoming };
-    return { local: new GrantedShell(new ShellApi(ptys), grants, entry.name), name: entry.name, grants };
+    const owner = fingerprint(publicKey);
+    return { local: new GrantedShell(new ShellApi(ptys, { owner }), grants, entry.name, owner), name: entry.name, grants };
   }
   const invites = new Map<string, PendingInvite>();
   const links = new Map<string, { stop: () => void; publicKey: PublicKey }>();
@@ -426,7 +427,8 @@ export async function startPeer(config: PeerConfig): Promise<void> {
       }
       attempt = 0;
       const grants: GrantHolder = { current: current.grants.incoming };
-      const local = new GrantedShell(new ShellApi(ptys), grants, name);
+      const owner = fingerprint(current.publicKey);
+      const local = new GrantedShell(new ShellApi(ptys, { owner }), grants, name, owner);
       const remote = rpcSession<ShellApi>(channel, local);
       const session = register({ close: (reason) => channel.close(reason), outbound: true, via: isRelayAddress(url) ? "relay" : "direct" }, local, remote, new URL(url).host, { name, publicKey: current.publicKey, daemon: true });
       session.grants = grants;

@@ -36,8 +36,18 @@ export async function plain<T>(value: PromiseLike<T & { [Symbol.dispose]?(): voi
   finally { result[Symbol.dispose]?.(); }
 }
 
+/** The connection to the executing peer broke while attached. `inFlight` bytes of input may not have arrived. */
+export class ConnectionLost extends Error {
+  constructor(message: string, readonly inFlight: number) {
+    super(message);
+    this.name = "ConnectionLost";
+  }
+}
+
 export interface AttachOptions {
   signal?: AbortSignal;
+  /** Called after each chunk of output is written, with the program's output offset when the peer reports one. */
+  onOutput?: (end: number | undefined) => void;
   /** Print nothing while it runs; return the rendered screen from when it ended. */
   screen?: CaptureOptions;
   /** For named sessions: this byte typed at a local terminal detaches instead of being sent. */
@@ -58,16 +68,19 @@ class OutputSink extends RpcTarget implements PtySink {
   #exit: (result: PtyExit) => void;
   #detached: (reason: string) => void;
   #write: (data: Uint8Array) => Promise<void>;
+  #progress?: (end: number | undefined) => void;
   // Only prototype methods are callable over RPC, so the peer sees just the sink protocol.
-  constructor(write: (data: Uint8Array) => Promise<void>, exit: (result: PtyExit) => void, detached: (reason: string) => void) {
+  constructor(write: (data: Uint8Array) => Promise<void>, exit: (result: PtyExit) => void, detached: (reason: string) => void, progress?: (end: number | undefined) => void) {
     super();
     this.#write = write;
     this.#exit = exit;
     this.#detached = detached;
+    this.#progress = progress;
   }
-  output(data: Uint8Array): Promise<void> {
+  async output(data: Uint8Array, end?: number): Promise<void> {
     if (!(data instanceof Uint8Array)) throw new TypeError("PTY output must be bytes.");
-    return this.#write(data);
+    await this.#write(data);
+    this.#progress?.(typeof end === "number" && Number.isSafeInteger(end) && end >= 0 ? end : undefined);
   }
   exit(result: PtyExit): void { this.#exit(result); }
   detached(reason: string): void { this.#detached(String(reason)); }
@@ -79,7 +92,7 @@ class OutputSink extends RpcTarget implements PtySink {
  * input is forwarded verbatim; its end is not translated into a keystroke, because
  * Ctrl-D would also quit TUIs started with stdin closed.
  */
-export async function attachTerminal(open: OpenPty, options: PtyOptions, { signal, screen, detachKey, alternateScreen }: AttachOptions = {}): Promise<AttachResult> {
+export async function attachTerminal(open: OpenPty, options: PtyOptions, { signal, screen, detachKey, alternateScreen, onOutput }: AttachOptions = {}): Promise<AttachResult> {
   const input = process.stdin;
   const interactive = !!(input.isTTY && process.stdout.isTTY);
   // A local terminal answers queries such as cursor-position reports only when it
@@ -103,7 +116,7 @@ export async function attachTerminal(open: OpenPty, options: PtyOptions, { signa
     // Output still in flight after detaching must not reach the restored screen.
     if (!closed) await new Promise((resolve) => process.stdout.write(translated, resolve));
   };
-  const sink = new OutputSink(write, finish, (reason) => finish({ detached: reason }));
+  const sink = new OutputSink(write, finish, (reason) => finish({ detached: reason }), onOutput);
   // Switch before any output arrives; leaving the alternate screen restores the user's.
   if (local) await new Promise((resolve) => process.stdout.write("\x1b[?1049h", resolve));
   const leave = async () => {
@@ -120,7 +133,9 @@ export async function attachTerminal(open: OpenPty, options: PtyOptions, { signa
     local?.dispose();
     throw error;
   }
-  pty.onRpcBroken?.((error) => failed(new Error(`PTY connection lost: ${error instanceof Error ? error.message : String(error)}`)));
+  // Input handed to the peer whose acknowledgement has not come back yet.
+  let inFlight = 0;
+  pty.onRpcBroken?.((error) => failed(new ConnectionLost(`PTY connection lost: ${error instanceof Error ? error.message : String(error)}`, inFlight)));
 
   const wasRaw = input.isTTY ? input.isRaw : false;
   const restore = () => { if (interactive) input.setRawMode(wasRaw); };
@@ -130,7 +145,10 @@ export async function attachTerminal(open: OpenPty, options: PtyOptions, { signa
   const send = (data: Uint8Array) => {
     writing = writing.then(async () => {
       for (let offset = 0; offset < data.length; offset += MAX_PTY_INPUT_BYTES) {
-        await pty.write(data.subarray(offset, offset + MAX_PTY_INPUT_BYTES));
+        const chunk = data.subarray(offset, offset + MAX_PTY_INPUT_BYTES);
+        inFlight += chunk.length;
+        await pty.write(chunk);
+        inFlight -= chunk.length;
       }
     }).catch(() => { /* The exit or broken-connection path reports the outcome. */ });
     return writing;

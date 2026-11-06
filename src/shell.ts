@@ -99,11 +99,18 @@ export class ShellApi extends RpcTarget {
   #released = Promise.withResolvers<void>();
   /** Set on forks, which close with their parent and cannot fork again. */
   #onClose?: () => void;
+  /** Who named sessions started through this shell belong to; see PtySessionInfo.owner. */
+  #owner: string | null;
 
-  /** Named PTY sessions live in the registry, shared by this process's connections. */
-  constructor(registry = new PtyRegistry()) {
+  /**
+   * Named PTY sessions live in the registry, shared by this process's connections.
+   * `owner` marks the sessions this shell starts, such as with a paired device's
+   * fingerprint. It is set here, never by a caller over RPC.
+   */
+  constructor(registry = new PtyRegistry(), { owner = null }: { owner?: string | null } = {}) {
     super();
     this.#registry = registry;
+    this.#owner = owner;
   }
 
   info(): ShellInfo { return localShellInfo(); }
@@ -284,7 +291,7 @@ export class ShellApi extends RpcTarget {
    */
   startPtySession(name: string, options: PtySessionOptions = {}): NamedPty {
     if (this.#closed) throw new Error("This shell session is closed.");
-    return new NamedPty(this.#registry, name, this.#registry.start(name, options), this.#handles);
+    return new NamedPty(this.#registry, name, this.#registry.start(name, options, this.#owner), this.#handles);
   }
 
   /**
@@ -312,7 +319,7 @@ export class ShellApi extends RpcTarget {
     // One level only, so MAX_FORKS bounds what a connection can hold.
     if (this.#onClose) throw new Error("A forked shell cannot fork; fork the original shell.");
     if (this.#forks.size >= MAX_FORKS) throw new Error("Too many forked shells; release some first.");
-    const fork = new ShellApi(this.#registry);
+    const fork = new ShellApi(this.#registry, { owner: this.#owner });
     fork.#onClose = () => this.#forks.delete(fork);
     this.#forks.add(fork);
     return fork;
