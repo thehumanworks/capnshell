@@ -123,3 +123,21 @@ test("session handles check viewing, typing and killing separately, and owners k
   assert.equal((await killer.ptySession("theirs").kill()).signal, "SIGHUP");
   assert.throws(() => as(["shell"]).ptySession("missing-or-not"), /sessions:view not granted/);
 });
+
+test("any paired device may ask where this device is reachable and what it may do here, and a fork answers the same", { skip: windows }, (t) => {
+  let addresses = ["ws://10.0.0.7:47381"];
+  const granted = new GrantedShell(new ShellApi(), [], "laptop", null, () => addresses);
+  t.after(() => granted[Symbol.dispose]());
+  assert.deepEqual(granted.addresses(), ["ws://10.0.0.7:47381"]);
+  addresses = ["ws://192.168.1.4:47381"];
+  assert.deepEqual(granted.addresses(), ["ws://192.168.1.4:47381"], "asked live, not when the link was made");
+  const full = new GrantedShell(new ShellApi(), expandGrants(["shell"]), "laptop", null, () => addresses);
+  t.after(() => full[Symbol.dispose]());
+  const fork = full.fork();
+  t.after(() => fork[Symbol.dispose]());
+  assert.deepEqual(fork.addresses(), addresses);
+  assert.deepEqual(new GrantedShell(new ShellApi(), [], "laptop").addresses(), []);
+  // What the peer may do here is reported as it stands, also without any grant.
+  assert.deepEqual(granted.granted(), []);
+  assert.deepEqual(fork.granted(), ["shell"]);
+});

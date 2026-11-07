@@ -1,7 +1,9 @@
 import { z } from "zod";
 import { createPeerFile, isPairedEntry, peerFile, peerNames, readPeerFile, rewritePeerFile, validatePeerUrl } from "./aliases.js";
+import { isIP } from "node:net";
 import { errorMessage } from "./errors.js";
 import { fingerprint, type PublicKey } from "./identity.js";
+import { isRelayAddress } from "./relay-hub.js";
 
 /**
  * Paired devices, saved under an alias in the peers directory beside plain address
@@ -22,10 +24,11 @@ export const PRESETS: Record<"shell" | "files" | "sessions" | "all", readonly Pe
 const permissionSchema = z.enum(PERMISSIONS);
 export const grantsSchema = z.array(permissionSchema).max(PERMISSIONS.length);
 
-/** Expand presets and permissions, such as ["shell", "sessions"], into a canonical permission list. */
+/** Expand presets and permissions, such as ["shell", "sessions"], into a canonical permission list; "none" adds nothing. */
 export function expandGrants(words: readonly string[]): Permission[] {
   const set = new Set<Permission>();
   for (const word of words) {
+    if (word === "none") continue;
     if (word in PRESETS) for (const permission of PRESETS[word as keyof typeof PRESETS]) set.add(permission);
     else set.add(permissionSchema.parse(word));
   }
@@ -44,6 +47,28 @@ export function describeGrants(grants: readonly Permission[]): string {
     }
   }
   return [...words, ...PERMISSIONS.filter((permission) => rest.has(permission))].join(", ");
+}
+
+/** The words `cns peer grant` takes for these permissions, comma-separated: presets where a whole group is present. */
+export function grantWords(grants: readonly Permission[]): string {
+  return describeGrants(grants).replaceAll(", ", ",");
+}
+
+const DENIAL = /^Permission denied: ((?:[a-z:]+)(?:, [a-z:]+)*) not granted to ([A-Za-z0-9][A-Za-z0-9_-]{0,63})\.$/;
+
+/**
+ * A refusal from a paired device, with what to do about it: the grant that is missing and
+ * the command to run on that device, where it calls this one by the alias the refusal names.
+ * `device` is this device's name for the other one; other messages come back unchanged.
+ */
+export function explainDenial(message: string, device?: string): string {
+  const match = DENIAL.exec(message);
+  if (!match) return message;
+  let missing: Permission[];
+  try { missing = expandGrants(match[1]!.split(", ")); } catch { return message; }
+  if (!missing.length) return message;
+  const where = device ? `on ${device}` : "on the other device";
+  return `${message} To allow it, run ${where}: cns peer grant ${match[2]} ${grantWords(missing)}`;
 }
 
 const base64url = /^[A-Za-z0-9_-]+$/;
@@ -122,6 +147,34 @@ export function updatePairedPeer(name: string, change: (peer: PairedPeer) => Pai
   if (updated.publicKey !== current.publicKey) throw new Error("A paired device's key cannot change; pair with the new device instead.");
   rewritePeerFile(name, JSON.stringify(updated, null, 2) + "\n");
   return updated;
+}
+
+/** What a paired device says it can be reached at, as it arrives over a link: at most 16 valid addresses. */
+export const advertisedSchema = z.array(addressSchema).max(16);
+
+/**
+ * A paired device's saved addresses once it has said where it can be reached now.
+ * What it advertises replaces what it advertised before: a daemon advertises its
+ * listening IP addresses and its relay's dial address, so those are dropped when it no
+ * longer lists them. Kept as well are the address this device just reached it at, which
+ * may be a port forward or a proxy the device does not know about, and saved hostnames,
+ * which only a person adds. Direct addresses come first, relays last, at most 16 with room kept for relays.
+ */
+export function learnAddresses(saved: readonly string[], advertised: readonly string[], dialed?: string): string[] {
+  const learnedByDaemon = (url: string) => {
+    if (isRelayAddress(url)) return true;
+    try { return isIP(new URL(url).hostname.replace(/^\[|\]$/g, "")) !== 0; } catch { return true; }
+  };
+  const kept = saved.filter((url) => url === dialed || !learnedByDaemon(url));
+  // The same address written two ways, such as with and without a trailing slash, is kept once.
+  const seen = new Set<string>();
+  const all = [...advertised, ...kept].filter((url) => {
+    const key = new URL(url).href;
+    return !seen.has(key) && !!seen.add(key);
+  });
+  // Over the limit, direct addresses give way: the relay is what still works after a move.
+  const relays = all.filter(isRelayAddress).slice(0, 4);
+  return [...all.filter((url) => !isRelayAddress(url)).slice(0, 16 - relays.length), ...relays];
 }
 
 /** Whether a name is saved, without throwing where saved peers are unsupported. */
