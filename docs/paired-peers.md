@@ -108,7 +108,7 @@ A grant lists the operations one device may perform on another. The granting dev
   ```
 
   `ACCESS` shows only what this device has been granted on the peer. `--json` emits `[{ name, fingerprint, status, connection, access: [...], addresses: [...], lastSeen }]` with stable field names; `cns peer list --json` (PR 18) stays as the address-book view.
-- `cns status [--json]`: this device's alias, fingerprint, daemon PID, listening addresses, link count, and the sessions it hosts. `cns doctor NAME`: for one peer, each address tried and its result, the handshake result (not paired, identity changed, refused, ok), grants in both directions, clock skew, and the peer's `cns` version.
+- `cns status [--json]`: this device's alias, fingerprint, daemon PID, listening addresses, link count, and the sessions it hosts. `cns doctor NAME`: for one peer, each address tried and its result, the handshake result (not paired, identity changed, refused, ok), grants in both directions, clock skew, and the peer's `cns` version. `cns doctor` without a name: this device's identity, its daemon and whether it runs as that identity, relay registration, and each advertised address marked private or reachable from other networks.
 - Exit statuses are stable for scripts: 0 ok, 1 command or runtime failure, 2 usage or unknown target, 3 not paired or identity changed, 4 permission denied, 5 peer offline, 124 timeout (unchanged).
 - MCP (`cns mcp`) and the Pi extension accept the same targets and show the same `status` fields; MCP's `list_peers` returns alias, fingerprint, status and access, and Pi's `/cns attach studio` resolves aliases before daemon IDs.
 

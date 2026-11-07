@@ -87,6 +87,12 @@ test("devices that cannot reach each other directly pair and link through the re
   assert.equal(doctor.code, 0, doctor.stdout + doctor.stderr);
   assert.match(doctor.stdout, /ws:\/\/127\.0\.0\.1:1\/?: unreachable/);
   assert.match(doctor.stdout, /\/v1\/dial\/[A-Za-z0-9_-]{43} \[relay\]: ok \(.*encrypted\)/);
+  // Studio's self-check shows its relay registration and the relay address, with the token hidden.
+  const self = await cli(studio, ["doctor", "--state", studio.state]);
+  assert.equal(self.code, 0, self.stdout + self.stderr);
+  assert.match(self.stdout, /Relay: +\S+ \(registered\)/);
+  assert.match(self.stdout, /\/v1\/dial\/[A-Za-z0-9_-]{43} \[relay\]: /);
+  if (!external) assert.ok(!self.stdout.includes(token), "the token is redacted");
 
   // Laptop's daemon keeps a standing link to studio through the relay; studio has no address for laptop.
   const laptopUp = await cli(laptop, ["up", "--bind", "127.0.0.1", "--port", await unusedPort("127.0.0.1"), "--state", laptop.state]);
