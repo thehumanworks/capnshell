@@ -4,14 +4,14 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { connectControl } from "./commands/daemon.js";
-import { startRelay } from "./commands/relay.js";
+import { startRelay } from "./relay-server.js";
 import { INVITE_PREFIX } from "./pairing.js";
 import { isRelayAddress } from "./relay-hub.js";
 import { launchCli, unusedPort } from "./test-support.js";
 
 const posix = process.platform !== "win32";
 
-test("devices that cannot reach each other directly pair and link through the relay", { skip: !posix, timeout: 120000 }, async (t) => {
+test("devices that cannot reach each other directly pair and link through the built-in relay", { skip: !posix, timeout: 120000 }, async (t) => {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-relay-")));
   // Hooks run in the order they were added: stop the daemons, then remove their directories.
   const cleanups: Array<() => Promise<unknown>> = [];
@@ -19,16 +19,16 @@ test("devices that cannot reach each other directly pair and link through the re
   // CNS_TEST_RELAY_URL tests an external relay, such as the Worker under wrangler dev, without the restart step.
   const external = process.env.CNS_TEST_RELAY_URL;
   const relayPort = Number(await unusedPort("127.0.0.1"));
-  const token = "relay-t0ken-value";
-  let relay = external ? undefined : startRelay({ bind: "127.0.0.1", port: relayPort, token });
+  let relay = external ? undefined : startRelay({ bind: "127.0.0.1", port: relayPort });
   cleanups.push(async () => relay?.stop());
-  const relayBase = external ?? `ws://127.0.0.1:${relayPort}/?token=${token}`;
+  // CNS_RELAY stands in for the relay built into cns, as it does for development.
+  const relayBase = external ?? `ws://127.0.0.1:${relayPort}`;
   const relayHost = new URL(relayBase).host.replace(/[.]/g, "\\.");
   const device = async (name: string) => {
     const dir = path.join(root, name);
     await mkdir(dir, { mode: 0o700 });
     // The default state path under HOME, so commands without --state, such as run, find the daemon.
-    return { env: { CNS_CONFIG_DIR: dir, HOME: dir }, state: path.join(dir, ".cns", "daemon.json"), dir };
+    return { env: { CNS_CONFIG_DIR: dir, HOME: dir, CNS_RELAY: relayBase }, state: path.join(dir, ".cns", "daemon.json"), dir };
   };
   const studio = await device("studio");
   const laptop = await device("laptop");
@@ -54,18 +54,12 @@ test("devices that cannot reach each other directly pair and link through the re
   };
 
   const port = await unusedPort("127.0.0.1");
-  const up = await cli(studio, ["up", "--bind", "127.0.0.1", "--port", port, "--relay", relayBase, "--state", studio.state]);
+  // Nothing to set up: cns up registers at the relay on its own.
+  const up = await cli(studio, ["up", "--bind", "127.0.0.1", "--port", port, "--state", studio.state]);
   assert.equal(up.code, 0, up.stderr);
   cleanups.push(() => cli(studio, ["stop", "--state", studio.state]));
   assert.match(up.stdout, new RegExp(`Reachable at ws://127\\.0\\.0\\.1:${port}, wss?://${relayHost}/v1/dial/[A-Za-z0-9_-]{43}\\.\\nRelay: \\S+, regist`));
   await eventually(async () => /Relay: +\S+ \(registered\)/.test((await cli(studio, ["status", "--state", studio.state])).stdout), "studio registers at the relay");
-  // The token registers studio but is never shown, saved for others, or on the daemon's command line.
-  if (!external) {
-    const shown = [up.stdout, up.stderr, (await cli(studio, ["status", "--state", studio.state])).stdout, (await cli(studio, ["status", "--json", "--state", studio.state])).stdout];
-    assert.ok(!shown.some((text) => text.includes(token)), "the token is redacted");
-    const pid = JSON.parse((await cli(studio, ["status", "--json", "--state", studio.state])).stdout).daemon.pid;
-    if (process.platform === "linux") assert.ok(!(await readFile(`/proc/${pid}/cmdline`, "utf8")).includes(token), "the token is not in the daemon's arguments");
-  }
 
   // The invite lists the direct address, then the relay. Laptop gets only the relay part, as if
   // studio's network were out of reach, and pairs through it.
@@ -75,7 +69,7 @@ test("devices that cannot reach each other directly pair and link through the re
   const text = /Invite: (cns1:[A-Za-z0-9_-]+)/.exec(inviting.stdout)![1]!;
   const body = JSON.parse(Buffer.from(text.slice(INVITE_PREFIX.length), "base64url").toString("utf8"));
   assert.deepEqual(body.addr.map(isRelayAddress), [false, true]);
-  assert.ok(!JSON.stringify(body).includes(token), "invites carry no relay token");
+  assert.ok(body.addr.every((address: string) => !new URL(address).search), "invites carry no query, token or otherwise");
   const relayOnly = INVITE_PREFIX + Buffer.from(JSON.stringify({ ...body, addr: body.addr.filter(isRelayAddress) })).toString("base64url");
   const paired = await cli(laptop, ["pair", relayOnly, "--yes", "--name", "studio", "--request", "all"]);
   assert.equal(paired.code, 0, paired.stderr);
@@ -91,37 +85,29 @@ test("devices that cannot reach each other directly pair and link through the re
   assert.equal(doctor.code, 0, doctor.stdout + doctor.stderr);
   assert.match(doctor.stdout, /ws:\/\/127\.0\.0\.1:1\/?: unreachable/);
   assert.match(doctor.stdout, /\/v1\/dial\/[A-Za-z0-9_-]{43} \[relay\]: ok \(.*encrypted\)/);
-  // Studio's self-check shows its relay registration and the relay address, with the token hidden.
+  // Studio's self-check shows its relay registration and the relay address.
   const self = await cli(studio, ["doctor", "--state", studio.state]);
   assert.equal(self.code, 0, self.stdout + self.stderr);
   assert.match(self.stdout, /Relay: +\S+ \(registered\)/);
   assert.match(self.stdout, /\/v1\/dial\/[A-Za-z0-9_-]{43} \[relay\]: /);
-  if (!external) assert.ok(!self.stdout.includes(token), "the token is redacted");
 
-  // Laptop saves the relay in its settings; the token never shows.
-  const saved = await cli(laptop, ["config", "relay", relayBase]);
-  assert.equal(saved.code, 0, saved.stderr);
-  const shownRelay = await cli(laptop, ["config", "relay", "--json"]);
-  if (!external) assert.ok(!(saved.stdout + saved.stderr + shownRelay.stdout).includes(token), "the saved token is redacted");
-  assert.equal(JSON.parse(shownRelay.stdout).source, "config");
-  // A record saved before studio had a relay names only direct addresses. Laptop shares studio's
-  // relay, so its commands, doctor and daemon try studio there without anyone adding the address,
-  // and with the relay saved, commands find it while laptop's daemon is not running.
+  // A record that names only direct addresses: laptop's commands, doctor and daemon still try
+  // studio at the built-in relay, without anyone adding the address and with no daemon running.
   await writeFile(file, JSON.stringify({ ...record, addresses: ["ws://127.0.0.1:1"] }), { mode: 0o600 });
   const noDaemon = await cli(laptop, ["run", "studio", "--", "printf saved-relay"]);
   assert.deepEqual([noDaemon.code, noDaemon.stdout], [0, "saved-relay"], noDaemon.stderr);
-  // Laptop's daemon keeps a standing link to studio through the saved relay; studio has no address for laptop.
+  // Laptop's daemon keeps a standing link to studio through the relay; studio has no address for laptop.
   const laptopUp = await cli(laptop, ["up", "--bind", "127.0.0.1", "--port", await unusedPort("127.0.0.1"), "--state", laptop.state]);
   assert.equal(laptopUp.code, 0, laptopUp.stderr);
   cleanups.push(() => cli(laptop, ["stop", "--state", laptop.state]));
-  assert.match(laptopUp.stdout, /Relay: /, "cns up registers at the saved relay without --relay");
+  assert.match(laptopUp.stdout, /Relay: /, "cns up registers at the relay with nothing set up");
   const shared = await cli(laptop, ["run", "studio", "--", "printf shared-relay"]);
   assert.deepEqual([shared.code, shared.stdout], [0, "shared-relay"], shared.stderr);
   const doctorShared = await cli(laptop, ["doctor", "studio", "--state", laptop.state]);
   assert.equal(doctorShared.code, 0, doctorShared.stdout + doctorShared.stderr);
   // Once the standing link is up, laptop may already have learned studio's relay address from it
-  // and saved it, so doctor shows it as a saved relay rather than this device's.
-  assert.match(doctorShared.stdout, /\/v1\/dial\/[A-Za-z0-9_-]{43} \[(?:this device's )?relay\]: ok \(.*encrypted\)/);
+  // and saved it, so doctor shows it as a saved relay rather than the built-in one.
+  assert.match(doctorShared.stdout, /\/v1\/dial\/[A-Za-z0-9_-]{43} \[(?:built-in )?relay\]: ok \(.*encrypted\)/);
   const viaOf = async (dev: typeof laptop) => {
     const control = await connectControl(dev.state);
     try { return (await control.controller.peers()).filter((peer) => peer.peer?.daemon).map((peer) => peer.peer!.via); } finally { control.close(); }
@@ -149,7 +135,7 @@ test("devices that cannot reach each other directly pair and link through the re
     const saved = JSON.parse(await readFile(file, "utf8")).addresses as string[];
     return saved[0] === `ws://127.0.0.1:${port}` && !saved.includes("ws://127.0.0.1:1") && isRelayAddress(saved.at(-1)!);
   }, "laptop saves studio's advertised addresses");
-  // Laptop's daemon registers at the relay saved with cns config relay, so it advertises that relay as well.
+  // Laptop's daemon registers at the relay too, so it advertises it as well.
   await eventually(async () => {
     const saved = JSON.parse(await readFile(path.join(studio.dir, "peers", "laptop"), "utf8")).addresses as string[];
     return saved.length === 2 && !isRelayAddress(saved[0]!) && isRelayAddress(saved[1]!);
@@ -160,7 +146,7 @@ test("devices that cannot reach each other directly pair and link through the re
   const registered = async () => JSON.parse((await cli(studio, ["status", "--json", "--state", studio.state])).stdout).daemon.relayRegistered;
   await relay.stop();
   await eventually(async () => (await viaOf(laptop)).join() !== "relay" && !(await registered()), "the relayed link and the registration end with the relay");
-  relay = startRelay({ bind: "127.0.0.1", port: relayPort, token });
+  relay = startRelay({ bind: "127.0.0.1", port: relayPort });
   await eventually(registered, "studio registers at the new relay", 60000);
   // Both now know each other's direct address, so the link returns directly; the relay answers for studio again.
   await eventually(async () => (await viaOf(laptop)).length === 1, "the link returns", 60000);

@@ -1,21 +1,27 @@
 import type { RpcStub } from "capnweb";
+import { CLIENT_HEADER, clientProof, isRelayRequest } from "./relay-hub.js";
 import type { ShellApi } from "./shell.js";
 
 /** Wait this long for a listener to accept the socket. */
 export const CONNECT_MS = 10_000;
 
-/** Wait for a socket to open, giving up on abort or after CONNECT_MS. */
-export function openSocket(url: string, signal: AbortSignal): Promise<WebSocket> {
-  if (signal.aborted) return Promise.reject(signal.reason);
-  return new Promise((resolve, reject) => {
-    const socket = new WebSocket(url);
-    const shown = url.replace(/([?&]token=)[^&#]*/g, "$1…");
-    const timer = setTimeout(() => fail(new Error(`Timed out connecting to ${shown}.`)), CONNECT_MS);
+/**
+ * Wait for a socket to open, giving up on abort or after CONNECT_MS. A relay request
+ * carries the Cns-Client header, without which the relay refuses it.
+ */
+export async function openSocket(url: string, signal: AbortSignal): Promise<WebSocket> {
+  if (signal.aborted) throw signal.reason;
+  const headers = isRelayRequest(url) ? { [CLIENT_HEADER]: await clientProof(url) } : undefined;
+  if (signal.aborted) throw signal.reason;
+  return await new Promise((resolve, reject) => {
+    // Bun and Node (undici) both take headers here; browsers do not, and need no relay.
+    const socket = headers ? new WebSocket(url, { headers }) : new WebSocket(url);
+    const timer = setTimeout(() => fail(new Error(`Timed out connecting to ${url}.`)), CONNECT_MS);
     const onOpen = () => {
       cleanup();
       resolve(socket);
     };
-    const onError = () => fail(new Error(`Cannot connect to ${shown}. Check that the listener is running and reachable.`));
+    const onError = () => fail(new Error(`Cannot connect to ${url}. Check that the listener is running and reachable.`));
     const onAbort = () => fail(signal.reason);
     function cleanup() {
       clearTimeout(timer);

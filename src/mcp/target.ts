@@ -1,5 +1,6 @@
 import { newWebSocketRpcSession } from "capnweb";
-import { connectControl, localRelay } from "../commands/daemon.js";
+import { connectControl } from "../commands/daemon.js";
+import { builtInRelay } from "../relay-config.js";
 import { dialAddresses } from "../relay-hub.js";
 import { closeSocket, openSocket } from "../connect.js";
 import type { PeerController } from "../console.js";
@@ -77,9 +78,7 @@ function limitCalls(open: (signal: AbortSignal) => Promise<Link>): (signal: Abor
  * does. Closing a call's connection makes the listener kill its commands and
  * end its waits.
  */
-export function listenerTarget(url: string, cwd?: string, expect?: { name: string; publicKey: string; addresses: string[] }, state?: string): McpTarget {
-  // This device's relay, looked up once, for a paired device whose record names none.
-  let relay: Promise<string | undefined> | undefined;
+export function listenerTarget(url: string, cwd?: string, expect?: { name: string; publicKey: string; addresses: string[] }): McpTarget {
   return {
     label: expect ? expect.name : url,
     ...expect ? { device: expect.name } : {},
@@ -91,8 +90,8 @@ export function listenerTarget(url: string, cwd?: string, expect?: { name: strin
       let hangUp: (reason: string) => void;
       let remote: ReturnType<typeof newWebSocketRpcSession<ShellApi>>;
       if (expect) {
-        // An encrypted channel to the paired device, at the first saved address, or this device's relay, that answers as it.
-        const { channel } = await connectFirst(dialAddresses(expect, await (relay ??= localRelay(state))), identity!, { expect: expect.publicKey, signal });
+        // An encrypted channel to the paired device, at the first saved address, or the relay, that answers as it.
+        const { channel } = await connectFirst(dialAddresses(expect, builtInRelay()), identity!, { expect: expect.publicKey, signal });
         remote = rpcSession<ShellApi>(channel, new RefusingShell());
         hangUp = (reason) => channel.close(reason);
       } else {

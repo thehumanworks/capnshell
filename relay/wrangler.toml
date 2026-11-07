@@ -1,5 +1,6 @@
-# The cns relay as a Cloudflare Worker. Deploy from this directory with `wrangler deploy`.
-# Optional: `wrangler secret put RELAY_TOKEN` to require ?token=TOKEN on every request.
+# The cns relay as a Cloudflare Worker, built into cns as its default relay.
+# Deploy from this directory with `wrangler deploy`. It needs no secrets: it accepts only
+# requests carrying the cns client header (src/relay-hub.ts).
 name = "cns-relay"
 main = "worker.ts"
 compatibility_date = "2026-10-01"

@@ -15,7 +15,7 @@ export type ServiceKind = "launchd" | "systemd";
 export interface ServiceSpec {
   /** The executable and arguments that run `cns listen --service ...`. */
   program: { file: string; args: string[] };
-  /** Environment for the daemon: PATH and the like, and the relay URL, which may hold a token. */
+  /** Environment for the daemon: PATH and the like. */
   env: Record<string, string>;
   /** Where launchd writes the daemon's output; systemd sends it to the journal. */
   log: string;
@@ -43,7 +43,7 @@ export function servicePath(kind: ServiceKind, home = os.homedir(), env: NodeJS.
 /** The variables a daemon started from a login shell would have, which launchd and systemd do not pass on. */
 export function serviceEnvironment(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const kept: Record<string, string> = {};
-  for (const name of ["PATH", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "CNS_CONFIG_DIR"]) {
+  for (const name of ["PATH", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "CNS_CONFIG_DIR", "CNS_RELAY"]) {
     const value = env[name];
     if (value) kept[name] = value;
   }
@@ -146,7 +146,7 @@ function must(runner: Runner, file: string, args: string[]): void {
 
 const launchdDomain = () => `gui/${process.getuid?.() ?? 0}`;
 
-/** Write the service file, privately since it may hold the relay token, and start the daemon through the service manager. */
+/** Write the service file, privately, and start the daemon through the service manager. */
 export async function installService(file: ServiceFile, runner: Runner = runCommand): Promise<void> {
   await mkdir(path.dirname(file.path), { recursive: true });
   // launchd opens the log itself, so its directory must exist first.

@@ -8,13 +8,11 @@ env "CAPNWEB_TEST_BINARY", optional: true
 env "CNS_BIND", optional: true
 env "CNS_CONFIG_DIR", optional: true
 env "CNS_DAEMON_CHILD", optional: true
-env "CNS_DAEMON_RELAY", optional: true, encrypt: true, redact: true
 env "CNS_DAEMON_TOKEN", optional: true, encrypt: true, redact: true
 env "CNS_MCP_TOKEN", optional: true, encrypt: true, redact: true
 env "CNS_PORT", type: "port", optional: true
 env "CNS_RECONNECT_MS", optional: true
-env "CNS_RELAY", optional: true, redact: true, encrypt: true
-env "CNS_RELAY_TOKEN", optional: true, redact: true, encrypt: true
+env "CNS_RELAY", optional: true
 env "CNS_TEST_RELAY_URL", type: "url", optional: true
 env "FAKE_LOG", optional: true
 env "HOME", optional: true

@@ -62,20 +62,11 @@ export function createCli(): Command {
     .description("Run this device as a paired peer: start its daemon, or report the running one")
     .option("--bind <address>", "Interface to listen on (default: every interface; CNS_BIND)")
     .option("--port <port>", "TCP port (default: 47381; CNS_PORT)")
-    .option("--relay <url>", "Also register at this relay, for devices that cannot reach this one directly (CNS_RELAY; default: cns config relay)")
     .option("--state <path>", "Local daemon state file")
     .option("--install", "Run the daemon as a service that starts at login and restarts if it fails: a launchd agent on macOS, a systemd user service on Linux")
     .option("--uninstall", "Stop the service's daemon and remove the service")
-    .addHelpText("after", "\nOnly paired devices can connect, after authenticating; each gets what cns pair granted it.\nLinks are encrypted end to end, directly or through the relay. Pair with cns pair.\nA relay is wss://HOST (the Cloudflare Worker in relay/, or cns relay), with ?token=TOKEN if it needs one.\n--install keeps the running daemon's --bind, --port and --relay unless given; run it again to change them.")
+    .addHelpText("after", "\nOnly paired devices can connect, after authenticating; each gets what cns pair granted it.\nThe daemon also registers at the relay built into cns, so paired devices on other networks reach it\nwith nothing to set up. Links are encrypted end to end, directly or through the relay. Pair with cns pair.\n--install keeps the running daemon's --bind and --port unless given; run it again to change them.")
     .action(async (options) => { const { up } = await import("./commands/pairing-cli.js"); await up(options); });
-  const config = program.command("config").description("Show or change this device's settings");
-  config.command("relay [url]")
-    .description("Show, save or remove the relay this device registers at and dials through")
-    .option("--unset", "Remove the saved relay")
-    .option("--json", "Print { relay, source, saved } as JSON, with the token hidden")
-    .option("--state <path>", "Local daemon state file")
-    .addHelpText("after", "\nThe saved relay is used by cns up and by every command that dials a paired device, whether or\nnot the daemon is running. --relay and CNS_RELAY take precedence. The URL may carry ?token=TOKEN,\nso the settings file is private and cns prints it with the token hidden.\nA running daemon keeps its relay until cns stop, then cns up.")
-    .action(async (url: string | undefined, options) => { const { configRelay } = await import("./commands/config.js"); await configRelay(url, options); });
   program.command("pair")
     .description("Pair this device with another: print an invite, or paste one from the other device")
     .argument("[invite]", "The cns1:... invite the other device printed")
@@ -92,30 +83,6 @@ export function createCli(): Command {
     .option("--json", "Print the list as JSON")
     .option("--state <path>", "Local daemon state file")
     .action(async (options) => { const { peers } = await import("./commands/pairing-cli.js"); await peers(options); });
-  program.command("relay")
-    .description("Run a relay for paired devices that cannot reach each other directly")
-    .option("--bind <address>", "Interface to listen on (default: 127.0.0.1)")
-    .option("--port <port>", "TCP port (default: 47380)")
-    .option("--public-host <host>", "The host[:port] devices use for this relay, as in wss://HOST; required beyond loopback")
-    .addHelpText("after", "\nThe relay forwards encrypted links it cannot read. A daemon registers by proving its key for\nthe relay's public host; any device may dial a registered key, and the daemon then authenticates\nit as usual. Set CNS_RELAY_TOKEN to require ?token=TOKEN for registering, so only your devices can.\nServe wss:// through a TLS proxy. The Cloudflare Worker in relay/ is the same relay without a machine to keep running.")
-    .action(async (options: { bind?: string; port?: string; publicHost?: string }) => {
-      const { startRelay } = await import("./commands/relay.js");
-      const { isIP } = await import("node:net");
-      const { isLoopback } = await import("./options.js");
-      const bind = options.bind ?? "127.0.0.1";
-      if (!isIP(bind)) throw new Error("--bind requires a numeric IPv4 or IPv6 address.");
-      const port = Number(options.port ?? 47380);
-      if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("--port requires an integer from 1 to 65535.");
-      if (!isLoopback(bind) && !options.publicHost) throw new Error("A relay beyond loopback needs --public-host: the host[:port] devices use for it, which their proofs must name.");
-      if (options.publicHost !== undefined && !/^[A-Za-z0-9.-]+(:\d{1,5})?$|^\[[0-9A-Fa-f:.]+\](:\d{1,5})?$/.test(options.publicHost)) throw new Error("--public-host takes host or host:port, as in wss://HOST.");
-      const relay = startRelay({ bind, port, token: process.env.CNS_RELAY_TOKEN || undefined, publicHost: options.publicHost?.toLowerCase() });
-      console.log(`Relay listening at ${relay.url}${options.publicHost ? ` for wss://${options.publicHost}` : ""}${process.env.CNS_RELAY_TOKEN ? " (registering needs the token)" : ""}.`);
-      await new Promise<void>((resolve) => {
-        const end = () => { void relay.stop().then(resolve); };
-        process.once("SIGINT", end);
-        process.once("SIGTERM", end);
-      });
-    });
   program.command("status")
     .description("Show this device's identity, its daemon and its links")
     .option("--json", "Print the status as JSON")

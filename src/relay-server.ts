@@ -1,14 +1,14 @@
 import { serve, type Server } from "bun";
-import { authorized, MAX_RELAY_MESSAGE_BYTES, RelayRoom, route, type RelayData, type RelayHandlers } from "../relay-hub.js";
-import { endpointUrl } from "../options.js";
+import { ACCEPTED_CLIENT_KEYS, CLIENT_HEADER, MAX_RELAY_MESSAGE_BYTES, RelayRoom, route, verifyClient, type RelayData, type RelayHandlers } from "./relay-hub.js";
+import { endpointUrl } from "./options.js";
 
 interface Data { handlers?: RelayHandlers; key: string; kind: "accept" | "dial" | "answer"; id?: string; host: string; address: string }
 
 export interface RelayOptions {
   bind: string;
   port: number;
-  /** Required to register (accept); dialing needs none. */
-  token?: string;
+  /** The client keys a request's Cns-Client header may be made with (default: the one built into cns). */
+  clientKeys?: readonly string[];
   /** The host:port devices use for this relay, which their registration proofs must name. Without it, each request's Host header. */
   publicHost?: string;
 }
@@ -20,10 +20,11 @@ export const MAX_SOCKETS = 4096;
 const BACKPRESSURE_BYTES = 4 * 1024 * 1024;
 
 /**
- * `cns relay`: the relay of src/relay-hub.ts as a Bun server, for running your own.
- * It holds rooms in memory, one per registered key, and forgets a room once nobody
- * uses it. Put it behind a TLS reverse proxy to serve wss://, and give it the public
- * host devices use, so a proof signed for another relay is never accepted here.
+ * The relay of src/relay-hub.ts as a Bun server. The relay devices use is the Cloudflare
+ * Worker in relay/; this one runs the same code for tests and local development, with
+ * CNS_RELAY pointing cns at it. It holds rooms in memory, one per registered key, and
+ * forgets a room once nobody uses it. Given the public host devices use, it never accepts
+ * a proof or a client header made for another relay.
  */
 export function startRelay(options: RelayOptions): { url: string; server: Server<Data>; stop(): Promise<void> } {
   // A room lives while any socket for its key is open, including a daemon still proving
@@ -43,20 +44,21 @@ export function startRelay(options: RelayOptions): { url: string; server: Server
   let total = 0;
   const server = serve<Data>({
     hostname: options.bind, port: options.port,
-    fetch(request, server) {
+    async fetch(request, server) {
       const url = new URL(request.url);
       const target = route(url);
       if (!target) return new Response("Not found", { status: 404 });
       if (target.kind === "health") return new Response("cns relay\n");
-      if (target.kind === "accept" && !authorized(url, options.token)) return new Response("Registering at this relay needs its token: ?token=TOKEN", { status: 401 });
       if (request.headers.has("Origin")) return new Response("Browser origins are not allowed", { status: 401 });
+      const host = options.publicHost ?? url.host;
+      // Only cns: anything without a valid client header is refused before it reaches a room.
+      if (!(await verifyClient(request.headers.get(CLIENT_HEADER), host, url.pathname, options.clientKeys ?? ACCEPTED_CLIENT_KEYS))) return new Response("Only cns may use this relay", { status: 401 });
       const address = server.requestIP(request)?.address ?? "unknown";
       if (total >= MAX_SOCKETS || (perAddress.get(address) ?? 0) >= MAX_SOCKETS_PER_ADDRESS) return new Response("Too many connections", { status: 429 });
       if (target.kind === "dial") {
         const check = rooms.get(target.key)?.room.dialable(address) ?? { ok: false as const, status: 404, reason: "No device with this key is registered at this relay." };
         if (!check.ok) return new Response(check.reason, { status: check.status });
       }
-      const host = options.publicHost ?? url.host;
       if (server.upgrade(request, { data: { key: target.key, kind: target.kind, id: target.kind === "answer" ? target.id : undefined, host, address } })) return undefined;
       return new Response("WebSocket upgrade required", { status: 400 });
     },

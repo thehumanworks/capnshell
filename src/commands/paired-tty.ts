@@ -8,7 +8,7 @@ import { dialAddresses, isRelayAddress } from "../relay-hub.js";
 import { connectFirst, rpcSession, secureReady } from "../secure.js";
 import type { PtySessionInfo, ShellApi } from "../shell.js";
 import { attachTerminal, ConnectionLost, DETACH_KEY, plain, type RemoteNamedPty } from "../terminal.js";
-import { localRelay } from "./daemon.js";
+import { builtInRelay } from "../relay-config.js";
 import { commandExitCode, describeExit } from "./one-shot.js";
 
 /** The session `cns tty DEVICE` uses on a paired device when no other is named. */
@@ -65,8 +65,8 @@ export async function attachPaired(config: PeerConfig): Promise<number | typeof 
   const name = config.name ?? DEFAULT_SESSION;
   const create = !config.attach;
   const { identity } = ensureIdentity();
-  // Saved addresses, and this device's relay when the record has none: devices that share a relay meet there.
-  const addresses = dialAddresses(expect, await localRelay(config.state));
+  // Saved addresses, and the built-in relay when the record names none.
+  const addresses = dialAddresses(expect, builtInRelay());
   await secureReady();
   const interrupted = new AbortController();
   let exitOnSignal = 130;

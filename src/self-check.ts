@@ -1,5 +1,5 @@
 import { isPrivateAddress } from "./addresses.js";
-import { isRelayAddress, redactRelay } from "./relay-hub.js";
+import { isRelayAddress } from "./relay-hub.js";
 
 /** What `cns doctor` with no argument found out about this device, gathered before judging it. */
 export interface SelfFacts {
@@ -10,10 +10,8 @@ export interface SelfFacts {
   daemon:
     | { running: false; error?: string }
     | { running: true; pid: number; url: string; paired: boolean; identity?: { publicKey: string; fingerprint: string }; addresses: string[]; relay?: string; relayRegistered?: boolean };
-  /** The relay a new daemon would use here (CNS_RELAY, else cns config relay), if any. */
-  configuredRelay?: { url: string; source: "flag" | "env" | "config" };
-  /** Why the saved settings could not be read, if they could not. */
-  settingsError?: string;
+  /** The relay a daemon started now would use: the built-in one, unless CNS_RELAY changes it. */
+  relay?: string;
   /** How many paired devices are saved. */
   paired: number;
 }
@@ -83,13 +81,12 @@ export function selfCheck(facts: SelfFacts): { report: SelfReport; lines: string
     }
 
     if (daemon.relay) {
-      relay = { url: redactRelay(daemon.relay), registered: !!daemon.relayRegistered };
+      relay = { url: daemon.relay, registered: !!daemon.relayRegistered };
       lines.push(`Relay:     ${relay.url} (${relay.registered ? "registered" : "not registered"})`);
-      if (!relay.registered) warnings.push("The daemon is not registered at its relay right now, so devices that need the relay cannot reach this one. It retries on its own; the daemon log says why it failed.");
-    } else lines.push("Relay:     none");
-    if (facts.configuredRelay && facts.configuredRelay.url !== daemon.relay) {
-      const from = facts.configuredRelay.source === "env" ? "CNS_RELAY names" : facts.configuredRelay.source === "config" ? "cns config relay saved" : "--relay names";
-      warnings.push(`${from} ${redactRelay(facts.configuredRelay.url)}, but the running daemon ${daemon.relay ? `uses ${redactRelay(daemon.relay)}` : "uses no relay"}. Run cns stop, then cns up, to use it.`);
+      if (!relay.registered) warnings.push("The daemon is not registered at the relay right now, so devices on other networks cannot reach this one. It retries on its own; the daemon log says why it failed.");
+    } else lines.push("Relay:     off (CNS_RELAY=off)");
+    if ((facts.relay ?? undefined) !== daemon.relay) {
+      warnings.push(`The running daemon ${daemon.relay ? `uses the relay ${daemon.relay}` : "uses no relay"}, but a daemon started now would ${facts.relay ? `use ${facts.relay}` : "use none"}, because CNS_RELAY differs. Run cns stop, then cns up, to change it.`);
     }
 
     addresses = daemon.addresses.map((address) => {
@@ -98,7 +95,7 @@ export function selfCheck(facts: SelfFacts): { report: SelfReport; lines: string
     });
     if (!addresses.length) {
       lines.push("Addresses: none");
-      problems.push("The daemon advertises no address, so invites from this device name nothing to dial. Bind it to an interface with cns up --bind, or add a relay with --relay.");
+      problems.push("The daemon advertises no address, so invites from this device name nothing to dial. Bind it to an interface with cns up --bind, and leave the relay on.");
       exitCode = exitCode || 5;
     } else {
       lines.push("Addresses:");
@@ -110,9 +107,8 @@ export function selfCheck(facts: SelfFacts): { report: SelfReport; lines: string
   if (daemon.running && daemon.paired && addresses.length && !reachableBeyondNetwork) {
     warnings.push(relay
       ? "Every address here is private and the relay is not usable from other networks right now, so only devices on this network can reach this one."
-      : "Every address here is private, so only devices on this network can reach this one. For devices elsewhere, save a relay with cns config relay URL and restart with cns stop, then cns up, or join both to an overlay network such as Tailscale.");
+      : "Every address here is private and the relay is off, so only devices on this network can reach this one. Unset CNS_RELAY and restart with cns stop, then cns up.");
   }
-  if (facts.settingsError) warnings.push(`The settings cannot be read, so cns up and other commands fail until they are fixed: ${facts.settingsError}`);
   lines.push(`Paired:    ${facts.paired} device${facts.paired === 1 ? "" : "s"}`);
 
   if (problems.length || warnings.length) lines.push("");

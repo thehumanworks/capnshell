@@ -3,7 +3,8 @@ import os from "node:os";
 import readline from "node:readline";
 import { AuthError } from "../auth.js";
 import { connectFirst, connectSecure, rpcSession, type SecureChannel } from "../secure.js";
-import { dialAddresses, isRelayAddress, redactRelay } from "../relay-hub.js";
+import { dialAddresses, isRelayAddress } from "../relay-hub.js";
+import { builtInRelay } from "../relay-config.js";
 import { errorMessage } from "../errors.js";
 import { ensureIdentity, fingerprint as fingerprintOf, identityPath, loadIdentity } from "../identity.js";
 import { allPrivate } from "../addresses.js";
@@ -11,20 +12,19 @@ import { endpointUrl, isLoopback } from "../options.js";
 import { decisionSchema, decodeInvite, DEFAULT_INVITE_MS, MAX_INVITE_MS, suggestedName, type Decision, type Invite, type PairingApi, type Proposal } from "../pairing.js";
 import { peerFileExists, peerNamePattern, removeAlias, validatePeerUrl } from "../aliases.js";
 import { describeGrants, expandGrants, findPairedPeer, getPeer, listPeers, savePairedPeer, updatePairedPeer, PERMISSIONS, type Permission } from "../peers.js";
-import { checkRelayUrl, configuredRelay, loadSettings } from "../settings.js";
 import { plain } from "../terminal.js";
 import { selfCheck, type SelfFacts } from "../self-check.js";
 import type { ShellApi } from "../shell.js";
 import type { RpcStub } from "capnweb";
 import { RefusingShell } from "../refusing-shell.js";
-import { connectControl, daemonStatePath, localRelay, removeStaleState, startDaemon, stopDaemon, type ControlConnection } from "./daemon.js";
+import { connectControl, daemonStatePath, removeStaleState, startDaemon, stopDaemon, type ControlConnection } from "./daemon.js";
 import { selfInvocation } from "../runtime.js";
 import { describeService, installService, installedService, lingering, serviceEnvironment, serviceFile, serviceKind, serviceName, startService, uninstallService } from "../service.js";
 
 /** How long the invited device waits for the inviting person to decide. */
 const PROPOSAL_WAIT_MS = 10 * 60 * 1000;
 
-export interface UpOptions { bind?: string; port?: string; relay?: string; state?: string; install?: boolean; uninstall?: boolean }
+export interface UpOptions { bind?: string; port?: string; state?: string; install?: boolean; uninstall?: boolean }
 export interface PairOptions { name?: string; yes?: boolean; request?: string; grant?: string; expires?: string; state?: string }
 export interface PeersOptions { json?: boolean; state?: string }
 export interface StatusOptions { json?: boolean; state?: string }
@@ -99,18 +99,12 @@ async function chooseName(prompt: Prompt, question: string, given: string | unde
   }
 }
 
-/** Where the paired daemon listens and the relay it registers at, from the options, then the environment, then the defaults. */
-function daemonSettings(options: { bind?: string; port?: string; relay?: string }): { bind: string; port: number; relay?: string } {
+/** Where the paired daemon listens, from the options, then the environment, then the defaults. */
+function daemonSettings(options: { bind?: string; port?: string }): { bind: string; port: number } {
   const bind = options.bind ?? process.env.CNS_BIND ?? "0.0.0.0";
   const port = Number(options.port ?? process.env.CNS_PORT ?? 47381);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("--port requires an integer from 1 to 65535.");
-  // --relay, else CNS_RELAY, else the relay saved with cns config relay URL.
-  const relay = configuredRelay(options.relay)?.url;
-  if (relay) {
-    checkRelayUrl(relay); // Refuse a malformed relay URL before starting anything.
-    if (new URL(relay).protocol === "ws:" && !isLoopback(new URL(relay).hostname)) console.error("The relay URL is ws://, so the relay token and registration travel unencrypted; links themselves stay encrypted. Use wss:// for a relay beyond this machine.");
-  }
-  return { bind, port, ...relay ? { relay } : {} };
+  return { bind, port };
 }
 
 /** The control connection of a daemon that is starting, once it answers. */
@@ -126,7 +120,7 @@ async function awaitControl(statePath: string | undefined, timeoutMs = 15_000): 
 }
 
 /** The local paired daemon, started if it is not running, or if the one that was has crashed. */
-async function pairedDaemon(options: { bind?: string; port?: string; relay?: string; state?: string }, quiet = false): Promise<{ control: ControlConnection; started: boolean }> {
+async function pairedDaemon(options: { bind?: string; port?: string; state?: string }, quiet = false): Promise<{ control: ControlConnection; started: boolean }> {
   const { created } = ensureIdentity();
   if (created) console.error(`Created this device's identity at ${identityPath()}. Keep the file private; losing it means pairing again.`);
   let running: ControlConnection | undefined;
@@ -140,8 +134,6 @@ async function pairedDaemon(options: { bind?: string; port?: string; relay?: str
     try {
       const status = await running.remote.status();
       if (!status.paired) throw new Error("A daemon that is not for paired devices is running. Stop it with cns stop, then run cns up.");
-      const relay = configuredRelay(options.relay)?.url;
-      if (relay && relay !== status.relay) console.error(`The running daemon ${status.relay ? `uses the relay ${redactRelay(status.relay)}` : "uses no relay"}; run cns stop, then cns up, to use ${redactRelay(relay)}.`);
       return { control: running, started: false };
     } catch (error) {
       running.close();
@@ -151,7 +143,7 @@ async function pairedDaemon(options: { bind?: string; port?: string; relay?: str
   const service = installedService(daemonStatePath(options.state));
   if (service) {
     // The installed service owns the daemon's settings; start it rather than a second, unsupervised daemon.
-    const given = (["bind", "port", "relay"] as const).filter((name) => options[name] !== undefined);
+    const given = (["bind", "port"] as const).filter((name) => options[name] !== undefined);
     if (given.length) console.error(`The installed service's settings apply, not --${given.join(", --")}. Run cns up --install with them to change it.`);
     try {
       startService(service.kind);
@@ -162,8 +154,8 @@ async function pairedDaemon(options: { bind?: string; port?: string; relay?: str
       console.error(`Cannot start the installed service (${errorMessage(error)}); starting the daemon without it.`);
     }
   }
-  const { bind, port, relay } = daemonSettings(options);
-  const daemon = await startDaemon({ bind, port, url: endpointUrl(bind, port), remote: !isLoopback(bind), state: options.state, paired: true, ...relay ? { relay } : {} });
+  const { bind, port } = daemonSettings(options);
+  const daemon = await startDaemon({ bind, port, url: endpointUrl(bind, port), remote: !isLoopback(bind), state: options.state, paired: true });
   if (!quiet) console.error(`Started the peer daemon (pid ${daemon.pid}) listening at ${daemon.url}. Log: ${daemon.log}`);
   return { control: await connectControl(options.state), started: true };
 }
@@ -180,7 +172,7 @@ export async function up(options: UpOptions): Promise<void> {
     const service = installedService(daemonStatePath(options.state));
     console.log(`${started ? "Started" : "Running"} as ${status.identity?.fingerprint} (pid ${status.pid}${service ? `, ${describeService(service.kind)}` : ""}), listening at ${status.url}.`);
     if (status.addresses?.length) console.log(`Reachable at ${status.addresses.join(", ")}.`);
-    if (status.relay) console.log(`Relay: ${redactRelay(status.relay)}${status.relayRegistered ? ", registered" : ", registering"}.`);
+    if (status.relay) console.log(`Relay: ${status.relay}${status.relayRegistered ? ", registered" : ", registering"}.`);
     const paired = listPeers().filter((peer) => peer.kind === "paired");
     console.log(paired.length
       ? `Paired devices: ${paired.map((peer) => `${peer.name}${peers.some((connected) => connected.peer?.daemon && connected.peer.fingerprint === peer.fingerprint) ? " (online)" : ""}`).join(", ")}.`
@@ -201,7 +193,7 @@ async function install(options: UpOptions): Promise<void> {
   if (created) console.error(`Created this device's identity at ${identityPath()}. Keep the file private; losing it means pairing again.`);
   const state = daemonStatePath(options.state);
   // Settings not given now are kept from a daemon that is running, so installing makes it permanent as it is.
-  let running: { bind: string; port: number; relay?: string } | undefined;
+  let running: { bind: string; port: number } | undefined;
   let control: ControlConnection | undefined;
   try { control = await connectControl(state); }
   catch { await removeStaleState(state); }
@@ -209,19 +201,16 @@ async function install(options: UpOptions): Promise<void> {
     try {
       const status = await control.remote.status();
       if (!status.paired) throw new Error("A daemon that is not for paired devices is running. Stop it with cns stop, then run cns up --install.");
-      running = { bind: status.bind, port: status.port, ...status.relay ? { relay: status.relay } : {} };
+      running = { bind: status.bind, port: status.port };
     } finally { control.close(); }
   }
   const settings = daemonSettings({
     bind: options.bind ?? running?.bind,
     port: options.port ?? (running ? String(running.port) : undefined),
-    relay: options.relay ?? running?.relay,
   });
   const file = serviceFile(kind, {
     program: selfInvocation(["listen", "--no-repl", "--paired", "--service", "--state", state, "--bind", settings.bind, "--port", String(settings.port)]),
-    // The relay URL may carry its token: the service file is private, and the daemon reads it from its environment.
-    // A relay saved with cns config relay is left out: the daemon reads it when it starts, so a later change reaches the service.
-    env: { ...serviceEnvironment(), ...settings.relay && settings.relay !== loadSettings().relay ? { CNS_DAEMON_RELAY: settings.relay } : {} },
+    env: serviceEnvironment(),
     log: path.join(path.dirname(state), "service.log"),
   });
   if (running) {
@@ -235,13 +224,13 @@ async function install(options: UpOptions): Promise<void> {
     console.error("Its log: journalctl --user -u cns.");
     if (lingering() === false) console.error(`systemd stops user services when you log out. To keep the daemon running without a login, run: loginctl enable-linger ${os.userInfo().username}`);
   }
-  console.error("Run cns up --install again after moving or upgrading cns to a new path, or to change --bind, --port or --relay.");
+  console.error("Run cns up --install again after moving or upgrading cns to a new path, or to change --bind or --port.");
   (await awaitControl(options.state)).close();
 }
 
 /** `cns up --uninstall`: stop the service's daemon and remove the service. */
 async function uninstall(options: UpOptions): Promise<void> {
-  if (options.bind !== undefined || options.port !== undefined || options.relay !== undefined) throw new Error("--uninstall takes no --bind, --port or --relay.");
+  if (options.bind !== undefined || options.port !== undefined) throw new Error("--uninstall takes no --bind or --port.");
   const kind = requireServiceKind();
   if (await uninstallService(kind)) console.log(`Removed the ${serviceName(kind)}; the daemon is stopped. Run cns up to start it without the service.`);
   else console.log(`No ${serviceName(kind)} is installed.`);
@@ -268,7 +257,7 @@ async function inviteAndWait(options: PairOptions): Promise<void> {
     console.log(`Invite: ${created.text}`);
     // An invite that only names private addresses reaches nothing beyond this network; say so now, not after it expires unused.
     const invited = decodeInvite(created.text).addresses;
-    if (!invited.some(isRelayAddress) && allPrivate(invited)) console.error(`This invite lists only private addresses (${invited.join(", ") || "none"}). A device on another network cannot reach them. For one, stop the daemon with cns stop and start it with cns up --relay URL, then pair again.`);
+    if (!invited.some(isRelayAddress) && allPrivate(invited)) console.error(`This invite lists only private addresses (${invited.join(", ") || "none"}). A device on another network cannot reach them: the relay is off (CNS_RELAY=off).`);
     console.error(`On the other device, run: cns pair '${created.text}'\nWaiting for it (the invite expires in ${minutes} minute${minutes === 1 ? "" : "s"})...`);
     const { peer, fingerprint, proposal } = await control.remote.awaitProposal(created.id) as { peer: string; fingerprint: string; proposal: Proposal };
     console.error([
@@ -406,7 +395,7 @@ export async function status(options: StatusOptions): Promise<void> {
   if (control) {
     try {
       const info = await control.remote.status();
-      daemon = { pid: info.pid, url: info.url, paired: !!info.paired, addresses: info.addresses ?? [], relay: info.relay ? redactRelay(info.relay) : null, relayRegistered: info.relayRegistered ?? null, startedAt: new Date(info.startedAt).toISOString() };
+      daemon = { pid: info.pid, url: info.url, paired: !!info.paired, addresses: info.addresses ?? [], relay: info.relay ?? null, relayRegistered: info.relayRegistered ?? null, startedAt: new Date(info.startedAt).toISOString() };
       for (const [fingerprint, link] of await standingLinks(control)) links.push({ name: link.name, fingerprint, address: link.via, hostname: link.hostname });
     } finally { control.close(); }
   }
@@ -448,10 +437,8 @@ async function doctorSelf(options: DoctorOptions): Promise<void> {
       daemon = { running: false, error: `it does not answer: ${printable(errorMessage(error))}` };
     } finally { control.close(); }
   }
-  let relay: SelfFacts["configuredRelay"];
-  let settingsError: string | undefined;
-  try { relay = configuredRelay(); } catch (error) { settingsError = printable(errorMessage(error)); }
-  const { report, lines, exitCode } = selfCheck({ identity, identityPath: identityPath(), daemon, paired: listPeers().filter((peer) => peer.kind === "paired").length, ...relay ? { configuredRelay: relay } : {}, ...settingsError ? { settingsError } : {} });
+  const relay = builtInRelay();
+  const { report, lines, exitCode } = selfCheck({ identity, identityPath: identityPath(), daemon, paired: listPeers().filter((peer) => peer.kind === "paired").length, ...relay ? { relay } : {} });
   if (options.json) console.log(JSON.stringify(report, null, 2));
   else console.log(lines.join("\n"));
   if (exitCode) process.exitCode = exitCode;
@@ -486,8 +473,8 @@ export async function doctor(name: string | undefined, options: DoctorOptions): 
     const attempts: Array<{ address: string; result: string; detail?: string }> = [];
     /** What the device says this one may use there now, from the first address that answers. */
     let live: Permission[] | undefined;
-    // The saved addresses and, when none is a relay, this device's own relay, as commands dial them.
-    const addresses = dialAddresses(entry, await localRelay(options.state));
+    // The saved addresses and, when none is a relay, the built-in relay, as commands dial them.
+    const addresses = dialAddresses(entry, builtInRelay());
     if (!addresses.length) lines.push("  No saved address: cns peer address NAME ws://HOST:PORT adds one.");
     for (const address of addresses) {
       const cancelled = new AbortController();
@@ -514,7 +501,7 @@ export async function doctor(name: string | undefined, options: DoctorOptions): 
       } finally { clearTimeout(timer); }
     }
     report.attempts = attempts;
-    for (const attempt of attempts) lines.push(`  ${attempt.address}${isRelayAddress(attempt.address) ? (entry.addresses.includes(attempt.address) ? " [relay]" : " [this device's relay]") : ""}: ${attempt.result}${attempt.detail ? ` (${attempt.detail})` : ""}`);
+    for (const attempt of attempts) lines.push(`  ${attempt.address}${isRelayAddress(attempt.address) ? (entry.addresses.includes(attempt.address) ? " [relay]" : " [built-in relay]") : ""}: ${attempt.result}${attempt.detail ? ` (${attempt.detail})` : ""}`);
     if (live) {
       report.access = live;
       const saved = entry.grants.outgoing;
