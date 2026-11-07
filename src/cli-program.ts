@@ -64,7 +64,9 @@ export function createCli(): Command {
     .option("--port <port>", "TCP port (default: 47381; CNS_PORT)")
     .option("--relay <url>", "Also register at this relay, for devices that cannot reach this one directly (CNS_RELAY; default: cns config relay)")
     .option("--state <path>", "Local daemon state file")
-    .addHelpText("after", "\nOnly paired devices can connect, after authenticating; each gets what cns pair granted it.\nLinks are encrypted end to end, directly or through the relay. Pair with cns pair.\nA relay is wss://HOST (the Cloudflare Worker in relay/, or cns relay), with ?token=TOKEN if it needs one.")
+    .option("--install", "Run the daemon as a service that starts at login and restarts if it fails: a launchd agent on macOS, a systemd user service on Linux")
+    .option("--uninstall", "Stop the service's daemon and remove the service")
+    .addHelpText("after", "\nOnly paired devices can connect, after authenticating; each gets what cns pair granted it.\nLinks are encrypted end to end, directly or through the relay. Pair with cns pair.\nA relay is wss://HOST (the Cloudflare Worker in relay/, or cns relay), with ?token=TOKEN if it needs one.\n--install keeps the running daemon's --bind, --port and --relay unless given; run it again to change them.")
     .action(async (options) => { const { up } = await import("./commands/pairing-cli.js"); await up(options); });
   const config = program.command("config").description("Show or change this device's settings");
   config.command("relay [url]")

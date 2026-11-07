@@ -18,7 +18,7 @@ import { createInvite, decisionSchema, PairingApi, suggestedName, type Decision,
 import { advertisedSchema, describeGrants, explainDenial, findPairedPeer, getPeer, grantsSchema, learnAddresses, listPeers, savePairedPeer, updatePairedPeer } from "../peers.js";
 import { listeningAddresses } from "../addresses.js";
 import { serveControl, type PairingController } from "./daemon-server.js";
-import { localRelay } from "./daemon.js";
+import { localRelay, removeStaleState } from "./daemon.js";
 import { runOneShot } from "./one-shot.js";
 
 /** CLI exit statuses for failures, as docs/paired-peers.md lists them: 3 unpaired or changed device, 4 permission denied, else 1. */
@@ -672,7 +672,11 @@ export async function startPeer(config: PeerConfig): Promise<void> {
           },
         },
       });
-      if (daemonChild) {
+      if (daemonChild || config.service) {
+        // A supervised daemon that crashed, or ran before a reboot, left its state behind. Its control
+        // endpoint does not answer, and after a reboot its pid may belong to another process, so only
+        // the endpoint decides. A state file whose daemon answers is kept, and this start then fails.
+        if (config.service) await removeStaleState(config.state, { ignorePid: true });
         controlCleanup = await serveControl(controller, () => { void stop(); }, config.state,
           { url: config.url, bind: config.bind, port: config.port, remote: config.remote, oneWay: config.oneWay, paired: !!identity, ...config.relay ? { relay: config.relay } : {} }, pairing);
         if (stopping) { await controlCleanup(); return; }

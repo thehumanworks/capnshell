@@ -97,7 +97,7 @@ function processExists(pid: number): boolean {
  * that cannot be parsed yet may be one being written, and is left alone.
  * Returns whether the file was removed.
  */
-export async function removeStaleState(statePath?: string): Promise<boolean> {
+export async function removeStaleState(statePath?: string, options: { ignorePid?: boolean } = {}): Promise<boolean> {
   const file = daemonStatePath(statePath);
   let state: DaemonState;
   try { state = await readState(file); }
@@ -106,7 +106,7 @@ export async function removeStaleState(statePath?: string): Promise<boolean> {
     (await connectToState(state)).close();
     return false;
   } catch {
-    if (processExists(state.pid)) return false;
+    if (!options.ignorePid && processExists(state.pid)) return false;
   }
   await removeOwnedState(file, state.token);
   return true;

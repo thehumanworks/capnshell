@@ -3,6 +3,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync }
 import os from "node:os";
 import path from "node:path";
 import { configuredRelay, loadSettings, saveSettings, settingsPath } from "./settings.js";
+import { parseOptions } from "./options.js";
 
 let dir: string;
 const previous = { config: process.env.CNS_CONFIG_DIR, relay: process.env.CNS_RELAY };
@@ -43,4 +44,14 @@ test.skipIf(process.platform === "win32")("bad relay URLs and unsafe or invalid 
   expect(() => loadSettings()).toThrow("not valid JSON");
   writeFileSync(settingsPath(), JSON.stringify({ version: 1, other: true }));
   expect(() => loadSettings()).toThrow("not valid");
+});
+
+test.skipIf(process.platform === "win32")("the installed service's daemon reads the saved relay when it starts", () => {
+  const listen = ["listen", "--paired", "--no-repl", "--bind", "127.0.0.1"];
+  expect(parseOptions([...listen, "--service"]).relay).toBeUndefined();
+  saveSettings({ relay: "wss://saved.example" });
+  expect(parseOptions([...listen, "--service"]).relay).toBe("wss://saved.example");
+  expect(parseOptions([...listen, "--service", "--relay", "wss://given.example"]).relay).toBe("wss://given.example");
+  // Only the service's daemon: cns up passes the relay to the daemons it starts itself.
+  expect(parseOptions(listen).relay).toBeUndefined();
 });
