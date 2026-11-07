@@ -1,5 +1,6 @@
 import { newWebSocketRpcSession } from "capnweb";
-import { connectControl } from "../commands/daemon.js";
+import { connectControl, localRelay } from "../commands/daemon.js";
+import { dialAddresses } from "../relay-hub.js";
 import { closeSocket, openSocket } from "../connect.js";
 import type { PeerController } from "../console.js";
 import { loadIdentity } from "../identity.js";
@@ -8,8 +9,14 @@ import { RefusingShell } from "../refusing-shell.js";
 import type { ShellApi } from "../shell.js";
 import { plain, type RemoteNamedPty } from "../terminal.js";
 
+/** The file calls the file tools make, which the `files` grant covers on a paired device. */
+export type PeerFiles = Pick<ShellApi, "stat" | "readdir" | "mkdir" | "glob" | "readFile" | "writeFile">;
+
 /** The controller calls the tools make; terminals need a local TTY and are left out. */
-export type ToolController = Pick<PeerController, "peers" | "run" | "ptySessions" | "startPtySession" | "ptySession">;
+export type ToolController = Pick<PeerController, "peers" | "run" | "ptySessions" | "startPtySession" | "ptySession"> & {
+  /** The peer's files, for the length of one call: closing the link releases them. */
+  files(id: string): Promise<PeerFiles>;
+};
 
 /** One connection, opened for one tool call. Closing it ends the call's remote work. */
 export interface Link {
@@ -25,6 +32,8 @@ export interface Link {
 export interface McpTarget {
   /** For messages, such as the listener's URL. */
   readonly label: string;
+  /** This device's name for the paired device the tools reach, when there is one. */
+  readonly device?: string;
   /** The working directory for commands and sessions that do not name one. */
   readonly cwd?: string;
   open(signal: AbortSignal): Promise<Link>;
@@ -68,9 +77,12 @@ function limitCalls(open: (signal: AbortSignal) => Promise<Link>): (signal: Abor
  * does. Closing a call's connection makes the listener kill its commands and
  * end its waits.
  */
-export function listenerTarget(url: string, cwd?: string, expect?: { name: string; publicKey: string; addresses: string[] }): McpTarget {
+export function listenerTarget(url: string, cwd?: string, expect?: { name: string; publicKey: string; addresses: string[] }, state?: string): McpTarget {
+  // This device's relay, looked up once, for a paired device whose record names none.
+  let relay: Promise<string | undefined> | undefined;
   return {
     label: expect ? expect.name : url,
+    ...expect ? { device: expect.name } : {},
     cwd,
     open: limitCalls(async (signal) => {
       // A paired device: prove this device's identity and require the saved one on the other end.
@@ -79,8 +91,8 @@ export function listenerTarget(url: string, cwd?: string, expect?: { name: strin
       let hangUp: (reason: string) => void;
       let remote: ReturnType<typeof newWebSocketRpcSession<ShellApi>>;
       if (expect) {
-        // An encrypted channel to the paired device, at the first saved address that answers as it.
-        const { channel } = await connectFirst(expect.addresses, identity!, { expect: expect.publicKey, signal });
+        // An encrypted channel to the paired device, at the first saved address, or this device's relay, that answers as it.
+        const { channel } = await connectFirst(dialAddresses(expect, await (relay ??= localRelay(state))), identity!, { expect: expect.publicKey, signal });
         remote = rpcSession<ShellApi>(channel, new RefusingShell());
         hangUp = (reason) => channel.close(reason);
       } else {
@@ -100,6 +112,7 @@ export function listenerTarget(url: string, cwd?: string, expect?: { name: strin
           return await plain(session.info());
         },
         async ptySession(_id, name) { return await remote.ptySession(name) as unknown as RemoteNamedPty; },
+        async files() { return remote as unknown as PeerFiles; },
       };
       return {
         controller,
@@ -147,9 +160,31 @@ export function daemonTarget(statePath?: string, cwd?: string): McpTarget {
       let lost = false;
       connection.remote.onRpcBroken(() => { if (!closed) lost = true; });
       const { remote } = connection;
+      const forks: { [Symbol.dispose](): void }[] = [];
       return {
         controller: {
           ...connection.controller,
+          async files(id) {
+            // The peer's own file calls, which a paired device allows with the files grant alone.
+            try {
+              const files = await remote.files(id);
+              forks.push(files);
+              return files as unknown as PeerFiles;
+            } catch (error) {
+              if (!(error instanceof TypeError && error.message === "'files' is not a function.")) throw error;
+            }
+            // An older daemon: a fork of the peer's shell, which a paired device allows only with the shell grant.
+            let shell;
+            try { shell = await connection.controller.shell(id); }
+            catch (error) {
+              if (error instanceof TypeError && error.message === "'shell' is not a function.") {
+                throw new Error("The local daemon is from an older cns without file access; restart it with cns stop, then start it again.", { cause: error });
+              }
+              throw error;
+            }
+            forks.push(shell);
+            return shell as unknown as PeerFiles;
+          },
           // Closing the connection, as cancelling the call does, kills the command.
           async run(id, command, options) {
             try {
@@ -178,6 +213,7 @@ export function daemonTarget(statePath?: string, cwd?: string): McpTarget {
         close() {
           if (closed) return;
           closed = true;
+          for (const fork of forks.splice(0)) fork[Symbol.dispose]();
           connection.close();
         },
       };

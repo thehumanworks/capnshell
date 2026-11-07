@@ -3,9 +3,9 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { serve } from "bun";
 import { newBunWebSocketRpcSession, RpcTarget, type BunWebSocketTransport } from "capnweb";
-import type { PeerController } from "../console.js";
+import type { ConnectionController, PeerController } from "../console.js";
 import type { Decision, Proposal } from "../pairing.js";
-import type { PtyOptions, PtySessionOptions, PtySink, RunOptions } from "../shell.js";
+import type { AccessOptions, GlobOptions, PtyOptions, PtySessionOptions, PtySink, ReadFileOptions, RunOptions, ShellApi } from "../shell.js";
 
 /** What a paired daemon offers local clients for pairing and links; absent on a legacy listener. */
 export interface PairingController {
@@ -31,6 +31,24 @@ export interface PairingController {
 import { daemonStatePath, removeOwnedState, stateSchema, type DaemonStatus, type ListenerInfo } from "./daemon.js";
 
 interface SocketData { transport?: BunWebSocketTransport<SocketData> }
+
+/**
+ * A peer's file operations for a local client, such as the MCP file tools. Calls go to the
+ * peer's own shell rather than a fork of it, so a paired device that grants only `files`
+ * allows them; forking needs `shell`.
+ */
+class PeerFiles extends RpcTarget {
+  #files: ReturnType<ConnectionController["files"]>;
+  constructor(files: ReturnType<ConnectionController["files"]>) { super(); this.#files = files; }
+  #shell() { return this.#files as unknown as ShellApi; }
+  async stat(file: string) { return await this.#shell().stat(file); }
+  async access(file: string, options?: AccessOptions) { return await this.#shell().access(file, options); }
+  async readdir(directory: string) { return await this.#shell().readdir(directory); }
+  async mkdir(directory: string) { return await this.#shell().mkdir(directory); }
+  async glob(pattern: string, cwd: string, options?: GlobOptions) { return await this.#shell().glob(pattern, cwd, options); }
+  async readFile(file: string, options?: ReadFileOptions) { return await this.#shell().readFile(file, options); }
+  async writeFile(file: string, data: Uint8Array) { return await this.#shell().writeFile(file, data); }
+}
 
 /** Only this narrow local control surface is exported over Cap'n Web. */
 export class ControlApi extends RpcTarget {
@@ -92,6 +110,12 @@ export class ControlApi extends RpcTarget {
   ptySession(id: string, name: string) { return this.#controller.ptySession(id, name); }
   /** A fork of the peer's whole shell, proxied by reference; releasing it kills its commands. */
   shell(id: string) { return this.#controller.shell(id); }
+  /** The peer's file operations, which need only the files grant on a paired device. */
+  files(id: string) {
+    const files = (this.#controller as Partial<Pick<ConnectionController, "files">>).files;
+    if (!files) throw new Error("This daemon offers no file access.");
+    return new PeerFiles(files.call(this.#controller, id));
+  }
   stop() {
     // Let Cap'n Web send the successful result before closing the transport.
     setTimeout(this.#stop, 25);

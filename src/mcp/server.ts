@@ -1,13 +1,18 @@
+import path from "node:path";
 import { McpServer, type CallToolResult, type ServerContext } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import manifest from "../../package.json" with { type: "json" };
 import { DEFAULT_UNTIL_MS, describeExit, formatSessions } from "../commands/one-shot.js";
 import { errorMessage } from "../errors.js";
+import { explainDenial } from "../peers.js";
 import { MAX_KEYS } from "../keys.js";
 import { commandSchema } from "../platform.js";
-import { MAX_SCREEN_HISTORY, MAX_TIMEOUT_MS, sessionNameSchema, type PtyExit, type PtyScreen, type PtySessionInfo } from "../shell.js";
+import {
+  MAX_DIRECTORY_ENTRIES, MAX_FILE_CHUNK_BYTES, MAX_GLOB_RESULTS, MAX_SCREEN_HISTORY, MAX_TIMEOUT_MS, MAX_WRITE_BYTES, sessionNameSchema,
+  type PtyExit, type PtyScreen, type PtySessionInfo, type ShellInfo,
+} from "../shell.js";
 import { plain, type RemoteNamedPty } from "../terminal.js";
-import type { Link, McpTarget } from "./target.js";
+import type { Link, McpTarget, PeerFiles } from "./target.js";
 
 /** Agents rarely mean to wait forever, and some clients give up silently. */
 export const DEFAULT_RUN_TIMEOUT_MS = 120_000;
@@ -20,6 +25,7 @@ const instructions = `cns runs commands and terminal programs on other machines 
 - run_command starts a fresh non-interactive shell for every call and returns when the command finishes. cd and variables do not persist; pass cwd instead. Stdin is closed.
 - For interactive programs, REPLs, TUIs, servers and watchers, use a named session: start_session, then send_keys and read_screen, then kill_session. Sessions keep running between calls until killed, and other clients of the same peer can see them.
 - To wait for a program, pass until to read_screen or send_keys rather than sleeping.
+- For files on a peer, use read_file, write_file, list_directory and glob rather than cat, echo or ls through run_command. Paths are in the peer's own syntax; relative ones start from the default working directory.
 - When several peers are connected, pass peer to choose one.`;
 
 const peer = z.string().min(1).max(64).optional()
@@ -223,7 +229,7 @@ async function invoke(target: McpTarget, ctx: ServerContext, activity: string | 
   } catch (error) {
     // The SDK sends nothing for a cancelled request.
     if (signal.aborted) throw error;
-    const message = link?.lost ? `Lost the connection to ${target.label}: ${errorMessage(error)}` : errorMessage(error);
+    const message = link?.lost ? `Lost the connection to ${target.label}: ${errorMessage(error)}` : explainDenial(errorMessage(error), target.device);
     return { content: [{ type: "text", text: message }], isError: true };
   } finally {
     stopProgress();
@@ -237,6 +243,161 @@ async function withSession<T>(link: Link, peerId: string, sessionName: string, u
   const session = await link.controller.ptySession(peerId, sessionName);
   try { return await use(session); }
   finally { session[Symbol.dispose](); }
+}
+
+/** Lines read_file returns when the call does not say. */
+export const DEFAULT_READ_LINES = 2000;
+/** Entries list_directory and paths glob return when the call does not say. */
+export const DEFAULT_LIST_LIMIT = 1000;
+/** The furthest into a file read_file reads to reach the lines asked for. */
+export const MAX_SCAN_BYTES = 64 * 1024 * 1024;
+/** A NUL byte in this much of a file's start marks it as binary. */
+const BINARY_SNIFF_BYTES = 8192;
+
+const filePath = z.string().min(1).max(32768)
+  .describe("Path on the peer, in its own syntax. Relative paths and ~ start from the default working directory and the peer user's home.");
+const directoryPath = filePath.optional()
+  .describe("Directory on the peer, in its own syntax. Defaults to the default working directory, else the peer user's home.");
+const listLimit = z.int().min(1).max(MAX_GLOB_RESULTS).optional();
+const kindSchema = z.enum(["file", "directory", "symlink", "other"]);
+const readInput = z.strictObject({
+  path: filePath,
+  peer,
+  offset: z.int().min(1).max(Number.MAX_SAFE_INTEGER).optional().describe("First line to return, counting from 1. Default 1."),
+  limit: z.int().min(1).max(1_000_000).optional().describe(`How many lines to return at most. Default ${DEFAULT_READ_LINES}.`),
+});
+const readOutput = z.object({
+  peer: z.string(),
+  path: z.string().describe("The absolute path read."),
+  content: z.string().describe("The lines returned, exactly as in the file, joined with newlines."),
+  startLine: z.int(),
+  endLine: z.int().describe("The last line returned; startLine - 1 when none were."),
+  totalLines: z.int().nullable().describe("Lines in the file, when the read reached its end."),
+  size: z.int().describe("The file's size in bytes."),
+  truncated: z.boolean().describe("True when the file goes on beyond endLine."),
+  nextOffset: z.int().nullable().describe("The offset that continues the read, when truncated."),
+});
+const writeInput = z.strictObject({
+  path: filePath,
+  content: z.string().max(MAX_WRITE_BYTES).describe(`The whole new content, written as UTF-8, up to ${MAX_WRITE_BYTES / 1024 / 1024} MiB.`),
+  peer,
+});
+const listInput = z.strictObject({
+  path: directoryPath,
+  peer,
+  limit: listLimit.describe(`How many entries to return at most. Default ${DEFAULT_LIST_LIMIT}.`),
+});
+const globInput = z.strictObject({
+  pattern: z.string().min(1).max(1024).describe("Glob pattern matched against paths relative to path, such as **/*.ts or src/*.{js,json}."),
+  path: directoryPath,
+  ignore: z.array(z.string().min(1).max(1024)).max(64).optional()
+    .describe("Glob patterns of paths to leave out, relative to path. One ending in /**, such as **/node_modules/**, also skips searching that directory."),
+  peer,
+  limit: listLimit.describe(`How many paths to return at most. Default ${DEFAULT_LIST_LIMIT}.`),
+});
+
+/** The peer's path rules: Windows peers use backslashes and drive letters. */
+const pathsOf = (info: ShellInfo) => info.platform === "win32" ? path.win32 : path.posix;
+
+interface FileCall { peerId: string; files: PeerFiles; paths: typeof path.posix; resolve(file: string | undefined): string }
+
+/** The peer a file call uses, with its files and paths resolved against its working directory and home. */
+async function fileCall(link: Link, target: McpTarget, requested: string | undefined): Promise<FileCall> {
+  const peerId = await link.peer(requested);
+  const summary = (await link.controller.peers()).find((candidate) => candidate.id === peerId);
+  if (!summary) throw new Error(`Peer ${peerId} is no longer connected.`);
+  const { info } = summary;
+  const paths = pathsOf(info);
+  const base = target.cwd ?? info.cwd;
+  const resolve = (file: string | undefined) => {
+    if (file === undefined) return base;
+    if (file === "~") return info.cwd;
+    if (file.startsWith("~/") || (paths === path.win32 && file.startsWith("~\\"))) return paths.join(info.cwd, file.slice(2));
+    return paths.resolve(base, file);
+  };
+  return { peerId, files: await link.controller.files(peerId), paths, resolve };
+}
+
+const isMissing = (error: unknown) => /^ENOENT\b/.test(errorMessage(error)) || (error instanceof Error && "code" in error && error.code === "ENOENT");
+
+interface ReadResult {
+  content: string;
+  endLine: number;
+  totalLines: number | null;
+  size: number;
+  /** The first line not returned whole, when there is one. */
+  nextOffset: number | null;
+}
+
+/** The start of a line too long for a result, cut between characters. */
+function cutLine(text: string): string {
+  let end = MAX_RESULT_CHARS - 64;
+  if (isLowSurrogate(text, end)) end--;
+  return `${text.slice(0, end)}[... line shortened ...]`;
+}
+
+/**
+ * Lines `offset` to `offset + limit - 1` of a text file, read in chunks from its
+ * start. A result ends early, on a line boundary, rather than exceed
+ * MAX_RESULT_CHARS; a single longer line comes back shortened.
+ */
+export async function readLines(files: PeerFiles, file: string, offset: number, limit: number): Promise<ReadResult> {
+  const decoder = new TextDecoder("utf-8");
+  const last = offset + limit - 1;
+  const lines: string[] = [];
+  let seen = 0; // Complete lines so far.
+  let chars = 0;
+  let partial = "";
+  let position = 0;
+  let size = 0;
+  /** Take line `seen + 1`; returns the next offset once the result is full. */
+  const take = (text: string): number | undefined => {
+    const number = ++seen;
+    if (number < offset) return undefined;
+    if (number > last) return number;
+    const added = text.length + (lines.length ? 1 : 0);
+    if (chars + added <= MAX_RESULT_CHARS) {
+      lines.push(text);
+      chars += added;
+      return undefined;
+    }
+    if (lines.length) return number;
+    lines.push(cutLine(text));
+    return number + 1;
+  };
+  const result = (nextOffset: number | null, totalLines: number | null): ReadResult =>
+    ({ content: lines.join("\n"), endLine: offset + lines.length - 1, totalLines, size, nextOffset });
+  for (;;) {
+    if (position >= MAX_SCAN_BYTES) {
+      throw new Error(`Line ${offset} is beyond the first ${MAX_SCAN_BYTES / 1024 / 1024} MiB of ${file}; use run_command with tail, sed or Get-Content to reach it.`);
+    }
+    const chunk = await plain(files.readFile(file, { offset: position, length: MAX_FILE_CHUNK_BYTES }));
+    const data = new Uint8Array(chunk.data);
+    if (position === 0 && data.subarray(0, BINARY_SNIFF_BYTES).includes(0)) {
+      throw new Error(`${file} is a binary file (${chunk.size} bytes); read_file reads text. Use run_command, for example with base64 or xxd, to see its bytes.`);
+    }
+    size = chunk.size;
+    position += data.byteLength;
+    const eof = chunk.eof || data.byteLength === 0;
+    const parts = (partial + decoder.decode(data, { stream: !eof })).split("\n");
+    partial = parts.pop()!;
+    for (const part of parts) {
+      const next = take(part);
+      if (next !== undefined) return result(next, null);
+    }
+    if (eof) {
+      if (partial !== "") {
+        const next = take(partial);
+        if (next !== undefined) return result(next > seen ? null : next, next > seen ? seen : null);
+      }
+      return result(null, seen);
+    }
+    // A line too long to return whole need not be read to its end.
+    if (seen + 1 >= offset && seen + 1 <= last && partial.length > MAX_RESULT_CHARS) {
+      const next = take(partial);
+      if (next !== undefined) return result(next, null);
+    }
+  }
 }
 
 /** A fresh server for one MCP connection or HTTP request, with tools that reach `target`'s peers. */
@@ -373,6 +534,121 @@ export function createMcpServer(target: McpTarget): McpServer {
     const peerId = await link.peer(args.peer);
     const exit = await withSession(link, peerId, args.name, (session) => plain(session.kill()));
     return { text: `Removed session ${args.name} (${describeExit(exit)}).`, structured: { exit: toExit(exit) } };
+  }));
+
+  server.registerTool("read_file", {
+    title: "Read file",
+    description: "Read a text file on a peer and return its lines exactly as they are, without line numbers. " +
+      `Returns up to ${DEFAULT_READ_LINES} lines from offset by default and at most ${MAX_RESULT_CHARS} characters; ` +
+      "when truncated, call again with nextOffset to continue. Binary files are refused.",
+    inputSchema: readInput,
+    outputSchema: readOutput,
+    annotations: observing,
+  }, async (args, ctx) => invoke(target, ctx, undefined, async (link) => {
+    const call = await fileCall(link, target, args.peer);
+    const file = call.resolve(args.path);
+    const offset = args.offset ?? 1;
+    const read = await readLines(call.files, file, offset, args.limit ?? DEFAULT_READ_LINES);
+    const count = read.endLine - offset + 1;
+    const of = read.totalLines === null ? "" : ` of ${read.totalLines}`;
+    let header: string;
+    if (read.totalLines === 0) header = `${file}: empty file`;
+    else if (count === 0) header = `${file}: no lines from line ${offset}${of}`;
+    else header = `${file}: lines ${offset}-${read.endLine}${of}`;
+    const lines = [`[${header} · ${read.size} bytes]`];
+    if (count > 0) lines.push(read.content);
+    if (read.nextOffset !== null) lines.push(`[More lines follow; pass offset ${read.nextOffset} to continue.]`);
+    return {
+      text: lines.join("\n"),
+      structured: {
+        peer: call.peerId, path: file, content: read.content, startLine: offset, endLine: read.endLine, totalLines: read.totalLines,
+        size: read.size, truncated: read.nextOffset !== null, nextOffset: read.nextOffset,
+      },
+    };
+  }));
+
+  server.registerTool("write_file", {
+    title: "Write file",
+    description: "Create or replace a file on a peer with the given text, written as UTF-8. Missing parent directories are created. " +
+      "An existing file is overwritten in place, keeping its permissions; links are followed. " +
+      `The content can be up to ${MAX_WRITE_BYTES / 1024 / 1024} MiB. To change part of a file, read it, edit the text and write it back.`,
+    inputSchema: writeInput,
+    outputSchema: z.object({ peer: z.string(), path: z.string(), bytes: z.int(), created: z.boolean().describe("True when the file did not exist before.") }),
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+  }, async (args, ctx) => invoke(target, ctx, undefined, async (link) => {
+    const call = await fileCall(link, target, args.peer);
+    const file = call.resolve(args.path);
+    const data = Buffer.from(args.content, "utf8");
+    if (data.byteLength > MAX_WRITE_BYTES) {
+      throw new Error(`The content is ${data.byteLength} bytes as UTF-8; write_file accepts at most ${MAX_WRITE_BYTES}.`);
+    }
+    let created = false;
+    try {
+      const existing = await plain(call.files.stat(file));
+      if (existing.kind === "directory") throw new Error(`${file} is a directory.`);
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+      created = true;
+      await call.files.mkdir(call.paths.dirname(file));
+    }
+    await call.files.writeFile(file, new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+    return {
+      text: `${created ? "Created" : "Wrote"} ${file} (${data.byteLength} bytes).`,
+      structured: { peer: call.peerId, path: file, bytes: data.byteLength, created },
+    };
+  }));
+
+  server.registerTool("list_directory", {
+    title: "List directory",
+    description: "List a directory on a peer: each entry's name and whether it is a file, directory, symbolic link or other. " +
+      "Directories are shown with a trailing slash in the text. Hidden entries are included.",
+    inputSchema: listInput,
+    outputSchema: z.object({
+      peer: z.string(),
+      path: z.string(),
+      entries: z.array(z.object({ name: z.string(), kind: kindSchema })),
+      truncated: z.boolean().describe("True when the directory has more entries than were returned."),
+    }),
+    annotations: observing,
+  }, async (args, ctx) => invoke(target, ctx, undefined, async (link) => {
+    const call = await fileCall(link, target, args.peer);
+    const directory = call.resolve(args.path);
+    const limit = args.limit ?? DEFAULT_LIST_LIMIT;
+    const all = await plain(call.files.readdir(directory));
+    all.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+    const entries = all.slice(0, limit);
+    const truncated = all.length > limit || all.length >= MAX_DIRECTORY_ENTRIES;
+    const listing = entries.map((entry) => entry.kind === "directory" ? `${entry.name}/` : entry.name).join("\n");
+    const lines = [`[${directory}: ${entries.length} ${entries.length === 1 ? "entry" : "entries"}${truncated ? ", more not shown" : ""}]`];
+    if (listing) lines.push(clip(listing).text);
+    return { text: lines.join("\n"), structured: { peer: call.peerId, path: directory, entries, truncated } };
+  }));
+
+  server.registerTool("glob", {
+    title: "Find files",
+    description: "Find files on a peer whose path relative to a directory matches a glob pattern, such as **/*.ts, and return " +
+      "their absolute paths. * and ? stay within one path segment, ** crosses directories, {a,b} picks alternatives. " +
+      "Hidden files are included and symbolic links are not followed. Pass ignore, such as **/node_modules/**, to skip " +
+      "large directories.",
+    inputSchema: globInput,
+    outputSchema: z.object({
+      peer: z.string(),
+      path: z.string(),
+      paths: z.array(z.string()),
+      truncated: z.boolean().describe("True when more paths match than were returned."),
+    }),
+    annotations: observing,
+  }, async (args, ctx) => invoke(target, ctx, "Searching", async (link) => {
+    const call = await fileCall(link, target, args.peer);
+    const directory = call.resolve(args.path);
+    const limit = args.limit ?? DEFAULT_LIST_LIMIT;
+    // One more than the limit tells whether there are more.
+    const found = await plain(call.files.glob(args.pattern, directory, { ignore: args.ignore ?? [], limit: Math.min(limit + 1, MAX_GLOB_RESULTS) }));
+    const paths = found.slice(0, limit);
+    const truncated = found.length > limit || found.length >= MAX_GLOB_RESULTS;
+    const lines = [`[${paths.length} ${paths.length === 1 ? "match" : "matches"} for ${args.pattern} in ${directory}${truncated ? ", more not shown" : ""}]`];
+    if (paths.length) lines.push(clip(paths.join("\n")).text);
+    return { text: lines.join("\n"), structured: { peer: call.peerId, path: directory, paths, truncated } };
   }));
 
   return server;

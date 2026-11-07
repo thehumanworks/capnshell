@@ -1,13 +1,15 @@
 import { isIP } from "node:net";
 import { validatePeerUrl } from "./aliases.js";
 import { relayEndpoint } from "./relay-hub.js";
+import { loadSettings } from "./settings.js";
 import { isSavedPeer, resolvePeer, type Permission } from "./peers.js";
 import { Command, Option } from "commander";
 import { z } from "zod";
 import { MAX_SCREEN_HISTORY, MAX_TIMEOUT_MS, sessionNameSchema } from "./shell.js";
 import { MAX_KEYS } from "./keys.js";
+import type { CopyRequest } from "./commands/copy.js";
 
-const roles = ["listen", "connect", "run", "tty", "sessions", "keys", "screen", "kill"] as const;
+const roles = ["listen", "connect", "run", "tty", "cp", "sessions", "keys", "screen", "kill"] as const;
 /** Commands that address one named PTY session. */
 const sessionRoles = new Set<PeerRole>(["keys", "screen", "kill"]);
 type PeerRole = typeof roles[number];
@@ -43,6 +45,7 @@ const peerOptionsSchema = z.strictObject({
   literal: z.boolean().optional(),
   until: z.string().min(1, "--until requires text.").max(4096).optional(),
   json: z.boolean().optional(),
+  stdin: z.boolean().default(true),
 });
 
 export interface PeerConfig {
@@ -83,6 +86,10 @@ export interface PeerConfig {
   /** For screen: wait until the screen shows this text. */
   until?: string;
   json?: boolean;
+  /** For run: forward this process's stdin when it is not a terminal (the default). */
+  stdin?: boolean;
+  /** For cp: the file to copy and which way. */
+  copy?: CopyRequest;
 }
 
 export function isLoopback(host: string): boolean {
@@ -111,6 +118,11 @@ function resolveOptions(role: PeerRole, command: Command, destination: string | 
   const options = { ...command.opts() };
   // A daemon started by cns up --relay gets the relay URL, which may hold a token, through its environment.
   if (role === "listen" && options.paired && options.relay === undefined && process.env.CNS_DAEMON_RELAY) options.relay = process.env.CNS_DAEMON_RELAY;
+  // The installed service's daemon reads the relay saved with cns config relay when it starts, so changing that setting reaches it.
+  if (role === "listen" && options.paired && options.service && options.relay === undefined && process.platform !== "win32") {
+    const saved = loadSettings().relay;
+    if (saved) options.relay = saved;
+  }
   if (options.peer !== undefined) {
     if (destination !== undefined) throw new Error("Use either a URL or --peer, not both.");
     destination = options.peer;
@@ -132,7 +144,7 @@ function resolveOptions(role: PeerRole, command: Command, destination: string | 
       delete options[name];
     }
   }
-  const { bind, port, repl, allowRemote, oneWay, paired, relay, daemon, service, state, cwd, timeout, cols, rows, term, screen, history, name, attach, literal, until, json } = peerOptionsSchema.parse(options);
+  const { bind, port, repl, allowRemote, oneWay, paired, relay, daemon, service, state, cwd, timeout, cols, rows, term, screen, history, name, attach, literal, until, json, stdin } = peerOptionsSchema.parse(options);
   if (relay !== undefined) {
     if (!paired) throw new Error("--relay is for the paired daemon; start it with cns up --relay URL.");
     relayEndpoint(relay, "accept", "A".repeat(43));
@@ -159,7 +171,7 @@ function resolveOptions(role: PeerRole, command: Command, destination: string | 
   return {
     role, mode, bind, port, url, noRepl: role === "run" || role === "tty" || !repl, oneWay, paired, relay, expect, daemon, service, state, cwd, timeoutMs: timeout,
     cols, rows, term, screen: screen || role === "screen" ? { history: history ?? 0 } : undefined,
-    name: name ?? attach, attach: attach !== undefined, literal, until, json,
+    name: name ?? attach, attach: attach !== undefined, literal, until, json, ...role === "run" ? { stdin } : {},
     remote: mode === "listen" ? !isLoopback(bind) : !isLoopback(new URL(url).hostname),
   };
 }
@@ -171,6 +183,7 @@ export function addPeerCommands(program: Command, run: (config: PeerConfig) => v
     run: "Execute one shell command on a peer and exit with its status",
     connect: "Connect to a ws:// or wss:// peer",
     tty: "Open an interactive terminal (PTY) on a peer, or start a named session",
+    cp: "Copy a file between this device and a peer",
     sessions: "List a peer's named PTY sessions",
     keys: "Send keys to a named PTY session",
     screen: "Print a named PTY session's screen, optionally once it shows some text",
@@ -205,7 +218,11 @@ export function addPeerCommands(program: Command, run: (config: PeerConfig) => v
       command.addOption(new Option("--cwd <path>", "Absolute working directory on the remote peer").env("CNS_CWD"))
         .option("--timeout <ms>", `Command timeout, 0-${MAX_TIMEOUT_MS} ms (0 disables it)`);
     }
+    if (role === "run") command.option("-n, --no-stdin", "Do not forward this process's stdin to the command");
     if (role === "sessions") command.option("--json", "Print the sessions as JSON");
+    if (role === "cp") {
+      command.addHelpText("after", "\nExactly one path is on the peer, written TARGET:PATH, where TARGET is a paired device's name or a\nsaved alias, or :PATH for the --peer, --bind/--port or default target. A relative or ~/ remote\npath starts at the remote user's home. A destination that is a directory, or ends with /,\nreceives the file under its own name. New files keep the source's permission bits.\nOne file per call; directories are not copied. Needs the files grant on a paired device.\nExamples: cns cp ./build.tar.gz studio:/tmp/    cns cp studio:~/notes.txt .\n          cns cp --peer ws://box:47381 report.pdf :reports/");
+    }
     if (role === "keys") {
       command.option("-l, --literal", "Send every argument as literal text, without key names")
         .addHelpText("after", `\nEach argument is a tmux-style key name or literal text, up to ${MAX_KEYS} arguments:\n  Enter Tab BTab Escape Space BSpace Up Down Left Right Home End PageUp PageDown\n  Insert Delete F1-F12, and C-, M- or S- prefixes, such as C-c, M-x, C-Left or S-Tab.\nArguments that are not key names are typed as they are. Put -- before text starting with -.\nExamples: cns keys build 'make test' Enter    cns keys build C-c    cns keys build -- -n Enter`);
@@ -270,6 +287,19 @@ export function addPeerCommands(program: Command, run: (config: PeerConfig) => v
         if (config.attach && shellCommand !== undefined) throw new Error("--attach joins a running session; it does not take a command.");
         return run({ ...config, command: shellCommand });
       });
+    } else if (role === "cp") {
+      command.usage("[options] <source> <destination>").argument("<source>").argument("<destination>");
+      command.action((source: string, destination: string) => {
+        const from = splitRemote(source);
+        const to = splitRemote(destination);
+        if (from && to) throw new Error("cp copies between this device and a peer: one path must be local.");
+        if (!from && !to) throw new Error("cp needs one path on the peer, written TARGET:PATH, or :PATH with --peer.");
+        const remote = (from ?? to)!;
+        const local = from ? destination : source;
+        if (!local) throw new Error("cp needs a local path.");
+        if (remote.target !== undefined && /^wss?$/i.test(remote.target)) throw new Error("Give a URL with --peer and write the remote path as :PATH.");
+        return run({ ...resolveOptions(role, command, remote.target), copy: { direction: from ? "download" : "upload", local, remote: remote.path } });
+      });
     } else if (role === "sessions") {
       command.usage("[target] [options]").argument("[target]", "A paired device's name, a saved alias or a ws:// URL").action((url: string | undefined) => run(resolveOptions(role, command, url)));
     } else if (sessionRoles.has(role)) {
@@ -294,6 +324,20 @@ export function addPeerCommands(program: Command, run: (config: PeerConfig) => v
       command.action(() => run(resolveOptions(role, command, undefined)));
     }
   }
+}
+
+/**
+ * `TARGET:PATH` names a path on a saved peer and `:PATH` one on the --peer or default target, as
+ * with scp: a colon before any slash. A Windows drive letter such as C:\\ stays local, and a local
+ * path with a colon can be written ./a:b.
+ */
+export function splitRemote(value: string, platform: NodeJS.Platform = process.platform): { target?: string; path: string } | undefined {
+  const colon = value.indexOf(":");
+  if (colon < 0) return undefined;
+  const prefix = value.slice(0, colon);
+  if (/[\\/]/.test(prefix)) return undefined;
+  if (platform === "win32" && /^[A-Za-z]$/.test(prefix)) return undefined;
+  return { ...prefix ? { target: prefix } : {}, path: value.slice(colon + 1) };
 }
 
 // The same command definitions are used by the CLI and option unit tests.

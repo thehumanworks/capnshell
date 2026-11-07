@@ -3,7 +3,7 @@ import type { RpcStub } from "capnweb";
 import { formatSessions } from "./commands/one-shot.js";
 import { errorMessage } from "./errors.js";
 import {
-  MAX_TIMEOUT_MS, type PtyOptions, type PtySessionInfo, type PtySessionOptions, type PtySink, type RunOptions, type RunResult, type ShellApi, type ShellInfo,
+  MAX_TIMEOUT_MS, type ExecInput, type ExecResult, type ExecSink, type PtyOptions, type PtySessionInfo, type PtySessionOptions, type PtySink, type RunOptions, type RunResult, type ShellApi, type ShellInfo,
 } from "./shell.js";
 import { attachSession, attachTerminal, type RemoteNamedPty, type RemotePty } from "./terminal.js";
 
@@ -13,6 +13,9 @@ export interface PeerSummary {
   /** Set for an authenticated paired device; `daemon` for the daemons' standing link rather than one command's connection. */
   peer?: { name: string; fingerprint: string; daemon: boolean; via: "direct" | "relay" };
 }
+/** A peer's file operations, as cns cp uses them. */
+export type RemoteFiles = Pick<RpcStub<ShellApi>, "stat" | "readFile" | "writeFile" | "writeFileAt">;
+
 export interface PeerController {
   peers(): Promise<PeerSummary[]>;
   info(id: string): Promise<ShellInfo>;
@@ -28,6 +31,17 @@ export interface PeerController {
    * Rejects when the peer's cns predates ShellApi.fork.
    */
   shell(id: string): Promise<RpcStub<ShellApi>>;
+}
+
+/** What one-shot commands such as cns run and cns cp use on the connection they made. */
+export interface ConnectionController extends PeerController {
+  /**
+   * Like run, but stream the output to `sink` as it arrives and, with `input`, feed the
+   * command's standard input from it. A peer whose cns predates exec input closes it.
+   */
+  exec(id: string, sink: ExecSink, command: string, options: RunOptions, input?: ExecInput): Promise<ExecResult>;
+  /** The peer's file operations on this connection. Unlike `shell`, they need only the files grant. */
+  files(id: string): RemoteFiles;
 }
 
 const help = `

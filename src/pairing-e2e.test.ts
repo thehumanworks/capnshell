@@ -2,14 +2,37 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 import { generateIdentity } from "./identity.js";
 import { suggestedName } from "./pairing.js";
 import { savePairedPeer } from "./peers.js";
 import { connectControl } from "./commands/daemon.js";
-import { launchCli, unusedPort } from "./test-support.js";
+import { cliEnvironment, cliInvocation, launchCli, unusedPort } from "./test-support.js";
 
 const posix = process.platform !== "win32";
+const decoder = new TextDecoder();
+
+/** Run cns on a pseudo-terminal, as a person at a terminal would. */
+function inTerminal(t: TestContext, args: string[], env: Record<string, string>) {
+  const invocation = cliInvocation(args);
+  let output = "";
+  let notify = () => {};
+  const child = Bun.spawn([invocation.file, ...invocation.args], {
+    env: cliEnvironment(env) as Record<string, string>,
+    terminal: { cols: 200, rows: 30, name: "xterm-256color", data: (_terminal, data) => { output += decoder.decode(data, { stream: true }); notify(); } },
+  });
+  t.after(() => { if (child.exitCode === null) child.kill(); });
+  return {
+    write: (text: string) => child.terminal!.write(text),
+    get output() { return output; },
+    exited: child.exited,
+    waitFor: (needle: string) => new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`Waiting for ${JSON.stringify(needle)} in ${JSON.stringify(output.slice(-600))}`)), 15000);
+      notify = () => { if (output.includes(needle)) { clearTimeout(timer); resolve(); } };
+      notify();
+    }),
+  };
+}
 
 test("two devices pair, run commands within their grants, and refuse everyone else", { skip: !posix, timeout: 90000 }, async (t) => {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-pairing-")));
@@ -90,6 +113,8 @@ test("two devices pair, run commands within their grants, and refuse everyone el
   // Commands name the paired device and run within its grants.
   const run = await cli(laptop, ["run", "studio", "--", "printf ok; printf err >&2; exit 3"]);
   assert.deepEqual([run.code, run.stdout, run.stderr], [3, "ok", "err"]);
+  const piped = await cli(laptop, ["run", "studio", "--", "tr a-z A-Z"], "piped input");
+  assert.deepEqual([piped.code, piped.stdout], [0, "PIPED INPUT"]);
   const sessions = await cli(laptop, ["sessions", "studio", "--json"]);
   assert.deepEqual([sessions.code, JSON.parse(sessions.stdout)], [0, []]);
   const started = await cli(laptop, ["tty", "studio", "--name", "work", "--", "printf READY; sleep 30"]);
@@ -117,6 +142,17 @@ test("two devices pair, run commands within their grants, and refuse everyone el
   assert.match(doctor.stdout, new RegExp(`^studio: paired device ${studioIdentity.fingerprint}\n  This device may use its:  shell, files, sessions\n  It may use this device's: shell\n  Daemon link: no daemon running here \\(cns up\\)\n  ws://127\\.0\\.0\\.1:${port}: ok \\(`));
   const doctorJson = JSON.parse((await cli(laptop, ["doctor", "studio", "--json", "--state", laptop.state])).stdout);
   assert.equal(doctorJson.attempts[0].result, "ok");
+  // Without a name, doctor checks this device: studio is ready on loopback only, laptop has no daemon.
+  const self = await cli(studio, ["doctor", "--state", studio.state]);
+  assert.equal(self.code, 0, self.stderr);
+  assert.match(self.stdout, new RegExp(`^Identity: +${studioIdentity.fingerprint} `));
+  assert.match(self.stdout, new RegExp(`\n  ws://127\\.0\\.0\\.1:${port}: private, this network only\n`));
+  assert.match(self.stdout, /Warning: Every address here is private/);
+  const selfJson = JSON.parse((await cli(studio, ["doctor", "--json", "--state", studio.state])).stdout);
+  assert.deepEqual([selfJson.daemon.matchesIdentity, selfJson.reachableBeyondNetwork, selfJson.problems], [true, false, []]);
+  const noDaemon = await cli(laptop, ["doctor", "--state", laptop.state]);
+  assert.equal(noDaemon.code, 5);
+  assert.match(noDaemon.stdout, /Daemon: +not running\n[\s\S]*Problem: No daemon runs here/);
 
   // Grants change after pairing, and apply to the next connection.
   const revoked = await cli(studio, ["peer", "revoke", "laptop", "shell", "--state", studio.state]);
@@ -142,8 +178,44 @@ test("two devices pair, run commands within their grants, and refuse everyone el
   assert.match(second.inviting.stdout, /It may use this machine's: files\. This machine may use its: none\./);
   const denied = await cli(reader, ["run", "studio", "--", "printf x"]);
   assert.equal(denied.code, 4, denied.stderr);
-  assert.match(denied.stderr, /Permission denied: shell not granted to reader/);
+  assert.match(denied.stderr, /^Permission denied: shell not granted to reader\. To allow it, run on studio: cns peer grant reader shell$/m);
   assert.equal((await cli(reader, ["sessions", "studio"])).code, 4);
+  // The files grant alone is enough to copy files both ways; paths starting with ~ are in the remote home.
+  await writeFile(path.join(reader.dir, "note.txt"), "from reader");
+  const sent = await cli(reader, ["cp", path.join(reader.dir, "note.txt"), "studio:~/note.txt"]);
+  assert.equal(sent.code, 0, sent.stderr);
+  assert.equal(await readFile(path.join(studio.dir, "note.txt"), "utf8"), "from reader");
+  const fetched = await cli(reader, ["cp", "studio:note.txt", path.join(reader.dir, "back.txt")]);
+  assert.equal(fetched.code, 0, fetched.stderr);
+  assert.equal(await readFile(path.join(reader.dir, "back.txt"), "utf8"), "from reader");
+  // The MCP file tools through reader's daemon need only the files grant too.
+  const readerUp = await cli(reader, ["up", "--bind", "127.0.0.1", "--port", await unusedPort("127.0.0.1"), "--state", reader.state]);
+  assert.equal(readerUp.code, 0, readerUp.stderr);
+  try {
+    const linked = Date.now() + 15000;
+    const readerLinked = async () => {
+      const control = await connectControl(reader.state);
+      try { return (await control.controller.peers()).some((peer) => peer.peer?.name === "studio"); } finally { control.close(); }
+    };
+    while (Date.now() < linked && !(await readerLinked())) await new Promise((resolve) => setTimeout(resolve, 200));
+    const { Client } = await import("@modelcontextprotocol/client");
+    const { StdioClientTransport } = await import("@modelcontextprotocol/client/stdio");
+    const invocation = cliInvocation(["mcp", "--daemon", "--state", reader.state]);
+    const client = new Client({ name: "test", version: "1" });
+    await client.connect(new StdioClientTransport({ command: invocation.file, args: invocation.args, env: cliEnvironment(reader.env) as Record<string, string> }));
+    try {
+      const read = await client.callTool({ name: "read_file", arguments: { peer: "studio", path: path.join(studio.dir, "note.txt") } });
+      assert.equal(read.isError, undefined, JSON.stringify(read.content));
+      assert.equal((read.structuredContent as { content: string }).content, "from reader");
+      const wrote = await client.callTool({ name: "write_file", arguments: { peer: "studio", path: path.join(studio.dir, "mcp.txt"), content: "via mcp" } });
+      assert.equal(wrote.isError, undefined, JSON.stringify(wrote.content));
+      assert.equal(await readFile(path.join(studio.dir, "mcp.txt"), "utf8"), "via mcp");
+      const ran = await client.callTool({ name: "run_command", arguments: { peer: "studio", command: "printf x" } });
+      assert.equal(ran.isError, true);
+    } finally { await client.close(); }
+  } finally {
+    assert.equal((await cli(reader, ["stop", "--state", reader.state])).code, 0);
+  }
 
   // --yes alone grants nothing; the invited device saves the other under the name the invite suggests.
   const guest = await device("guest");
@@ -153,6 +225,37 @@ test("two devices pair, run commands within their grants, and refuse everyone el
   assert.match(third.accepting.stdout, new RegExp(`^Paired with ${inviterName} \\([a-z2-7-]+\\)\\. This device may use its: none\\. It may use this device's: none\\.$`, "m"));
   assert.match(third.inviting.stdout, /Paired with guest \([a-z2-7-]+\)\. It may use this machine's: none\. This machine may use its: none\./);
   assert.equal((await cli(guest, ["run", inviterName, "--", "printf x"])).code, 4);
+  const refusedCopy = await cli(guest, ["cp", `${inviterName}:note.txt`, path.join(guest.dir, "note.txt")]);
+  assert.equal(refusedCopy.code, 4, refusedCopy.stderr);
+  assert.match(refusedCopy.stderr, /Permission denied: files not granted to guest/);
+  // Listing a device that grants nothing says what to run there; doctor picks up a later grant.
+  const guestIdentity = JSON.parse((await cli(guest, ["identity", "--json"])).stdout);
+  const guestPeers = await cli(guest, ["peers", "--state", guest.state]);
+  assert.match(guestPeers.stderr, new RegExp(`${inviterName} grants this device no access\\. To change that, run on ${inviterName}: cns peer grant NAME shell`));
+  assert.match(guestPeers.stderr, new RegExp(`with fingerprint ${guestIdentity.fingerprint}`));
+  assert.equal((await cli(studio, ["peer", "grant", "guest", "shell", "--state", studio.state])).code, 0);
+  const guestDoctor = await cli(guest, ["doctor", inviterName, "--state", guest.state]);
+  assert.equal(guestDoctor.code, 0, guestDoctor.stderr);
+  assert.match(guestDoctor.stdout, /\n  This device may use its: {2}shell \(changed since it was saved as none; saved now\)\n/);
+  const guestAfter = await cli(guest, ["peers", "--json", "--state", guest.state]);
+  assert.deepEqual(JSON.parse(guestAfter.stdout)[0].access, ["shell"]);
+  assert.equal((await cli(guest, ["peers", "--state", guest.state])).stderr, "");
+
+  // At a terminal, the accepting side asks what the other device may use, until the answer is valid.
+  const asked = await device("asked");
+  const askedInvite = await startInvite(["--name", "asked", "--grant", "all"]);
+  const accepting = inTerminal(t, ["pair", askedInvite.invite, "--state", asked.state], asked.env);
+  await accepting.waitFor("Pair with it?");
+  accepting.write("y\r");
+  await accepting.waitFor("Save it as");
+  accepting.write("\r");
+  await accepting.waitFor(`What may ${inviterName} use on this device?`);
+  accepting.write("root\r");
+  await accepting.waitFor("Answer none, shell");
+  accepting.write("shell\r");
+  assert.equal(await accepting.exited, 0, accepting.output);
+  assert.match(accepting.output, new RegExp(`It may use this device's: shell\\.`));
+  assert.match((await askedInvite.finished()).stdout, /Paired with asked \([a-z2-7-]+\)\. It may use this machine's: shell, files, sessions\. This machine may use its: shell\./);
 
   // A device studio never paired with is refused before anything is exported, as is a legacy cns.
   process.env.CNS_CONFIG_DIR = stranger.dir;
