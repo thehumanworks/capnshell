@@ -165,11 +165,20 @@ export function daemonTarget(statePath?: string, cwd?: string): McpTarget {
         controller: {
           ...connection.controller,
           async files(id) {
+            // The peer's own file calls, which a paired device allows with the files grant alone.
+            try {
+              const files = await remote.files(id);
+              forks.push(files);
+              return files as unknown as PeerFiles;
+            } catch (error) {
+              if (!(error instanceof TypeError && error.message === "'files' is not a function.")) throw error;
+            }
+            // An older daemon: a fork of the peer's shell, which a paired device allows only with the shell grant.
             let shell;
             try { shell = await connection.controller.shell(id); }
             catch (error) {
               if (error instanceof TypeError && error.message === "'shell' is not a function.") {
-                throw new Error("The local daemon is from an older cns without file access; restart it with cns stop and cns listen --daemon.", { cause: error });
+                throw new Error("The local daemon is from an older cns without file access; restart it with cns stop, then start it again.", { cause: error });
               }
               throw error;
             }
