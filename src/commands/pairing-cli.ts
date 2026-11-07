@@ -2,7 +2,7 @@ import os from "node:os";
 import readline from "node:readline";
 import { AuthError } from "../auth.js";
 import { connectFirst, connectSecure, rpcSession, type SecureChannel } from "../secure.js";
-import { isRelayAddress, redactRelay, relayEndpoint } from "../relay-hub.js";
+import { dialAddresses, isRelayAddress, redactRelay, relayEndpoint } from "../relay-hub.js";
 import { errorMessage } from "../errors.js";
 import { ensureIdentity, fingerprint as fingerprintOf, identityPath, loadIdentity } from "../identity.js";
 import { allPrivate } from "../addresses.js";
@@ -13,7 +13,7 @@ import { describeGrants, expandGrants, findPairedPeer, getPeer, listPeers, saveP
 import { plain } from "../terminal.js";
 import type { ShellApi } from "../shell.js";
 import { RefusingShell } from "../refusing-shell.js";
-import { connectControl, removeStaleState, startDaemon, type ControlConnection } from "./daemon.js";
+import { connectControl, localRelay, removeStaleState, startDaemon, type ControlConnection } from "./daemon.js";
 
 /** How long the invited device waits for the inviting person to decide. */
 const PROPOSAL_WAIT_MS = 10 * 60 * 1000;
@@ -337,8 +337,10 @@ export async function doctor(name: string, options: DoctorOptions): Promise<void
     } else lines.push("  Daemon link: no daemon running here (cns up)");
     report.link = control ? (linked ? "online" : "offline") : "no-daemon";
     const attempts: Array<{ address: string; result: string; detail?: string }> = [];
-    if (!entry.addresses.length) lines.push("  No saved address: cns peer address NAME ws://HOST:PORT adds one.");
-    for (const address of entry.addresses) {
+    // The saved addresses and, when none is a relay, this device's own relay, as commands dial them.
+    const addresses = dialAddresses(entry, await localRelay(options.state));
+    if (!addresses.length) lines.push("  No saved address: cns peer address NAME ws://HOST:PORT adds one.");
+    for (const address of addresses) {
       const cancelled = new AbortController();
       // The deadline covers the whole attempt: connecting, authenticating and the first call.
       const timer = setTimeout(() => cancelled.abort(new Error("Timed out after 10 s.")), 10_000);
@@ -362,7 +364,7 @@ export async function doctor(name: string, options: DoctorOptions): Promise<void
       } finally { clearTimeout(timer); }
     }
     report.attempts = attempts;
-    for (const attempt of attempts) lines.push(`  ${attempt.address}${isRelayAddress(attempt.address) ? " [relay]" : ""}: ${attempt.result}${attempt.detail ? ` (${attempt.detail})` : ""}`);
+    for (const attempt of attempts) lines.push(`  ${attempt.address}${isRelayAddress(attempt.address) ? (entry.addresses.includes(attempt.address) ? " [relay]" : " [this device's relay]") : ""}: ${attempt.result}${attempt.detail ? ` (${attempt.detail})` : ""}`);
     if (attempts.some((attempt) => attempt.result === "identity-changed")) process.exitCode = 3;
     else if (attempts.some((attempt) => attempt.result === "not-paired")) process.exitCode = 3;
     else if (!attempts.some((attempt) => attempt.result === "ok")) process.exitCode = 5;
