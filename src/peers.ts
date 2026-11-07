@@ -1,7 +1,9 @@
 import { z } from "zod";
 import { createPeerFile, isPairedEntry, peerFile, peerNames, readPeerFile, rewritePeerFile, validatePeerUrl } from "./aliases.js";
+import { isIP } from "node:net";
 import { errorMessage } from "./errors.js";
 import { fingerprint, type PublicKey } from "./identity.js";
+import { isRelayAddress } from "./relay-hub.js";
 
 /**
  * Paired devices, saved under an alias in the peers directory beside plain address
@@ -122,6 +124,34 @@ export function updatePairedPeer(name: string, change: (peer: PairedPeer) => Pai
   if (updated.publicKey !== current.publicKey) throw new Error("A paired device's key cannot change; pair with the new device instead.");
   rewritePeerFile(name, JSON.stringify(updated, null, 2) + "\n");
   return updated;
+}
+
+/** What a paired device says it can be reached at, as it arrives over a link: at most 16 valid addresses. */
+export const advertisedSchema = z.array(addressSchema).max(16);
+
+/**
+ * A paired device's saved addresses once it has said where it can be reached now.
+ * What it advertises replaces what it advertised before: a daemon advertises its
+ * listening IP addresses and its relay's dial address, so those are dropped when it no
+ * longer lists them. Kept as well are the address this device just reached it at, which
+ * may be a port forward or a proxy the device does not know about, and saved hostnames,
+ * which only a person adds. Direct addresses come first, relays last, at most 16 with room kept for relays.
+ */
+export function learnAddresses(saved: readonly string[], advertised: readonly string[], dialed?: string): string[] {
+  const learnedByDaemon = (url: string) => {
+    if (isRelayAddress(url)) return true;
+    try { return isIP(new URL(url).hostname.replace(/^\[|\]$/g, "")) !== 0; } catch { return true; }
+  };
+  const kept = saved.filter((url) => url === dialed || !learnedByDaemon(url));
+  // The same address written two ways, such as with and without a trailing slash, is kept once.
+  const seen = new Set<string>();
+  const all = [...advertised, ...kept].filter((url) => {
+    const key = new URL(url).href;
+    return !seen.has(key) && !!seen.add(key);
+  });
+  // Over the limit, direct addresses give way: the relay is what still works after a move.
+  const relays = all.filter(isRelayAddress).slice(0, 4);
+  return [...all.filter((url) => !isRelayAddress(url)).slice(0, 16 - relays.length), ...relays];
 }
 
 /** Whether a name is saved, without throwing where saved peers are unsupported. */
