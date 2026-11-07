@@ -13,7 +13,7 @@ test("a device with only private addresses and no relay is ready, with a warning
   assert.equal(exitCode, 0);
   assert.equal(report.reachableBeyondNetwork, false);
   assert.deepEqual(report.problems, []);
-  assert.match(report.warnings.join("\n"), /Every address here is private.*cns up --relay URL/);
+  assert.match(report.warnings.join("\n"), /Every address here is private.*cns config relay URL/);
   assert.match(lines.join("\n"), /^Identity: +abcd-efgh \(\/cfg\/identity\.json\)\nDaemon: +pid 42 at ws:\/\/0\.0\.0\.0:47381\nRelay: +none\nAddresses:\n  ws:\/\/192\.168\.1\.5:47381: private, this network only\nPaired: +1 device\n/);
 });
 
@@ -34,9 +34,20 @@ test("a relay that is not registered does not count, and says so", () => {
   assert.match(report.warnings.join("\n"), /not registered at its relay/);
 });
 
-test("CNS_RELAY that the running daemon does not use is a warning", () => {
-  const { report } = selfCheck({ ...base, configuredRelay: "wss://other.example/?token=t", daemon: daemon() });
-  assert.match(report.warnings.join("\n"), /CNS_RELAY names wss:\/\/other\.example.*uses no relay/);
+test("a configured relay that the running daemon does not use is a warning naming where it is set", () => {
+  const env = selfCheck({ ...base, configuredRelay: { url: "wss://other.example/?token=t", source: "env" }, daemon: daemon() });
+  assert.match(env.report.warnings.join("\n"), /CNS_RELAY names wss:\/\/other\.example.*uses no relay/);
+  assert.ok(!env.lines.join("\n").includes("token=t"), "the token is hidden");
+  const saved = selfCheck({ ...base, configuredRelay: { url: "wss://other.example/", source: "config" }, daemon: daemon({ relay: "wss://relay.example/" }) });
+  assert.match(saved.report.warnings.join("\n"), /cns config relay saved wss:\/\/other\.example.*uses wss:\/\/relay\.example/);
+  const same = selfCheck({ ...base, configuredRelay: { url: "wss://relay.example/", source: "config" }, daemon: daemon({ relay: "wss://relay.example/", relayRegistered: true, addresses: [`wss://relay.example/v1/dial/${key}`] }) });
+  assert.deepEqual(same.report.warnings, []);
+});
+
+test("settings that cannot be read are a warning", () => {
+  const { report, exitCode } = selfCheck({ ...base, settingsError: "Settings are not valid JSON", daemon: daemon({ addresses: ["ws://100.64.0.1:47381"] }) });
+  assert.equal(exitCode, 0);
+  assert.match(report.warnings.join("\n"), /settings cannot be read.*not valid JSON/);
 });
 
 test("no identity, no daemon, a legacy daemon, a daemon with another identity and no address are problems", () => {

@@ -10,8 +10,10 @@ export interface SelfFacts {
   daemon:
     | { running: false; error?: string }
     | { running: true; pid: number; url: string; paired: boolean; identity?: { publicKey: string; fingerprint: string }; addresses: string[]; relay?: string; relayRegistered?: boolean };
-  /** The relay a new daemon would use here (CNS_RELAY), if any. */
-  configuredRelay?: string;
+  /** The relay a new daemon would use here (CNS_RELAY, else cns config relay), if any. */
+  configuredRelay?: { url: string; source: "flag" | "env" | "config" };
+  /** Why the saved settings could not be read, if they could not. */
+  settingsError?: string;
   /** How many paired devices are saved. */
   paired: number;
 }
@@ -85,8 +87,9 @@ export function selfCheck(facts: SelfFacts): { report: SelfReport; lines: string
       lines.push(`Relay:     ${relay.url} (${relay.registered ? "registered" : "not registered"})`);
       if (!relay.registered) warnings.push("The daemon is not registered at its relay right now, so devices that need the relay cannot reach this one. It retries on its own; the daemon log says why it failed.");
     } else lines.push("Relay:     none");
-    if (facts.configuredRelay && facts.configuredRelay !== daemon.relay) {
-      warnings.push(`CNS_RELAY names ${redactRelay(facts.configuredRelay)}, but the running daemon ${daemon.relay ? `uses ${redactRelay(daemon.relay)}` : "uses no relay"}. Run cns stop, then cns up, to use it.`);
+    if (facts.configuredRelay && facts.configuredRelay.url !== daemon.relay) {
+      const from = facts.configuredRelay.source === "env" ? "CNS_RELAY names" : facts.configuredRelay.source === "config" ? "cns config relay saved" : "--relay names";
+      warnings.push(`${from} ${redactRelay(facts.configuredRelay.url)}, but the running daemon ${daemon.relay ? `uses ${redactRelay(daemon.relay)}` : "uses no relay"}. Run cns stop, then cns up, to use it.`);
     }
 
     addresses = daemon.addresses.map((address) => {
@@ -107,8 +110,9 @@ export function selfCheck(facts: SelfFacts): { report: SelfReport; lines: string
   if (daemon.running && daemon.paired && addresses.length && !reachableBeyondNetwork) {
     warnings.push(relay
       ? "Every address here is private and the relay is not usable from other networks right now, so only devices on this network can reach this one."
-      : "Every address here is private, so only devices on this network can reach this one. For devices elsewhere, run cns stop, then cns up --relay URL, or join both to an overlay network such as Tailscale.");
+      : "Every address here is private, so only devices on this network can reach this one. For devices elsewhere, save a relay with cns config relay URL and restart with cns stop, then cns up, or join both to an overlay network such as Tailscale.");
   }
+  if (facts.settingsError) warnings.push(`The settings cannot be read, so cns up and other commands fail until they are fixed: ${facts.settingsError}`);
   lines.push(`Paired:    ${facts.paired} device${facts.paired === 1 ? "" : "s"}`);
 
   if (problems.length || warnings.length) lines.push("");

@@ -337,8 +337,10 @@ async function doctorSelf(options: DoctorOptions): Promise<void> {
       daemon = { running: false, error: `it does not answer: ${printable(errorMessage(error))}` };
     } finally { control.close(); }
   }
-  const configuredRelay = process.env.CNS_RELAY || undefined;
-  const { report, lines, exitCode } = selfCheck({ identity, identityPath: identityPath(), daemon, paired: listPeers().filter((peer) => peer.kind === "paired").length, ...configuredRelay ? { configuredRelay } : {} });
+  let relay: SelfFacts["configuredRelay"];
+  let settingsError: string | undefined;
+  try { relay = configuredRelay(); } catch (error) { settingsError = printable(errorMessage(error)); }
+  const { report, lines, exitCode } = selfCheck({ identity, identityPath: identityPath(), daemon, paired: listPeers().filter((peer) => peer.kind === "paired").length, ...relay ? { configuredRelay: relay } : {}, ...settingsError ? { settingsError } : {} });
   if (options.json) console.log(JSON.stringify(report, null, 2));
   else console.log(lines.join("\n"));
   if (exitCode) process.exitCode = exitCode;
