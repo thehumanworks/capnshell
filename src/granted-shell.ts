@@ -22,14 +22,23 @@ export class GrantedShell extends RpcTarget {
   #grants: GrantHolder;
   #peer: string;
   #owner: string | null;
-  /** `owner` is the peer's fingerprint, the owner of the sessions it starts here. */
-  constructor(shell: ShellApi, grants: readonly Permission[] | GrantHolder, peer: string, owner: string | null = null) {
+  #addresses: () => string[];
+  /**
+   * `owner` is the peer's fingerprint, the owner of the sessions it starts here.
+   * `addresses` says where this device can be reached now, which any paired device may ask.
+   */
+  constructor(shell: ShellApi, grants: readonly Permission[] | GrantHolder, peer: string, owner: string | null = null, addresses: () => string[] = () => []) {
     super();
     this.#shell = shell;
     this.#grants = Array.isArray(grants) ? { current: [...grants] } : grants as GrantHolder;
     this.#peer = peer;
     this.#owner = owner;
+    this.#addresses = addresses;
   }
+  /** Where this device can be reached now, so a paired device can keep its saved record current. It needs no grant. */
+  addresses(): string[] { return [...this.#addresses()]; }
+  /** What the peer may do here right now, so it can show current access rather than what it was granted at pairing. It needs no grant. */
+  granted(): Permission[] { return [...this.#grants.current]; }
   /** What the peer may do here, as people read it. */
   get grants(): string { return describeGrants([...this.#grants.current]); }
   #require(...permissions: Permission[]) { require(this.#grants, this.#peer, permissions); }
@@ -38,7 +47,7 @@ export class GrantedShell extends RpcTarget {
   exec(...args: Parameters<ShellApi["exec"]>) { this.#require("shell"); return this.#shell.exec(...args); }
   openPty(...args: Parameters<ShellApi["openPty"]>) { this.#require("shell"); return this.#shell.openPty(...args); }
   /** A fork carries the same grants. */
-  fork(): GrantedShell { this.#require("shell"); return new GrantedShell(this.#shell.fork(), this.#grants, this.#peer, this.#owner); }
+  fork(): GrantedShell { this.#require("shell"); return new GrantedShell(this.#shell.fork(), this.#grants, this.#peer, this.#owner, this.#addresses); }
   stat(...args: Parameters<ShellApi["stat"]>) { this.#require("files"); return this.#shell.stat(...args); }
   access(...args: Parameters<ShellApi["access"]>) { this.#require("files"); return this.#shell.access(...args); }
   readdir(...args: Parameters<ShellApi["readdir"]>) { this.#require("files"); return this.#shell.readdir(...args); }

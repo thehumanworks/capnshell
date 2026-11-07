@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { addAlias, listAliases, resolveAlias } from "./aliases.js";
 import { generateIdentity } from "./identity.js";
-import { describeGrants, expandGrants, findPairedPeer, getPeer, listPeers, PRESETS, resolvePeer, savePairedPeer, updatePairedPeer } from "./peers.js";
+import { describeGrants, expandGrants, explainDenial, grantWords, findPairedPeer, getPeer, learnAddresses, listPeers, PRESETS, resolvePeer, savePairedPeer, updatePairedPeer } from "./peers.js";
 import { peerNames } from "./aliases.js";
 
 let dir: string;
@@ -20,6 +20,21 @@ test("grants expand from presets into a canonical list and read back as presets"
   expect(describeGrants(expandGrants(["files", "sessions"]))).toBe("files, sessions");
   expect(describeGrants(["sessions:list", "shell"])).toBe("shell, sessions:list");
   expect(describeGrants([])).toBe("none");
+  expect(expandGrants(["none"])).toEqual([]);
+  expect(grantWords(expandGrants(["shell", "sessions"]))).toBe("shell,sessions");
+});
+
+test("a refusal says which grant is missing and the command that adds it on the other device", () => {
+  expect(explainDenial("Permission denied: shell not granted to reader.", "studio"))
+    .toBe("Permission denied: shell not granted to reader. To allow it, run on studio: cns peer grant reader shell");
+  expect(explainDenial("Permission denied: sessions:view, sessions:control not granted to laptop-2."))
+    .toBe("Permission denied: sessions:view, sessions:control not granted to laptop-2. To allow it, run on the other device: cns peer grant laptop-2 sessions:view,sessions:control");
+  // Explaining twice, other refusals and unknown permissions leave the message as it was.
+  const explained = explainDenial("Permission denied: files not granted to a.", "b");
+  expect(explainDenial(explained, "b")).toBe(explained);
+  expect(explainDenial("Permission denied: kill is not available to peers.")).toBe("Permission denied: kill is not available to peers.");
+  expect(explainDenial("Permission denied: root not granted to a.")).toBe("Permission denied: root not granted to a.");
+  expect(explainDenial("Permission denied: shell not granted to $(rm -rf ~).")).toBe("Permission denied: shell not granted to $(rm -rf ~).");
 });
 
 test.skipIf(process.platform === "win32")("paired devices live beside address aliases and are keyed by identity", () => {
@@ -77,4 +92,19 @@ test.skipIf(process.platform === "win32")("changing a paired device replaces its
   expect(statSync(path.join(dir, "peers", "studio")).mode & 0o777).toBe(0o600);
   expect(resolvePeer("studio").url).toBe("ws://127.0.0.1:47382");
   expect(() => updatePairedPeer("missing", (peer) => peer)).toThrow("Unknown peer");
+});
+
+test("a device's advertised addresses replace the ones it advertised before, keeping what a person or a dial added", () => {
+  const key = "A".repeat(43);
+  const relay = (host: string) => `wss://${host}/v1/dial/${key}`;
+  const saved = ["ws://192.168.1.10:47381", "ws://studio.example:9000", "ws://203.0.113.5:47381", relay("old.example")];
+  // The old LAN address and relay go; the hostname a person added stays, and so does the port forward this side dialed.
+  expect(learnAddresses(saved, ["ws://10.0.0.7:47381", "ws://100.64.0.3:47381", relay("new.example")], "ws://203.0.113.5:47381"))
+    .toEqual(["ws://10.0.0.7:47381", "ws://100.64.0.3:47381", "ws://studio.example:9000", "ws://203.0.113.5:47381", relay("new.example")]);
+  // Nothing changes when the device advertises what is saved, however it is written.
+  expect(learnAddresses(["ws://10.0.0.7:47381/"], ["ws://10.0.0.7:47381"])).toEqual(["ws://10.0.0.7:47381"]);
+  // Relays always come last, and a record never holds more than 16 addresses: direct ones give way to the relay.
+  const many = Array.from({ length: 20 }, (_, index) => `ws://10.0.0.${index + 1}:1`);
+  expect(learnAddresses([], [relay("r.example"), ...many])).toEqual([...many.slice(0, 15), relay("r.example")]);
+  expect(learnAddresses(["ws://[fd00::1]:1"], ["ws://[fd00::2]:1"])).toEqual(["ws://[fd00::2]:1"]);
 });
