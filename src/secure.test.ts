@@ -229,6 +229,90 @@ test("connectFirst tries addresses in order and honours a cancelled signal", asy
   await assert.rejects(connectFirst([good], laptop, { expect: studio.publicKey, signal: cancelled.signal }), /stopped/);
 });
 
+/** A device that authenticates as `studio`, counting the sockets opened and links made. */
+function studioServer(t: { after(fn: () => void): void }) {
+  interface Data { channel?: SecureChannel }
+  const seen = { opened: 0, established: 0 };
+  const server = Bun.serve<Data>({
+    hostname: LOOPBACK, port: 0,
+    fetch(request, server) { if (server.upgrade(request, { data: {} })) return; return new Response("no", { status: 400 }); },
+    websocket: {
+      open(ws) {
+        seen.opened++;
+        const channel = SecureChannel.responder(serverWire(ws), studio, { authorize: () => undefined });
+        channel.ready.then(() => { seen.established++; }, () => {});
+        ws.data.channel = channel;
+      },
+      message(ws, message) { ws.data.channel?.deliver(typeof message === "string" ? message : new Uint8Array(message)); },
+      close(ws) { ws.data.channel?.closed(); },
+    },
+  });
+  t.after(() => server.stop(true));
+  return { url: `ws://${LOOPBACK_HOST}:${server.port}`, seen };
+}
+
+/** An address that accepts TCP and then never answers, like a host that moved away behind a NAT. */
+function stalledAddress(t: { after(fn: () => void): void }) {
+  const listener = Bun.listen({ hostname: LOOPBACK, port: 0, socket: { data() {} } });
+  t.after(() => listener.stop(true));
+  return `ws://${LOOPBACK_HOST}:${listener.port}`;
+}
+
+const relayPath = `/v1/dial/${"A".repeat(43)}`;
+
+test("connectFirst dials direct addresses together", async (t) => {
+  const good = studioServer(t);
+  const started = performance.now();
+  const opened = await connectFirst([stalledAddress(t), stalledAddress(t), good.url], laptop, { expect: studio.publicKey });
+  assert.equal(opened.url, good.url);
+  assert.ok(performance.now() - started < 1500, "a dead address does not hold up a live one");
+  opened.channel.close();
+});
+
+test("connectFirst gives direct addresses a head start over a relay", async (t) => {
+  const direct = studioServer(t);
+  const relay = studioServer(t);
+  const opened = await connectFirst([relay.url + relayPath, direct.url], laptop, { expect: studio.publicKey, relayDelayMs: 500 });
+  assert.equal(opened.url, direct.url);
+  opened.channel.close();
+  await Bun.sleep(700);
+  assert.equal(relay.seen.opened, 0, "the relay was not dialed once a direct address answered");
+
+  // A dead direct address costs the head start, not the whole per-address timeout.
+  const started = performance.now();
+  const viaRelay = await connectFirst([stalledAddress(t), relay.url + relayPath], laptop, { expect: studio.publicKey, relayDelayMs: 200 });
+  const elapsed = performance.now() - started;
+  assert.equal(viaRelay.url, relay.url + relayPath);
+  assert.ok(elapsed >= 150 && elapsed < 1500, `relay used after the head start (${Math.round(elapsed)} ms)`);
+  viaRelay.channel.close();
+
+  // When every direct address has already failed, the relay does not wait.
+  const quick = performance.now();
+  const fallback = await connectFirst(["ws://127.0.0.1:1", relay.url + relayPath], laptop, { expect: studio.publicKey, relayDelayMs: 5000 });
+  assert.ok(performance.now() - quick < 1500);
+  fallback.channel.close();
+});
+
+test("connectFirst makes one link even when several addresses reach the device", async (t) => {
+  const device = studioServer(t);
+  const opened = await connectFirst([device.url, device.url + "/", device.url + "/?again"], laptop, { expect: studio.publicKey });
+  await Bun.sleep(200);
+  assert.equal(device.seen.established, 1);
+  opened.channel.close();
+});
+
+test("connectFirst reports the most telling failure when every address fails", async (t) => {
+  const other = studioServer(t);
+  const started = performance.now();
+  await assert.rejects(connectFirst([stalledAddress(t), other.url, "ws://127.0.0.1:1"], laptop, { expect: generateIdentity().publicKey, perAddressMs: 300 }),
+    (error: AuthError) => error.code === "identity-changed");
+  assert.ok(performance.now() - started < 1500);
+  const cancel = new AbortController();
+  const pending = connectFirst([stalledAddress(t), stalledAddress(t)], laptop, { expect: studio.publicKey, signal: cancel.signal });
+  setTimeout(() => cancel.abort(new Error("stopped")), 50);
+  await assert.rejects(pending, /stopped/);
+});
+
 test("a device on another protocol version is told so", async () => {
   const { Responder } = await import("./auth.js");
   const responder = new Responder(studio, new Uint8Array(32), { authorize: () => undefined });
