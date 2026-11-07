@@ -27,11 +27,6 @@ export function remotePath(info: Pick<ShellInfo, "platform" | "cwd">, value: str
   return paths.isAbsolute(value) ? value : paths.join(info.cwd, value);
 }
 
-/** The peer predates the call: an older ShellApi lacks it, and an older GrantedShell refuses it as unknown. */
-const unsupported = (error: unknown, method: string) =>
-  (error instanceof TypeError && error.message === `'${method}' is not a function.`)
-  || errorMessage(error).includes(`${method} is not available to peers`);
-
 const missing = (error: unknown) => /^ENOENT\b/.test(errorMessage(error));
 
 /** Copy one file between this device and the peer whose file operations are `files`. */
@@ -94,18 +89,8 @@ async function upload(files: RemoteFiles, info: Pick<ShellInfo, "platform" | "cw
     for (let offset = 0; ;) {
       const chunk = await readAt(handle, offset, MAX_WRITE_BYTES);
       if (offset === 0) {
-        try {
-          // A new file gets the source's permission bits, less the peer's umask.
-          await files.writeFileAt(target, chunk, { offset: 0, truncate: true, mode: described.mode & 0o777 });
-        } catch (error) {
-          if (!unsupported(error, "writeFileAt")) throw error;
-          // An older peer replaces whole files only, up to its write limit.
-          if (described.size > MAX_WRITE_BYTES) {
-            throw new Error(`The peer's cns accepts files of at most ${MAX_WRITE_BYTES / 1024 / 1024} MiB; update cns there to copy larger ones.`);
-          }
-          await files.writeFile(target, chunk);
-          return;
-        }
+        // A new file gets the source's permission bits, less the peer's umask.
+        await files.writeFileAt(target, chunk, { offset: 0, truncate: true, mode: described.mode & 0o777 });
       } else {
         await files.writeFileAt(target, chunk, { offset });
       }

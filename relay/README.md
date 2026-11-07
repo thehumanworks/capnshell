@@ -1,45 +1,43 @@
-# cns relay on Cloudflare
+# The cns relay (Cloudflare Worker)
 
 Paired devices that cannot reach each other directly (behind NAT, on different
-networks) meet at a relay. The relay forwards their encrypted links without being able
-to read them; the devices still authenticate each other end to end, so a relay can
-deny service but cannot impersonate a device or see what it does. See
-[docs/paired-peers.md](../docs/paired-peers.md) section 8 and `src/relay-hub.ts` for the protocol.
+networks) meet at a relay. This Worker is the relay built into cns: every `cns up`
+registers there and every device dials paired devices there after their direct
+addresses, with no URL or token to set up. Its address is `DEFAULT_RELAY` in
+`src/relay-config.ts`. [ADR 0001](../docs/adr/0001-built-in-relay.md) records the decision.
 
-This directory is the relay as a Cloudflare Worker: one Durable Object per device key,
-using the WebSocket hibernation API so a registered device that is idle costs nothing.
-`cns relay` runs the same relay on any machine instead: `cns relay --bind 0.0.0.0 --public-host relay.example.com`
-behind a TLS proxy, with `CNS_RELAY_TOKEN` to require the token. It needs the public host that
-devices use, because registration proofs name it; it also limits each address to 64 sockets.
+The relay forwards encrypted links without being able to read them; the devices still
+authenticate each other end to end, so a relay can deny service but cannot impersonate a
+device or see what it does. See [docs/paired-peers.md](../docs/paired-peers.md) section 8
+and `src/relay-hub.ts` for the protocol.
+
+One Durable Object per device key, using the WebSocket hibernation API, so a registered
+device that is idle costs nothing.
+
+## Who may use it
+
+Only cns. Every request must carry a `Cns-Client` header: an HMAC-SHA256, under the client
+key built into cns (`CLIENT_KEY` in `src/relay-hub.ts`), of the relay's host, the path, the
+time and a nonce. Requests without a valid header, or made more than an hour from the
+relay's clock, are refused with `401` before they reach a Durable Object. Browsers (any
+`Origin` header) are refused too. Registering also needs proof of the device key, as before.
+
+The client key ships in every copy of cns, so this keeps out other programs, not someone
+who extracts the key. The ADR lists what would be stronger. Links stay end-to-end
+authenticated whatever the relay lets through.
+
+To rotate the key, add the new one to `ACCEPTED_CLIENT_KEYS` beside the old, deploy, release
+cns with the new `CLIENT_KEY`, and drop the old key once those releases are no longer in use.
 
 ## Deploy
 
 ```sh
 cd relay
 npx wrangler@4.151.3 deploy
-openssl rand -hex 24 > relay-token     # keep this private
-npx wrangler@4.151.3 secret put RELAY_TOKEN < relay-token
 ```
 
-Without `RELAY_TOKEN` anyone who learns the URL can register their own devices and use the
-relay at your account's expense. With it, registering needs `?token=TOKEN`, so only devices
-you give the token to can be reached through the relay. Dialing needs no token: a dialer only
-reaches a registered device, which authenticates it end to end, so dial addresses, invites
-and saved peers never contain the token. Anyone who knows a device's public key can still
-dial it and be refused, and fill its 32 relay connections at most 8 at a time per address.
-
-Then, on each device that should be reachable through it:
-
-```sh
-cns up --relay 'wss://cns-relay.YOUR-SUBDOMAIN.workers.dev/?token=TOKEN'
-```
-
-The daemon gets the URL through its environment, not its command line, and `cns` prints it
-with the token hidden.
-
-New invites include the relay address after the device's direct addresses, so devices you
-pair from then on try direct first and the relay last. For a device paired before, add it
-with `cns peer address NAME ADDRESS`, using the relay address `cns status` prints.
+It needs no secrets. Deploy before releasing a cns that depends on a change here. If the
+Worker's address changes, update `DEFAULT_RELAY` and release cns.
 
 ## Test locally
 
@@ -48,8 +46,11 @@ cd relay && npx wrangler@4.151.3 dev --local --port 8787 &
 cd .. && CNS_TEST_RELAY_URL=ws://127.0.0.1:8787 bun test src/relay-hub.test.ts src/relay-e2e.test.ts
 ```
 
-The tests then run the relay protocol and a full pairing, commands and a daemon link through
-the Worker in workerd, Cloudflare's runtime.
+The tests then run the relay protocol, the client check, and a full pairing, commands and a
+daemon link through the Worker in workerd, Cloudflare's runtime. Without
+`CNS_TEST_RELAY_URL` they run the same code in Bun (`src/relay-server.ts`). To point a
+development cns at a local relay, set `CNS_RELAY=ws://127.0.0.1:8787`; `CNS_RELAY=off` turns
+the relay off. Neither is a user setting.
 
 ## Limits
 

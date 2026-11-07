@@ -90,9 +90,6 @@ export class StdinSource extends RpcTarget implements ExecInput {
   }
 }
 
-/** The peer's cns predates exec. */
-const lacksExec = (error: unknown) => error instanceof TypeError && error.message === "'exec' is not a function.";
-
 /** Run a connect-mode command against peer `id` and return the CLI exit status. */
 export async function runOneShot(config: PeerConfig, controller: ConnectionController, id: string, signal: AbortSignal): Promise<number> {
   const { command, cwd, timeoutMs, cols, rows, term, name } = config;
@@ -108,17 +105,10 @@ export async function runOneShot(config: PeerConfig, controller: ConnectionContr
       } catch (error) {
         // The status a local command gets when its reader goes away: 128 + SIGPIPE.
         if (sink.broken) return 141;
-        if (!lacksExec(error)) throw error;
+        throw error;
       } finally {
         input?.close();
       }
-      if (input) console.error("cns: the peer's cns cannot take input; its command reads none");
-      const result = await controller.run(id, command!, { cwd, timeoutMs });
-      process.stdout.write(result.stdout);
-      process.stderr.write(result.stderr);
-      if (result.truncated) console.error("cns: OUTPUT TRUNCATED at 1 MiB");
-      if (result.timedOut) console.error("cns: command timed out");
-      return commandExitCode(result);
     }
     case "tty": {
       if (name && !config.attach) {

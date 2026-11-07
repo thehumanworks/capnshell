@@ -10,7 +10,6 @@ import { closeSocket, terminateSocket } from "../connect.js";
 import { openConsole, type PeerController } from "../console.js";
 import type { PeerConfig } from "../options.js";
 import { selfInvocation } from "../runtime.js";
-import { configuredRelay } from "../settings.js";
 import type { ShellApi } from "../shell.js";
 import { plain, type RemoteNamedPty } from "../terminal.js";
 // The control server needs Bun's capnweb build; clients of the daemon, such as
@@ -28,7 +27,7 @@ export interface ListenerInfo {
   oneWay: boolean;
   /** Only paired devices are accepted, after authenticating. */
   paired?: boolean;
-  /** The relay this daemon registers at, if any. */
+  /** The relay this daemon registers at: the built-in one, unless CNS_RELAY=off. */
   relay?: string;
 }
 export interface DaemonStatus extends ListenerInfo {
@@ -112,7 +111,7 @@ export async function removeStaleState(statePath?: string, options: { ignorePid?
   return true;
 }
 
-export type DaemonConfig = Pick<PeerConfig, "bind" | "port" | "url" | "remote" | "state"> & Partial<Pick<PeerConfig, "oneWay" | "paired" | "relay">>;
+export type DaemonConfig = Pick<PeerConfig, "bind" | "port" | "url" | "remote" | "state"> & Partial<Pick<PeerConfig, "oneWay" | "paired">>;
 export interface StartDaemonOptions {
   /** The executable and arguments that run `cns`; by default, this program. Embedders pass the cns executable. */
   invocation?: (args: string[]) => { file: string; args: string[] };
@@ -143,13 +142,12 @@ export async function startDaemon(config: DaemonConfig, options: StartDaemonOpti
   if (config.remote && !config.paired) args.push("--allow-remote");
   if (config.oneWay) args.push("--one-way");
   if (config.paired) args.push("--paired");
-  // The relay URL may carry a token, so it goes in the child's environment, which other users cannot read, not its arguments.
   const invocation = (options.invocation ?? selfInvocation)(args);
   const child = spawn(invocation.file, invocation.args, {
     detached: true,
     windowsHide: true,
     stdio: ["ignore", log.fd, log.fd, "ipc"],
-    env: { ...process.env, CNS_DAEMON_CHILD: "1", CNS_DAEMON_TOKEN: token, ...config.paired && config.relay ? { CNS_DAEMON_RELAY: config.relay } : {} },
+    env: { ...process.env, CNS_DAEMON_CHILD: "1", CNS_DAEMON_TOKEN: token },
   });
   try {
     const ready = new Promise<void>((resolve, reject) => {
@@ -285,19 +283,4 @@ export async function stopDaemon(statePath?: string): Promise<number> {
     if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
   }
   return state.pid;
-}
-
-/**
- * This device's relay, if it has one: CNS_RELAY, else the one saved with `cns config relay`,
- * else the relay of the paired daemon running here. The saved setting works with no daemon.
- */
-export async function localRelay(state?: string): Promise<string | undefined> {
-  const configured = configuredRelay();
-  if (configured) return configured.url;
-  let control: ControlConnection;
-  try { control = await connectControl(state); } catch { return undefined; }
-  try {
-    const status = await control.remote.status();
-    return status.paired ? status.relay : undefined;
-  } catch { return undefined; } finally { control.close(); }
 }

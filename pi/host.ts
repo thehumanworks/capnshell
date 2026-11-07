@@ -294,12 +294,8 @@ async function checked(host: Host): Promise<Host> {
     if (host.info.platform === "win32") {
       throw new Error(`${host.label} is a Windows peer. Pi's tools resolve paths as POSIX paths, so attaching to Windows is not supported yet; use /cns run.`);
     }
-    // Older cns versions have no file operations.
     try { await host.stat(host.home); }
     catch (error) {
-      if (error instanceof TypeError || /is not a function/.test(errorMessage(error))) {
-        throw new Error(`${host.label} runs an older cns without file operations; update cns there.`);
-      }
       // A paired device that grants no file access has them all the same: bash and ! still work, and the file tools say what is missing.
       if (!/^Permission denied: files not granted/.test(errorMessage(error))) throw error;
     }
@@ -334,11 +330,7 @@ export async function connectUrl(target: Extract<Target, { kind: "url" }>, signa
   }
   const host = new Host(target, info, shell, {
     release,
-    async fork() {
-      const fork = await forkShell(shell);
-      if (!fork) throw new Error(`${target.url} runs a cns without fork; update it.`);
-      return fork;
-    },
+    fork: () => forkShell(shell),
   });
   shell.onRpcBroken((error) => host.markLost(errorMessage(error) || "the connection closed"));
   return checked(host);
@@ -368,11 +360,7 @@ export async function connectPaired(target: Extract<Target, { kind: "paired" }>,
   }
   const host = new Host(target, info, shell, {
     release,
-    async fork() {
-      const fork = await forkShell(shell);
-      if (!fork) throw new Error(`${target.name} runs a cns without fork; update it.`);
-      return fork;
-    },
+    fork: () => forkShell(shell),
   });
   shell.onRpcBroken((error) => host.markLost(errorMessage(error) || "the connection closed"));
   return checked(host);
@@ -380,14 +368,7 @@ export async function connectPaired(target: Extract<Target, { kind: "paired" }>,
 
 /** Use a peer connected to this machine's daemon, through its control connection. */
 export async function connectPeer(control: ControlConnection, target: Extract<Target, { kind: "peer" }>): Promise<Host> {
-  let shell: RpcStub<ShellApi>;
-  try { shell = await control.controller.shell(target.id); }
-  catch (error) {
-    if (/is not a function/.test(errorMessage(error))) {
-      throw new Error("The running daemon's cns cannot share a peer's shell; restart it with this version (/cns stop, then /cns listen).");
-    }
-    throw error;
-  }
+  const shell = await control.controller.shell(target.id);
   let info: ShellInfo;
   try { info = await withTimeout(plain(shell.info()), target.id); }
   catch (error) {

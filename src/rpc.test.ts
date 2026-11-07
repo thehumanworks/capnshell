@@ -6,7 +6,7 @@ import test from "node:test";
 import { newBunWebSocketRpcSession, newMessagePortRpcSession, newWebSocketRpcSession, RpcTarget, type BunWebSocketTransport, type RpcStub } from "capnweb";
 import { forkShell } from "./connect.js";
 import { RefusingShell } from "./refusing-shell.js";
-import { HANDLES_REVOKED, localShellInfo, PtyRegistry, ShellApi, type PtyExit, type RunResult } from "./shell.js";
+import { HANDLES_REVOKED, PtyRegistry, ShellApi, type PtyExit, type RunResult } from "./shell.js";
 import { LOOPBACK, LOOPBACK_HOST } from "./test-support.js";
 
 // Model an untrusted caller, not the typed client contract. Runtime validation
@@ -167,23 +167,15 @@ test("closing a forked shell over RPC revokes its named handles and detaches the
   await started.kill();
 });
 
-test("forkShell forks a current peer's shell and recognises an older peer without fork", async (t) => {
-  class OlderShell extends RpcTarget { info() { return localShellInfo(); } }
-  for (const [label, target] of [["current", new ShellApi()], ["older", new OlderShell()]] as const) {
-    const { port1, port2 } = new MessageChannel();
-    t.after(() => { port1.close(); port2.close(); });
-    newMessagePortRpcSession(port1, target);
-    using remote = newMessagePortRpcSession<ShellApi>(port2);
-    const fork = await forkShell(remote);
-    if (label === "older") {
-      assert.equal(fork, undefined);
-      continue;
-    }
-    assert.ok(fork);
-    try {
-      const result = await fork.run(process.platform === "win32" ? "[Console]::Write('forked')" : "printf forked");
-      assert.equal(result.stdout, "forked");
-    } finally { fork[Symbol.dispose](); }
-    (target as ShellApi)[Symbol.dispose]();
-  }
+test("forkShell forks a peer's shell", async (t) => {
+  const target = new ShellApi();
+  const { port1, port2 } = new MessageChannel();
+  t.after(() => { port1.close(); port2.close(); target[Symbol.dispose](); });
+  newMessagePortRpcSession(port1, target);
+  using remote = newMessagePortRpcSession<ShellApi>(port2);
+  const fork = await forkShell(remote);
+  try {
+    const result = await fork.run(process.platform === "win32" ? "[Console]::Write('forked')" : "printf forked");
+    assert.equal(result.stdout, "forked");
+  } finally { fork[Symbol.dispose](); }
 });

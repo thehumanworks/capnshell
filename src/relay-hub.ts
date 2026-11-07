@@ -11,11 +11,15 @@
  *                           answer and holds the dialer's first messages until it does.
  *   GET /v1/answer/KEY/ID   The daemon answers one dialer; the relay then forwards both ways.
  *
+ * Every request must come from the cns binary: it carries the Cns-Client header, an HMAC
+ * of the request under a client key built into cns (see clientProof). Anything else is
+ * refused before it reaches a room. That key ships in every copy of cns, so it keeps out
+ * other programs, not a determined person; docs/adr/0001-built-in-relay.md says why that
+ * is enough and what would be stronger. Links stay authenticated end to end whatever the
+ * relay does.
+ *
  * This file uses only WebCrypto and WebSocket-like objects, so the Cloudflare Worker
- * (relay/worker.ts) and `cns relay` (Bun) run the same code. A relay may require a
- * token to register: then /v1/accept carries ?token=TOKEN. Dialing needs no token:
- * a dialer only reaches a registered device, which authenticates it end to end, so
- * dial addresses, invites and saved peers never carry the token.
+ * (relay/worker.ts) and the Bun relay the tests run (relay-server.ts) share the same code.
  */
 
 export const RELAY_PROTOCOL = "cns-relay-1";
@@ -80,6 +84,56 @@ export async function verifyProof(host: string, key: string, nonce: string, sig:
     const publicKey = await crypto.subtle.importKey("raw", fromBase64url(key), { name: "Ed25519" }, false, ["verify"]);
     return await crypto.subtle.verify({ name: "Ed25519" }, publicKey, fromBase64url(sig), await challengeBytes(host, key, nonce));
   } catch { return false; }
+}
+
+/** The request header that shows a request comes from cns. */
+export const CLIENT_HEADER = "Cns-Client";
+/**
+ * The client key built into cns. Every copy of cns carries it, so it identifies the
+ * program, not a person, and anyone who takes cns apart can use it: it keeps other
+ * programs off the relay, not a determined person (docs/adr/0001-built-in-relay.md).
+ * To rotate it, add a new key, release cns with it, and drop the old one from
+ * ACCEPTED_CLIENT_KEYS once those releases are no longer in use.
+ */
+export const CLIENT_KEY = "yoWi1vx4unhXq7psUZ5NiD78vsTdctrQ8_1wJq3a5VU";
+/** The client keys the relay accepts. */
+export const ACCEPTED_CLIENT_KEYS: readonly string[] = [CLIENT_KEY];
+/** How far a client's clock may be from the relay's. */
+export const CLIENT_SKEW_MS = 60 * 60 * 1000;
+const CLIENT_SCHEME = "cns-client-1";
+
+function clientBytes(host: string, path: string, time: number, nonce: string): Uint8Array<ArrayBuffer> {
+  return encoder.encode([CLIENT_SCHEME, host.toLowerCase(), path, String(time), nonce].join("\0"));
+}
+const hmacKey = (key: string, usage: "sign" | "verify") => crypto.subtle.importKey("raw", fromBase64url(key), { name: "HMAC", hash: "SHA-256" }, false, [usage]);
+
+/**
+ * The Cns-Client header for a request to `url`: `cns-client-1 TIME NONCE MAC`, where MAC is
+ * HMAC-SHA256 under the client key over the relay's host as dialed, the path, the time in
+ * seconds and a random nonce. Binding the host and path means a header seen for one request
+ * does not open another, and the time means it stops working within CLIENT_SKEW_MS.
+ */
+export async function clientProof(url: string, key = CLIENT_KEY, now = Date.now()): Promise<string> {
+  const { host, pathname } = new URL(url);
+  const time = Math.floor(now / 1000);
+  const nonce = randomId();
+  const mac = new Uint8Array(await crypto.subtle.sign("HMAC", await hmacKey(key, "sign"), clientBytes(host, pathname, time, nonce)));
+  return `${CLIENT_SCHEME} ${time} ${nonce} ${base64url(mac)}`;
+}
+
+/** Whether `header` shows that the request for `host` and `path` comes from cns: a MAC under an accepted key, made within CLIENT_SKEW_MS of `now`. */
+export async function verifyClient(header: string | null | undefined, host: string, path: string, keys: readonly string[] = ACCEPTED_CLIENT_KEYS, now = Date.now()): Promise<boolean> {
+  if (!header || header.length > 256) return false;
+  const [scheme, timeText, nonce, mac, ...rest] = header.split(" ");
+  if (scheme !== CLIENT_SCHEME || rest.length || !timeText || !/^\d{1,12}$/.test(timeText) || !nonce || !idPattern.test(nonce) || !mac || !keyPattern.test(mac)) return false;
+  const time = Number(timeText);
+  if (Math.abs(now - time * 1000) > CLIENT_SKEW_MS) return false;
+  const data = clientBytes(host, path, time, nonce);
+  for (const key of keys) {
+    // subtle.verify compares in constant time.
+    try { if (await crypto.subtle.verify("HMAC", await hmacKey(key, "verify"), fromBase64url(mac), data)) return true; } catch { /* Not this key. */ }
+  }
+  return false;
 }
 
 function json(socket: RelaySocket, value: unknown) { try { socket.send(JSON.stringify(value)); } catch { /* Gone. */ } }
@@ -237,34 +291,21 @@ export function route(url: URL): RelayRoute | undefined {
   return undefined;
 }
 
-/** Show a relay URL without its token. */
-export function redactRelay(url: string): string {
-  return url.replace(/([?&]token=)[^&#]*/g, "$1…");
-}
-
-/** Whether a request carries the relay's token, when it has one. Compared in constant time. */
-export function authorized(url: URL, token: string | undefined): boolean {
-  if (!token) return true;
-  const supplied = encoder.encode(url.searchParams.get("token") ?? "");
-  const expected = encoder.encode(token);
-  let difference = supplied.length ^ expected.length;
-  for (let index = 0; index < expected.length; index++) difference |= expected[index]! ^ (supplied[index] ?? 0);
-  return difference === 0;
-}
-
-/** The relay endpoint for `kind`, from a relay's base URL (ws://, wss://, http:// or https://, with an optional path prefix and ?token=). */
+/** The relay endpoint for `kind`, from a relay's base URL (ws://, wss://, http:// or https://, with an optional path prefix). */
 export function relayEndpoint(base: string, kind: "accept" | "dial" | "answer", key: string, id?: string): string {
   const url = new URL(base);
   if (url.protocol === "https:") url.protocol = "wss:";
   else if (url.protocol === "http:") url.protocol = "ws:";
   if (url.protocol !== "ws:" && url.protocol !== "wss:") throw new Error("A relay URL starts with wss://, ws://, https:// or http://.");
-  if (url.username || url.password || url.hash) throw new Error("A relay URL has no credentials or fragment; pass a token as ?token=TOKEN.");
+  if (url.username || url.password || url.search || url.hash) throw new Error("A relay URL has no credentials, query or fragment.");
   const prefix = url.pathname.replace(/\/+$/, "");
   url.pathname = `${prefix}/v1/${kind}/${key}${id ? `/${id}` : ""}`;
-  // Only registering needs the token: dial and answer addresses are passed around without it.
-  if (kind !== "accept") url.searchParams.delete("token");
-  url.search = url.searchParams.size ? `?${url.searchParams}` : "";
   return url.href;
+}
+
+/** Whether a URL is a request to a relay: registering, dialing or answering. */
+export function isRelayRequest(address: string): boolean {
+  try { return /\/v1\/(accept|dial|answer)\/[A-Za-z0-9_-]{43}(\/[A-Za-z0-9_-]{22})?\/?$/.test(new URL(address).pathname); } catch { return false; }
 }
 
 /** Whether a saved address reaches a device through a relay rather than directly. */

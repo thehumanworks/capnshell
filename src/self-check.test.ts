@@ -8,19 +8,19 @@ const base = { identity, identityPath: "/cfg/identity.json", paired: 1 } satisfi
 const daemon = (extra: Partial<Extract<SelfFacts["daemon"], { running: true }>> = {}): SelfFacts["daemon"] =>
   ({ running: true, pid: 42, url: "ws://0.0.0.0:47381", paired: true, identity, addresses: ["ws://192.168.1.5:47381"], ...extra });
 
-test("a device with only private addresses and no relay is ready, with a warning that names the fix", () => {
+test("a device with only private addresses and the relay off is ready, with a warning that names the fix", () => {
   const { report, lines, exitCode } = selfCheck({ ...base, daemon: daemon() });
   assert.equal(exitCode, 0);
   assert.equal(report.reachableBeyondNetwork, false);
   assert.deepEqual(report.problems, []);
-  assert.match(report.warnings.join("\n"), /Every address here is private.*cns config relay URL/);
-  assert.match(lines.join("\n"), /^Identity: +abcd-efgh \(\/cfg\/identity\.json\)\nDaemon: +pid 42 at ws:\/\/0\.0\.0\.0:47381\nRelay: +none\nAddresses:\n  ws:\/\/192\.168\.1\.5:47381: private, this network only\nPaired: +1 device\n/);
+  assert.match(report.warnings.join("\n"), /Every address here is private and the relay is off.*Unset CNS_RELAY/);
+  assert.match(lines.join("\n"), /^Identity: +abcd-efgh \(\/cfg\/identity\.json\)\nDaemon: +pid 42 at ws:\/\/0\.0\.0\.0:47381\nRelay: +off \(CNS_RELAY=off\)\nAddresses:\n  ws:\/\/192\.168\.1\.5:47381: private, this network only\nPaired: +1 device\n/);
 });
 
 test("a registered public relay or a public direct address makes the device reachable from elsewhere", () => {
-  const relayed = selfCheck({ ...base, daemon: daemon({ relay: "wss://relay.example/?token=secret", relayRegistered: true, addresses: ["ws://10.0.0.2:47381", `wss://relay.example/v1/dial/${key}`] }) });
+  const relayed = selfCheck({ ...base, relay: "wss://relay.example", daemon: daemon({ relay: "wss://relay.example", relayRegistered: true, addresses: ["ws://10.0.0.2:47381", `wss://relay.example/v1/dial/${key}`] }) });
   assert.deepEqual([relayed.exitCode, relayed.report.reachableBeyondNetwork, relayed.report.warnings], [0, true, []]);
-  assert.ok(!relayed.lines.join("\n").includes("secret"), "the relay token is hidden");
+  assert.match(relayed.lines.join("\n"), /Relay: +wss:\/\/relay\.example \(registered\)/);
   assert.match(relayed.lines.join("\n"), /\[relay\]: reachable from other networks/);
   assert.equal(relayed.lines.at(-1), "Ready for paired devices.");
   const tailnet = selfCheck({ ...base, daemon: daemon({ addresses: ["ws://100.101.102.103:47381"] }) });
@@ -28,26 +28,17 @@ test("a registered public relay or a public direct address makes the device reac
 });
 
 test("a relay that is not registered does not count, and says so", () => {
-  const { report, exitCode } = selfCheck({ ...base, daemon: daemon({ relay: "wss://relay.example/", relayRegistered: false, addresses: ["ws://10.0.0.2:47381", `wss://relay.example/v1/dial/${key}`] }) });
+  const { report, exitCode } = selfCheck({ ...base, relay: "wss://relay.example", daemon: daemon({ relay: "wss://relay.example", relayRegistered: false, addresses: ["ws://10.0.0.2:47381", `wss://relay.example/v1/dial/${key}`] }) });
   assert.equal(exitCode, 0);
   assert.equal(report.reachableBeyondNetwork, false);
-  assert.match(report.warnings.join("\n"), /not registered at its relay/);
+  assert.match(report.warnings.join("\n"), /not registered at the relay/);
 });
 
-test("a configured relay that the running daemon does not use is a warning naming where it is set", () => {
-  const env = selfCheck({ ...base, configuredRelay: { url: "wss://other.example/?token=t", source: "env" }, daemon: daemon() });
-  assert.match(env.report.warnings.join("\n"), /CNS_RELAY names wss:\/\/other\.example.*uses no relay/);
-  assert.ok(!env.lines.join("\n").includes("token=t"), "the token is hidden");
-  const saved = selfCheck({ ...base, configuredRelay: { url: "wss://other.example/", source: "config" }, daemon: daemon({ relay: "wss://relay.example/" }) });
-  assert.match(saved.report.warnings.join("\n"), /cns config relay saved wss:\/\/other\.example.*uses wss:\/\/relay\.example/);
-  const same = selfCheck({ ...base, configuredRelay: { url: "wss://relay.example/", source: "config" }, daemon: daemon({ relay: "wss://relay.example/", relayRegistered: true, addresses: [`wss://relay.example/v1/dial/${key}`] }) });
-  assert.deepEqual(same.report.warnings, []);
-});
-
-test("settings that cannot be read are a warning", () => {
-  const { report, exitCode } = selfCheck({ ...base, settingsError: "Settings are not valid JSON", daemon: daemon({ addresses: ["ws://100.64.0.1:47381"] }) });
-  assert.equal(exitCode, 0);
-  assert.match(report.warnings.join("\n"), /settings cannot be read.*not valid JSON/);
+test("a daemon started with another CNS_RELAY than this command's is a warning", () => {
+  const off = selfCheck({ ...base, relay: "wss://relay.example", daemon: daemon() });
+  assert.match(off.report.warnings.join("\n"), /running daemon uses no relay, but a daemon started now would use wss:\/\/relay\.example/);
+  const other = selfCheck({ ...base, daemon: daemon({ relay: "wss://relay.example" }) });
+  assert.match(other.report.warnings.join("\n"), /uses the relay wss:\/\/relay\.example, but a daemon started now would use none/);
 });
 
 test("no identity, no daemon, a legacy daemon, a daemon with another identity and no address are problems", () => {

@@ -1,7 +1,8 @@
 import os from "node:os";
 import { newBunWebSocketRpcSession, newWebSocketRpcSession, type BunWebSocketTransport, type RpcStub } from "capnweb";
 import { attachClientSocket, clientWire, connectFirst, rpcSession, secureReady, SecureChannel, serverWire, type Established } from "../secure.js";
-import { challengeBytes, dialAddresses, isRelayAddress, redactRelay, relayEndpoint } from "../relay-hub.js";
+import { challengeBytes, dialAddresses, isRelayAddress, relayEndpoint } from "../relay-hub.js";
+import { builtInRelay } from "../relay-config.js";
 import { serve, type Server, type ServerWebSocket } from "bun";
 import { z } from "zod";
 import { PtyRegistry, ShellApi, type ShellInfo } from "../shell.js";
@@ -18,7 +19,7 @@ import { createInvite, decisionSchema, PairingApi, suggestedName, type Decision,
 import { advertisedSchema, describeGrants, explainDenial, findPairedPeer, getPeer, grantsSchema, learnAddresses, listPeers, savePairedPeer, updatePairedPeer } from "../peers.js";
 import { listeningAddresses } from "../addresses.js";
 import { serveControl, type PairingController } from "./daemon-server.js";
-import { localRelay, removeStaleState } from "./daemon.js";
+import { removeStaleState } from "./daemon.js";
 import { runOneShot } from "./one-shot.js";
 
 /** CLI exit statuses for failures, as docs/paired-peers.md lists them: 3 unpaired or changed device, 4 permission denied, else 1. */
@@ -92,8 +93,6 @@ const DIAL_RACE_MS = 5000;
 export async function startPeer(config: PeerConfig): Promise<void> {
   const daemonChild = process.env.CNS_DAEMON_CHILD === "1";
   delete process.env.CNS_DAEMON_CHILD;
-  // The relay URL may carry its token: it comes through the environment, never the command line.
-  delete process.env.CNS_DAEMON_RELAY;
   const sessions = new Map<string, Session>();
   // Named PTY sessions outlive the connection that started them, but not this process.
   const ptys = new PtyRegistry();
@@ -110,6 +109,8 @@ export async function startPeer(config: PeerConfig): Promise<void> {
   // A paired listener, or a connection to a paired device, needs this device's identity.
   const identity: Identity | undefined = config.paired || config.expect ? ensureIdentity().identity : undefined;
   if (identity) await secureReady();
+  // The relay built into cns: a paired daemon registers there, and paired devices are dialed there after their direct addresses.
+  const relay = identity ? builtInRelay() : undefined;
   // What this process offers each peer: its shell, or with --one-way only the handshake.
   const offer = () => config.oneWay ? new RefusingShell() : new ShellApi(ptys);
   /** What this device lets an authenticated paired device do here: exactly its saved incoming grants. */
@@ -197,7 +198,6 @@ export async function startPeer(config: PeerConfig): Promise<void> {
       if (!signal) return await plain(remote.run(command, options));
       signal.throwIfAborted();
       const shell = await forkShell(remote);
-      if (!shell) return await plain(remote.run(command, options));
       // Releasing the fork makes the peer kill the command.
       const release = () => shell[Symbol.dispose]();
       signal.addEventListener("abort", release, { once: true });
@@ -227,9 +227,7 @@ export async function startPeer(config: PeerConfig): Promise<void> {
       return await requireSession(id).remote.ptySession(name) as unknown as RemoteNamedPty;
     },
     async shell(id) {
-      const shell = await forkShell(requireSession(id).remote);
-      if (!shell) throw new Error(`Peer ${id} runs a cns without fork; update it to use its shell this way.`);
-      return shell;
+      return await forkShell(requireSession(id).remote);
     },
   };
 
@@ -275,8 +273,8 @@ export async function startPeer(config: PeerConfig): Promise<void> {
    * Ask a paired device on a standing link where it can be reached now and what it lets
    * this device do there, and save both in its record: a device that moved networks or
    * changed relays is then dialed where it is rather than where it was, and the access
-   * `cns peers` shows follows grants changed on that device since pairing. A device whose
-   * cns predates either question leaves that part of the record as saved.
+   * `cns peers` shows follows grants changed on that device since pairing. A question that
+   * fails leaves that part of the record as saved.
    */
   async function learnFromPeer(session: Session) {
     const peer = session.peer!;
@@ -301,7 +299,7 @@ export async function startPeer(config: PeerConfig): Promise<void> {
       const regranted = !same(outgoing, entry.grants.outgoing);
       if (!movedTo && !regranted) return;
       updatePairedPeer(entry.name, (current) => current.publicKey === peer.publicKey ? { ...current, addresses, grants: { ...current.grants, outgoing } } : current);
-      if (movedTo) announce(`${entry.name} is reachable at ${addresses.map(redactRelay).join(", ")}; saved.`);
+      if (movedTo) announce(`${entry.name} is reachable at ${addresses.join(", ")}; saved.`);
       if (regranted) announce(`${entry.name} lets this device use: ${describeGrants(outgoing)}; saved.`);
     } catch (error) {
       announce(`${peer.name}: could not update its saved record: ${errorMessage(error)}`);
@@ -351,7 +349,7 @@ export async function startPeer(config: PeerConfig): Promise<void> {
   const pairing: PairingController | undefined = identity && config.mode === "listen" ? {
     identity: () => ({ publicKey: identity.publicKey, fingerprint: identity.fingerprint }),
     addresses: () => advertised(),
-    relayRegistered: () => config.relay ? relayRegistered : undefined,
+    relayRegistered: () => relay ? relayRegistered : undefined,
     async invite(ttlMs) {
       const invite = createInvite(identity.publicKey, advertised(), ttlMs, suggestedName(os.hostname()));
       const pending: PendingInvite = {
@@ -426,7 +424,7 @@ export async function startPeer(config: PeerConfig): Promise<void> {
   function dial(name: string) {
     if (!identity || links.has(name) || stopping) return;
     const entry = getPeer(name);
-    if (entry?.kind !== "paired" || !dialAddresses(entry, config.relay).length) return;
+    if (entry?.kind !== "paired" || !dialAddresses(entry, relay).length) return;
     const expectedKey = entry.publicKey;
     let attempt = 0;
     let stopped = false;
@@ -450,7 +448,7 @@ export async function startPeer(config: PeerConfig): Promise<void> {
     }
     async function attempt_() {
       const current = getPeer(name);
-      const addresses = current?.kind === "paired" ? dialAddresses(current, config.relay) : [];
+      const addresses = current?.kind === "paired" ? dialAddresses(current, relay) : [];
       if (current?.kind !== "paired" || current.publicKey !== expectedKey || !addresses.length) return stop();
       // Skip while an inbound link from the same device is already up.
       if (linkTo(current.publicKey)) return schedule();
@@ -503,7 +501,7 @@ export async function startPeer(config: PeerConfig): Promise<void> {
   /** Where other devices can reach this daemon: its direct addresses, then its relay address. */
   function advertised(): string[] {
     const direct = listeningAddresses(config.bind, config.port);
-    return config.relay && identity ? [...direct, relayEndpoint(config.relay, "dial", identity.publicKey)] : direct;
+    return relay && identity ? [...direct, relayEndpoint(relay, "dial", identity.publicKey)] : direct;
   }
 
   /**
@@ -678,7 +676,7 @@ export async function startPeer(config: PeerConfig): Promise<void> {
         // the endpoint decides. A state file whose daemon answers is kept, and this start then fails.
         if (config.service) await removeStaleState(config.state, { ignorePid: true });
         controlCleanup = await serveControl(controller, () => { void stop(); }, config.state,
-          { url: config.url, bind: config.bind, port: config.port, remote: config.remote, oneWay: config.oneWay, paired: !!identity, ...config.relay ? { relay: config.relay } : {} }, pairing);
+          { url: config.url, bind: config.bind, port: config.port, remote: config.remote, oneWay: config.oneWay, paired: !!identity, ...relay ? { relay } : {} }, pairing);
         if (stopping) { await controlCleanup(); return; }
         process.send?.({ ready: true });
         if (process.connected) process.disconnect?.();
@@ -686,14 +684,14 @@ export async function startPeer(config: PeerConfig): Promise<void> {
       if (!config.noRepl) input = openConsole(controller, () => { void stop(); });
       const label = process.platform === "win32" ? "Windows" : process.platform === "darwin" ? "Mac" : "Linux";
       announce(`${label} listening at ${config.url}.`);
-      if (identity && config.relay) registerAtRelay(config.relay);
+      if (relay) registerAtRelay(relay);
       if (identity) for (const entry of listPeers()) if (entry.kind === "paired") dial(entry.name);
     } else if (config.expect) {
-      // One encrypted connection to a paired device, at the first of its addresses, or this device's relay, that answers as it.
+      // One encrypted connection to a paired device, at the first of its addresses, or the relay, that answers as it.
       let channel: SecureChannel;
       let url: string;
       try {
-        ({ channel, url } = await connectFirst(dialAddresses(config.expect, await localRelay(config.state)), identity!, { expect: config.expect.publicKey, signal: cancelled.signal }));
+        ({ channel, url } = await connectFirst(dialAddresses(config.expect, relay), identity!, { expect: config.expect.publicKey, signal: cancelled.signal }));
       } catch (error) {
         if (error instanceof AuthError) throw error;
         throw new Error(`Cannot connect to ${config.expect.name}: ${errorMessage(error)}`, { cause: error });

@@ -11,10 +11,12 @@ test("a hostile relay cannot crash the daemon or make it open connections withou
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-evil-relay-")));
   const dir = path.join(root, "studio");
   await mkdir(dir, { mode: 0o700 });
-  const env = { CNS_CONFIG_DIR: dir, HOME: dir };
+  // CNS_RELAY points cns at the hostile relay below once it listens.
+  let relayUrl = "";
+  const env = () => ({ CNS_CONFIG_DIR: dir, HOME: dir, CNS_RELAY: relayUrl });
   const state = path.join(dir, "daemon.json");
   const cli = async (args: string[]) => {
-    const child = launchCli(t, args, { env });
+    const child = launchCli(t, args, { env: env() });
     child.child.stdin.end();
     return { code: await child.exited, stdout: child.stdout, stderr: child.stderr };
   };
@@ -48,10 +50,11 @@ test("a hostile relay cannot crash the daemon or make it open connections withou
       close(ws) { if (ws.data.kind === "accept" && ws.data.n === 1) badChallengeClosed = true; },
     },
   });
+  relayUrl = `ws://127.0.0.1:${relay.port}`;
   // Hooks run in the order they were added: stop the daemon, then the relay, then remove the directory.
   t.after(async () => { await cli(["stop", "--state", state]); await relay.stop(true); await rm(root, { recursive: true, force: true }); });
 
-  const up = await cli(["up", "--bind", "127.0.0.1", "--port", await unusedPort("127.0.0.1"), "--relay", `ws://127.0.0.1:${relay.port}`, "--state", state]);
+  const up = await cli(["up", "--bind", "127.0.0.1", "--port", await unusedPort("127.0.0.1"), "--state", state]);
   assert.equal(up.code, 0, up.stderr);
   const until = Date.now() + 20000;
   while (Date.now() < until && answers.length < 32) await new Promise((resolve) => setTimeout(resolve, 100));
