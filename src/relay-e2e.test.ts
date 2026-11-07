@@ -113,7 +113,9 @@ test("devices that cannot reach each other directly pair and link through the re
   assert.deepEqual([shared.code, shared.stdout], [0, "shared-relay"], shared.stderr);
   const doctorShared = await cli(laptop, ["doctor", "studio", "--state", laptop.state]);
   assert.equal(doctorShared.code, 0, doctorShared.stdout + doctorShared.stderr);
-  assert.match(doctorShared.stdout, /\/v1\/dial\/[A-Za-z0-9_-]{43} \[this device's relay\]: ok \(.*encrypted\)/);
+  // Once the standing link is up, laptop may already have learned studio's relay address from it
+  // and saved it, so doctor shows it as a saved relay rather than this device's.
+  assert.match(doctorShared.stdout, /\/v1\/dial\/[A-Za-z0-9_-]{43} \[(?:this device's )?relay\]: ok \(.*encrypted\)/);
   const viaOf = async (dev: typeof laptop) => {
     const control = await connectControl(dev.state);
     try { return (await control.controller.peers()).filter((peer) => peer.peer?.daemon).map((peer) => peer.peer!.via); } finally { control.close(); }
@@ -135,14 +137,27 @@ test("devices that cannot reach each other directly pair and link through the re
   assert.equal((ran.structuredContent as { stdout: string }).stdout, "mcp-by-name");
   await client.close();
   assert.match((await cli(studio, ["status", "--state", studio.state])).stdout, /Links: +laptop \(relay, /);
+  // Over the link, each daemon learned where the other listens: laptop drops the dead address it was given and
+  // keeps the relay, and studio, which paired knowing no address for laptop, can now dial it.
+  await eventually(async () => {
+    const saved = JSON.parse(await readFile(file, "utf8")).addresses as string[];
+    return saved[0] === `ws://127.0.0.1:${port}` && !saved.includes("ws://127.0.0.1:1") && isRelayAddress(saved.at(-1)!);
+  }, "laptop saves studio's advertised addresses");
+  // Laptop's daemon registers at the relay saved with cns config relay, so it advertises that relay as well.
+  await eventually(async () => {
+    const saved = JSON.parse(await readFile(path.join(studio.dir, "peers", "laptop"), "utf8")).addresses as string[];
+    return saved.length === 2 && !isRelayAddress(saved[0]!) && isRelayAddress(saved[1]!);
+  }, "studio saves laptop's addresses");
 
   if (!relay) return;
   // The relay restarts: studio registers again and the daemons link again.
   const registered = async () => JSON.parse((await cli(studio, ["status", "--json", "--state", studio.state])).stdout).daemon.relayRegistered;
   await relay.stop();
-  await eventually(async () => (await viaOf(laptop)).length === 0 && !(await registered()), "the link and the registration end with the relay");
+  await eventually(async () => (await viaOf(laptop)).join() !== "relay" && !(await registered()), "the relayed link and the registration end with the relay");
   relay = startRelay({ bind: "127.0.0.1", port: relayPort, token });
   await eventually(registered, "studio registers at the new relay", 60000);
-  await eventually(async () => (await viaOf(laptop)).join() === "relay", "the link returns through the new relay", 60000);
+  // Both now know each other's direct address, so the link returns directly; the relay answers for studio again.
+  await eventually(async () => (await viaOf(laptop)).length === 1, "the link returns", 60000);
   assert.equal((await cli(laptop, ["run", "studio", "--", "printf back"])).stdout, "back");
+  await eventually(async () => /\/v1\/dial\/[A-Za-z0-9_-]{43} \[relay\]: ok/.test((await cli(laptop, ["doctor", "studio"])).stdout), "studio answers at the new relay", 30000);
 });
