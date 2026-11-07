@@ -5,6 +5,7 @@ import { connectFirst, connectSecure, rpcSession, type SecureChannel } from "../
 import { isRelayAddress, redactRelay, relayEndpoint } from "../relay-hub.js";
 import { errorMessage } from "../errors.js";
 import { ensureIdentity, fingerprint as fingerprintOf, identityPath, loadIdentity } from "../identity.js";
+import { allPrivate } from "../addresses.js";
 import { endpointUrl, isLoopback } from "../options.js";
 import { decisionSchema, decodeInvite, DEFAULT_INVITE_MS, MAX_INVITE_MS, suggestedName, type Decision, type Invite, type PairingApi, type Proposal } from "../pairing.js";
 import { peerFileExists, peerNamePattern, removeAlias, validatePeerUrl } from "../aliases.js";
@@ -154,6 +155,9 @@ async function inviteAndWait(options: PairOptions): Promise<void> {
     ({ control } = await pairedDaemon(options));
     const created = await control.remote.invite(minutes * 60_000);
     console.log(`Invite: ${created.text}`);
+    // An invite that only names private addresses reaches nothing beyond this network; say so now, not after it expires unused.
+    const invited = decodeInvite(created.text).addresses;
+    if (!invited.some(isRelayAddress) && allPrivate(invited)) console.error(`This invite lists only private addresses (${invited.join(", ") || "none"}). A device on another network cannot reach them. For one, stop the daemon with cns stop and start it with cns up --relay URL, then pair again.`);
     console.error(`On the other device, run: cns pair '${created.text}'\nWaiting for it (the invite expires in ${minutes} minute${minutes === 1 ? "" : "s"})...`);
     const { peer, fingerprint, proposal } = await control.remote.awaitProposal(created.id) as { peer: string; fingerprint: string; proposal: Proposal };
     console.error([
