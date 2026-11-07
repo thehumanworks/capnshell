@@ -3,8 +3,8 @@ import { closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openS
 import path from "node:path";
 import { checkConfigDirectory, checkPrivateDirectory, configDirectory, isPrivateFile, requirePrivateStateSupport } from "./config.js";
 
-// Plain files here are address-book entries, not authenticated identities; paired
-// devices are JSON files in the same directory, read by peers.ts.
+// One private file per paired device, named by this user's alias for it. peers.ts reads
+// and writes the JSON records; this module only handles the files.
 export const peerNamePattern = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
 /** The directory of saved peers, one file per name. */
 export function peersDirectory(): string {
@@ -18,7 +18,7 @@ const checkDirectories = checkPeerDirectories;
 const namePattern = peerNamePattern;
 /** The file for a saved peer name, after validating the name. */
 export function peerFile(name: string): string {
-  if (!namePattern.test(name)) throw new Error("Peer alias must contain 1-64 letters, numbers, underscores or hyphens and start with a letter or number.");
+  if (!namePattern.test(name)) throw new Error("A peer name must contain 1-64 letters, numbers, underscores or hyphens and start with a letter or number.");
   return path.join(directory(), name);
 }
 const file = peerFile;
@@ -77,7 +77,7 @@ export function readPeerFile(name: string): string | undefined {
     throw error;
   }
   try {
-    if (!isPrivateFile(fstatSync(fd))) throw new Error(`Peer alias must be a private file owned by your user: ${target}`);
+    if (!isPrivateFile(fstatSync(fd))) throw new Error(`A saved peer must be a private file owned by your user: ${target}`);
     return readFileSync(fd, "utf8");
   } finally { closeSync(fd); }
 }
@@ -92,8 +92,6 @@ export function peerNames(): string[] {
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
 }
 
-/** Whether a peer file holds a paired device rather than a plain address. */
-export const isPairedEntry = (content: string) => content.trimStart().startsWith("{");
 export function validatePeerUrl(value: string): string {
   const parsed = new URL(value);
   if (!['ws:', 'wss:'].includes(parsed.protocol) || !parsed.hostname || parsed.username || parsed.password || parsed.hash) {
@@ -101,29 +99,5 @@ export function validatePeerUrl(value: string): string {
   }
   return parsed.href;
 }
-function validateAliasUrl(value: string): string {
-  const url = validatePeerUrl(value);
-  const parsed = new URL(url);
-  if (parsed.pathname !== "/" || parsed.search) throw new Error("Saved peer addresses cannot include a path or query. Use an explicit URL instead.");
-  return url;
-}
-export function addAlias(name: string, url: string): void {
-  file(name);
-  const address = validateAliasUrl(url);
-  createPeerFile(name, address + "\n");
-}
-export function removeAlias(name: string): void { const target = file(name); checkDirectories(); unlinkSync(target); }
-/** The URL saved under an address alias. A paired device is not an address alias; peers.ts resolves it. */
-export function resolveAlias(name: string): string {
-  const content = readPeerFile(name);
-  if (content === undefined) throw new Error(`Unknown peer alias: ${name}`);
-  if (isPairedEntry(content)) throw new Error(`${name} is a paired device, not a saved address. Name it as the target instead: cns run ${name} -- '...'`);
-  return validateAliasUrl(content.trim());
-}
-/** Saved address aliases only; see peers.ts for paired devices. */
-export function listAliases(): Array<{ name: string; url: string }> {
-  return peerNames().flatMap((name) => {
-    const content = readPeerFile(name);
-    return content === undefined || isPairedEntry(content) ? [] : [{ name, url: validateAliasUrl(content.trim()) }];
-  });
-}
+/** Remove a saved peer's file. */
+export function removePeerFile(name: string): void { const target = file(name); checkDirectories(); unlinkSync(target); }

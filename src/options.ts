@@ -1,33 +1,30 @@
 import { isIP } from "node:net";
-import { validatePeerUrl } from "./aliases.js";
-import { isSavedPeer, resolvePeer, type Permission } from "./peers.js";
+import { resolvePeer, type Permission } from "./peers.js";
 import { Command, Option } from "commander";
 import { z } from "zod";
 import { MAX_SCREEN_HISTORY, MAX_TIMEOUT_MS, sessionNameSchema } from "./shell.js";
 import { MAX_KEYS } from "./keys.js";
 import type { CopyRequest } from "./commands/copy.js";
 
-const roles = ["listen", "connect", "run", "tty", "cp", "sessions", "keys", "screen", "kill"] as const;
+const roles = ["run", "tty", "cp", "sessions", "keys", "screen", "kill"] as const;
 /** Commands that address one named PTY session. */
 const sessionRoles = new Set<PeerRole>(["keys", "screen", "kill"]);
 type PeerRole = typeof roles[number];
+/** A paired device a command reaches: the identity it must prove and every address saved for it. */
+export type ExpectedPeer = { name: string; publicKey: string; outgoing: Permission[]; addresses: string[] };
 const portSchema = (name = "--port") => z.string().regex(/^\d+$/, `${name} requires an integer.`)
   .transform(Number).pipe(z.int().min(1).max(65535));
 const bindSchema = (name = "--bind") => z.string().refine((value) => isIP(value) !== 0,
   `${name} requires a numeric IPv4 or IPv6 interface address.`);
 const dimensionSchema = (name: string) => z.string().regex(/^\d+$/, `${name} requires an integer.`)
   .transform(Number).pipe(z.int().min(1).max(1000));
-const peerOptionsSchema = z.strictObject({
-  peer: z.string().min(1).optional(),
-  bind: bindSchema().default("127.0.0.1"),
-  port: portSchema().default(47381),
-  repl: z.boolean().default(true),
-  allowRemote: z.boolean().default(false),
-  oneWay: z.boolean().default(false),
-  paired: z.boolean().default(false),
-  daemon: z.boolean().default(false),
+const daemonOptionsSchema = z.strictObject({
+  bind: bindSchema(),
+  port: portSchema(),
   service: z.boolean().default(false),
-  state: z.string().min(1).optional(),
+  state: z.string().min(1),
+});
+const peerOptionsSchema = z.strictObject({
   cwd: z.string().min(1).optional(),
   timeout: z.string().regex(/^\d+$/, "--timeout requires an integer.").transform(Number)
     .pipe(z.int().min(0).max(MAX_TIMEOUT_MS)).optional(),
@@ -45,24 +42,27 @@ const peerOptionsSchema = z.strictObject({
   stdin: z.boolean().default(true),
 });
 
-export interface PeerConfig {
-  role: PeerRole;
-  mode: "listen" | "connect";
+/**
+ * The daemon `cns up` starts, or the service runs: it listens for paired devices at
+ * `url`, registers at the relay and keeps standing links to every paired device.
+ */
+export interface DaemonConfig {
+  role: "daemon";
   bind: string;
   port: number;
   url: string;
-  noRepl: boolean;
+  /** The listener accepts connections from other machines. */
   remote: boolean;
-  /** Use peers' shells without offering this machine's shell or files to them. */
-  oneWay: boolean;
-  /** Accept only paired devices, after they authenticate; `cns up` runs such a listener. */
-  paired: boolean;
-  /** The paired device this connection must reach, from a saved peer name, and every address saved for it. */
-  expect?: { name: string; publicKey: string; outgoing: Permission[]; addresses: string[] };
-  daemon: boolean;
-  /** Run the paired daemon in the foreground under launchd or systemd: it serves its control endpoint without a parent. */
-  service?: boolean;
-  state?: string;
+  /** Run in the foreground under launchd or systemd: it serves its control endpoint without a parent. */
+  service: boolean;
+  state: string;
+}
+
+/** One command on a paired device. */
+export interface PeerConfig {
+  role: PeerRole;
+  /** The paired device the command reaches, from its saved name. */
+  expect: ExpectedPeer;
   /** The shell string for run; optional for tty, which otherwise starts a login shell. */
   command?: string;
   cwd?: string;
@@ -94,8 +94,6 @@ export function isLoopback(host: string): boolean {
 
 export const endpointUrl = (bind: string, port: number) => `ws://${isIP(bind) === 6 ? `[${bind}]` : bind}:${port}`;
 
-const peerUrl = validatePeerUrl;
-
 // Commander handles parsing/help; reject repeats rather than silently using
 // the last value for security-sensitive listener options.
 function rejectRepeatedOptions(command: Command) {
@@ -108,107 +106,72 @@ function rejectRepeatedOptions(command: Command) {
   }
 }
 
-function resolveOptions(role: PeerRole, command: Command, destination: string | undefined): PeerConfig {
-  const mode = role === "listen" ? "listen" : "connect";
-  const options = { ...command.opts() };
-  if (options.peer !== undefined) {
-    if (destination !== undefined) throw new Error("Use either a URL or --peer, not both.");
-    destination = options.peer;
-  }
-  delete options.peer;
-  let expect: PeerConfig["expect"];
-  if (destination !== undefined && !/^wss?:\/\//i.test(destination)) {
-    // A saved name: an address alias, or a paired device whose identity the connection must see.
-    const resolved = resolvePeer(destination);
-    destination = resolved.url;
-    expect = resolved.peer;
-  }
-  if (destination !== undefined) {
-    for (const name of ["bind", "port"]) {
-      if (command.getOptionValueSource(name) === "cli") {
-        throw new Error(`Use either a URL or --${name}, not both.`);
-      }
-      // An explicit URL replaces endpoint defaults, including invalid env values.
-      delete options[name];
-    }
-  }
-  const { bind, port, repl, allowRemote, oneWay, paired, daemon, service, state, cwd, timeout, cols, rows, term, screen, history, name, attach, literal, until, json, stdin } = peerOptionsSchema.parse(options);
+function resolveOptions(role: PeerRole, command: Command, device: string): PeerConfig {
+  const expect = resolvePeer(device);
+  const { cwd, timeout, cols, rows, term, screen, history, name, attach, literal, until, json, stdin } = peerOptionsSchema.parse({ ...command.opts() });
   if (role === "tty") {
     if (history !== undefined && !screen) throw new Error("--history requires --screen.");
     if (name !== undefined && attach !== undefined) throw new Error("Use either --name to start a session or --attach to join one, not both.");
-    if ((name !== undefined || attach !== undefined) && screen) throw new Error("--screen applies to unnamed sessions; use cns screen NAME for a named one.");
+    if ((name !== undefined || attach !== undefined) && screen) throw new Error("--screen applies to unnamed sessions; use cns screen DEVICE NAME for a named one.");
     // The program and its settings were chosen when the session started.
     const fixed = ["cwd", "timeout", "term"].filter((option) => command.getOptionValueSource(option) === "cli");
     if (attach !== undefined && fixed.length) throw new Error(`--attach cannot change --${fixed[0]}; it was set when the session started.`);
   }
   if (role === "screen" && timeout !== undefined && until === undefined) throw new Error("--timeout requires --until.");
-  if (mode === "listen" && !isLoopback(bind) && !allowRemote && !paired) {
-    throw new Error("A non-loopback listener exposes shell access. Add --allow-remote only for a trusted LAN/VPN test.");
-  }
-  if (service && (!paired || daemon)) throw new Error("--service runs the paired daemon in the foreground; cns up --install sets it up.");
-  if (paired && oneWay) throw new Error("A paired listener grants each device what it was granted; --one-way does not apply.");
-  let url = endpointUrl(bind, port);
-  if (role === "connect" || destination !== undefined) {
-    if (!destination) throw new Error(`${role} requires one ws:// or wss:// URL or a saved peer name.`);
-    url = peerUrl(destination);
-  }
   return {
-    role, mode, bind, port, url, noRepl: role === "run" || role === "tty" || !repl, oneWay, paired, expect, daemon, service, state, cwd, timeoutMs: timeout,
+    role, expect, cwd, timeoutMs: timeout,
     cols, rows, term, screen: screen || role === "screen" ? { history: history ?? 0 } : undefined,
     name: name ?? attach, attach: attach !== undefined, literal, until, json, ...role === "run" ? { stdin } : {},
-    remote: mode === "listen" ? !isLoopback(bind) : !isLoopback(new URL(url).hostname),
   };
+}
+
+/**
+ * The hidden `cns daemon` command that `cns up` and the service run. It is not for people:
+ * `cns up` chooses its options and supervises it.
+ */
+export function addDaemonCommand(program: Command, run: (config: DaemonConfig) => void | Promise<void>): void {
+  const command = program.command("daemon", { hidden: true })
+    .description("Run the paired daemon (started by cns up)")
+    .requiredOption("--bind <address>", "Numeric interface address")
+    .requiredOption("--port <port>", "TCP port")
+    .requiredOption("--state <path>", "Daemon state file")
+    .option("--service", "Run in the foreground for launchd or systemd (used by cns up --install)");
+  rejectRepeatedOptions(command);
+  command.action(() => {
+    const { bind, port, service, state } = daemonOptionsSchema.parse({ ...command.opts() });
+    return run({ role: "daemon", bind, port, url: endpointUrl(bind, port), remote: !isLoopback(bind), service, state });
+  });
 }
 
 export function addPeerCommands(program: Command, run: (config: PeerConfig) => void | Promise<void>): void {
   program.enablePositionalOptions();
   const descriptions: Record<PeerRole, string> = {
-    listen: "Listen for peers (macOS, Linux or Windows)",
-    run: "Execute one shell command on a peer and exit with its status",
-    connect: "Connect to a ws:// or wss:// peer",
-    tty: "Open an interactive terminal (PTY) on a peer, or start a named session",
-    cp: "Copy a file between this device and a peer",
-    sessions: "List a peer's named PTY sessions",
+    run: "Execute one shell command on a paired device and exit with its status",
+    tty: "Open an interactive terminal (PTY) on a paired device, or start a named session",
+    cp: "Copy a file between this device and a paired device",
+    sessions: "List a paired device's named PTY sessions",
     keys: "Send keys to a named PTY session",
     screen: "Print a named PTY session's screen, optionally once it shows some text",
     kill: "End a named PTY session and remove it",
   };
+  const device = "The paired device's name, as cns pair saved it";
   for (const role of roles) {
-    const command = program.command(role).description(descriptions[role])
-      .addHelpText("after", "\nNo authentication. Remote mode is only for a temporary trusted LAN/private VPN test.");
-    if (role === "listen" || role === "connect") {
-      command.option("--no-repl", "Disable the interactive command prompt");
-    }
-    command.option("--one-way", "Use peers' shells without offering this machine's shell or files to them");
+    const command = program.command(role).description(descriptions[role]);
     if (role === "sessions" || sessionRoles.has(role)) {
-      command.addHelpText("after", "\nNamed sessions live in the peer's cns process: they survive this command and reconnects,\nand end when they are killed or that process stops. Start one with cns tty --name NAME.");
-    }
-    if (role !== "listen") command.option("--peer <name>", "Use a saved peer: a paired device, or an address alias");
-    if (role === "listen") {
-      command.addOption(new Option("--paired", "Accept only paired devices (used by cns up)").hideHelp())
-        .addOption(new Option("--service", "With --paired: run the daemon in the foreground for launchd or systemd (used by cns up --install)").hideHelp());
-    }
-    if (role !== "connect") {
-      command.addOption(new Option("--bind <address>", `Numeric ${role === "listen" ? "interface" : "remote peer"} address (default: 127.0.0.1)`).env("CNS_BIND"))
-        .addOption(new Option("--port <port>", "TCP port (default: 47381)").env("CNS_PORT"));
-    }
-    if (role === "listen") {
-      command.option("--allow-remote", "Explicitly allow a non-loopback listener")
-        .option("--daemon", "Run the listener in the background")
-        .option("--state <path>", "Local daemon state file");
+      command.addHelpText("after", "\nNamed sessions live in the device's daemon: they survive this command and reconnects,\nand end when they are killed or the daemon stops. Start one with cns tty DEVICE --name NAME.");
     }
     if (role === "run" || role === "tty") {
-      command.addOption(new Option("--cwd <path>", "Absolute working directory on the remote peer").env("CNS_CWD"))
+      command.addOption(new Option("--cwd <path>", "Absolute working directory on the device").env("CNS_CWD"))
         .option("--timeout <ms>", `Command timeout, 0-${MAX_TIMEOUT_MS} ms (0 disables it)`);
     }
     if (role === "run") command.option("-n, --no-stdin", "Do not forward this process's stdin to the command");
     if (role === "sessions") command.option("--json", "Print the sessions as JSON");
     if (role === "cp") {
-      command.addHelpText("after", "\nExactly one path is on the peer, written TARGET:PATH, where TARGET is a paired device's name or a\nsaved alias, or :PATH for the --peer, --bind/--port or default target. A relative or ~/ remote\npath starts at the remote user's home. A destination that is a directory, or ends with /,\nreceives the file under its own name. New files keep the source's permission bits.\nOne file per call; directories are not copied. Needs the files grant on a paired device.\nExamples: cns cp ./build.tar.gz studio:/tmp/    cns cp studio:~/notes.txt .\n          cns cp --peer ws://box:47381 report.pdf :reports/");
+      command.addHelpText("after", "\nExactly one path is on the paired device, written DEVICE:PATH. A relative or ~/ remote path\nstarts at the remote user's home. A destination that is a directory, or ends with /,\nreceives the file under its own name. New files keep the source's permission bits.\nOne file per call; directories are not copied. Needs the files grant on the device.\nExamples: cns cp ./build.tar.gz studio:/tmp/    cns cp studio:~/notes.txt .");
     }
     if (role === "keys") {
       command.option("-l, --literal", "Send every argument as literal text, without key names")
-        .addHelpText("after", `\nEach argument is a tmux-style key name or literal text, up to ${MAX_KEYS} arguments:\n  Enter Tab BTab Escape Space BSpace Up Down Left Right Home End PageUp PageDown\n  Insert Delete F1-F12, and C-, M- or S- prefixes, such as C-c, M-x, C-Left or S-Tab.\nArguments that are not key names are typed as they are. Put -- before text starting with -.\nExamples: cns keys build 'make test' Enter    cns keys build C-c    cns keys build -- -n Enter`);
+        .addHelpText("after", `\nEach argument is a tmux-style key name or literal text, up to ${MAX_KEYS} arguments:\n  Enter Tab BTab Escape Space BSpace Up Down Left Right Home End PageUp PageDown\n  Insert Delete F1-F12, and C-, M- or S- prefixes, such as C-c, M-x, C-Left or S-Tab.\nArguments that are not key names are typed as they are. Put -- before text starting with -.\nExamples: cns keys studio build 'make test' Enter    cns keys studio build C-c\n          cns keys studio build -- -n Enter`);
     }
     if (role === "screen") {
       command.option("--history <lines>", `Include up to ${MAX_SCREEN_HISTORY} scrollback lines`)
@@ -224,49 +187,38 @@ export function addPeerCommands(program: Command, run: (config: PeerConfig) => v
         .option("--history <lines>", `With --screen, include up to ${MAX_SCREEN_HISTORY} scrollback lines`)
         .option("--name <name>", "Start a named session in the background and return; see cns keys, screen and kill")
         .option("--attach <name>", "Attach to a named session; Ctrl-] detaches and leaves it running")
-        .addHelpText("after", "\nWithout a command, starts the remote user's login shell (PowerShell on Windows). Otherwise pass\nexactly one quoted string after -- in the remote shell's syntax. A local terminal is switched to raw mode, so keys such as Ctrl-C go to\nthe remote program. Piped input is forwarded verbatim; send \\x04 yourself for Ctrl-D.\n--screen prints what the terminal shows, like tmux capture-pane; combine it with --timeout to\nsnapshot a program that keeps running.\n--name starts a session that outlives this command; --timeout then limits its lifetime.\nExamples: cns tty    cns tty --cwd /srv/app -- 'claude'    printf 'ls\\nexit\\n' | cns tty\n          cns tty --screen --timeout 5000 -- 'htop'\n          cns tty --name build -- 'make watch'    cns tty --attach build");
+        .addHelpText("after", "\nWithout a command, attaches to the device's main session at a terminal, or starts the remote\nuser's login shell (PowerShell on Windows). Otherwise pass exactly one quoted string after -- in\nthe remote shell's syntax. A local terminal is switched to raw mode, so keys such as Ctrl-C go to\nthe remote program. Piped input is forwarded verbatim; send \\x04 yourself for Ctrl-D.\n--screen prints what the terminal shows, like tmux capture-pane; combine it with --timeout to\nsnapshot a program that keeps running.\n--name starts a session that outlives this command; --timeout then limits its lifetime.\nExamples: cns tty studio    cns tty studio --cwd /srv/app -- 'claude'    printf 'ls\\nexit\\n' | cns tty studio\n          cns tty studio --screen --timeout 5000 -- 'htop'\n          cns tty studio --name build -- 'make watch'    cns tty studio --attach build");
     }
     if (role === "run") {
-      command.addHelpText("after", "\nPass exactly one quoted shell string after --. Your local shell removes the outer quotes.\nThe target is a paired device's name (cns pair), a saved address alias, or a ws:// URL.\nWithout one, use --bind/--port, then CNS_BIND/CNS_PORT, then 127.0.0.1:47381.\nAn explicit target overrides endpoint environment variables; do not combine it with --bind/--port.\nExamples: cns run studio -- 'git status'    cns run -- 'printf \"hello\\n\"'");
+      command.addHelpText("after", "\nPass exactly one quoted shell string after --. Your local shell removes the outer quotes.\nExamples: cns run studio -- 'git status'    cns run studio -- 'printf \"hello\\n\"'");
     }
     rejectRepeatedOptions(command);
     if (role === "run") {
-      command.usage("[target] [options] -- <command>")
-        .argument("[target]", "A paired device's name, a saved alias or a ws:// URL").argument("[command]");
-      command.action((url: string | undefined, shellCommand: string | undefined) => {
-        // With no URL, Commander puts the shell command in the first argument.
-        if (shellCommand === undefined) {
-          shellCommand = url;
-          url = undefined;
-        }
+      command.usage("<device> [options] -- <command>").argument("<device>", device).argument("[command]");
+      command.action((name: string, shellCommand: string | undefined) => {
         // Positional parsing preserves the subcommand delimiter in the parent args.
         const rawArgs = program.args;
         const delimiter = rawArgs.indexOf("--");
+        if (shellCommand === undefined && delimiter >= 0 && rawArgs[delimiter + 1] === name) throw new Error("run requires a paired device's name: cns run DEVICE -- 'command'.");
         if (delimiter < 0 || rawArgs.length - delimiter !== 2 || rawArgs[delimiter + 1] !== shellCommand) {
           throw new Error("run requires -- followed by exactly one quoted shell command.");
         }
         if (!shellCommand?.trim() || shellCommand.length > 8192) throw new Error("Command must contain 1-8192 characters.");
-        return run({ ...resolveOptions(role, command, url), command: shellCommand });
+        return run({ ...resolveOptions(role, command, name), command: shellCommand });
       });
     } else if (role === "tty") {
-      command.usage("[target] [options] [-- <command>]")
-        .argument("[target]", "A paired device's name, a saved alias or a ws:// URL").argument("[command]");
-      command.action((url: string | undefined, shellCommand: string | undefined) => {
+      command.usage("<device> [options] [-- <command>]").argument("<device>", device).argument("[command]");
+      command.action((name: string, shellCommand: string | undefined) => {
         const rawArgs = program.args;
         const delimiter = rawArgs.indexOf("--");
         if (delimiter >= 0) {
-          if (rawArgs.length - delimiter !== 2) throw new Error("tty accepts exactly one quoted shell command after --.");
-          // With no URL, Commander puts the shell command in the first argument.
-          if (shellCommand === undefined) {
-            shellCommand = url;
-            url = undefined;
-          }
-          if (rawArgs[delimiter + 1] !== shellCommand) throw new Error("tty accepts exactly one quoted shell command after --.");
+          if (shellCommand === undefined && rawArgs[delimiter + 1] === name) throw new Error("tty requires a paired device's name: cns tty DEVICE -- 'command'.");
+          if (rawArgs.length - delimiter !== 2 || rawArgs[delimiter + 1] !== shellCommand) throw new Error("tty accepts exactly one quoted shell command after --.");
           if (!shellCommand?.trim() || shellCommand.length > 8192) throw new Error("Command must contain 1-8192 characters.");
         } else if (shellCommand !== undefined) {
           throw new Error("tty requires -- before its shell command.");
         }
-        const config = resolveOptions(role, command, url);
+        const config = resolveOptions(role, command, name);
         if (config.attach && shellCommand !== undefined) throw new Error("--attach joins a running session; it does not take a command.");
         return run({ ...config, command: shellCommand });
       });
@@ -275,70 +227,60 @@ export function addPeerCommands(program: Command, run: (config: PeerConfig) => v
       command.action((source: string, destination: string) => {
         const from = splitRemote(source);
         const to = splitRemote(destination);
-        if (from && to) throw new Error("cp copies between this device and a peer: one path must be local.");
-        if (!from && !to) throw new Error("cp needs one path on the peer, written TARGET:PATH, or :PATH with --peer.");
+        if (from && to) throw new Error("cp copies between this device and a paired device: one path must be local.");
+        if (!from && !to) throw new Error("cp needs one path on the paired device, written DEVICE:PATH.");
         const remote = (from ?? to)!;
         const local = from ? destination : source;
         if (!local) throw new Error("cp needs a local path.");
-        if (remote.target !== undefined && /^wss?$/i.test(remote.target)) throw new Error("Give a URL with --peer and write the remote path as :PATH.");
         return run({ ...resolveOptions(role, command, remote.target), copy: { direction: from ? "download" : "upload", local, remote: remote.path } });
       });
     } else if (role === "sessions") {
-      command.usage("[target] [options]").argument("[target]", "A paired device's name, a saved alias or a ws:// URL").action((url: string | undefined) => run(resolveOptions(role, command, url)));
-    } else if (sessionRoles.has(role)) {
-      command.usage(role === "keys" ? "[target] [options] <name> <keys...>" : "[target] [options] <name>")
-        .argument("<arguments...>");
-      command.action((values: string[]) => {
+      command.usage("<device> [options]").argument("<device>", device).action((name: string) => run(resolveOptions(role, command, name)));
+    } else {
+      command.usage(role === "keys" ? "<device> [options] <name> <keys...>" : "<device> [options] <name>")
+        .argument("<device>", device).argument("<arguments...>");
+      command.action((target: string, values: string[]) => {
         const args = [...values];
-        // Session names cannot contain ':', so a ws:// or wss:// URL is unambiguous. A saved
-        // peer's name before the session name is a target too; use --peer when they collide.
-        const minimum = role === "keys" ? 2 : 1;
-        const url = /^wss?:\/\//i.test(args[0] ?? "") || (args.length > minimum && command.opts().peer === undefined && isSavedPeer(args[0]!)) ? args.shift() : undefined;
         const name = sessionNameSchema.parse(args.shift() ?? "");
         if (role === "keys") {
           if (!args.length) throw new Error("keys requires at least one key or text after the session name.");
           if (args.length > MAX_KEYS) throw new Error(`keys accepts at most ${MAX_KEYS} keys.`);
         } else if (args.length) throw new Error(`${role} takes one session name.`);
-        return run({ ...resolveOptions(role, command, url), name, keys: role === "keys" ? args : undefined });
+        return run({ ...resolveOptions(role, command, target), name, keys: role === "keys" ? args : undefined });
       });
-    } else if (role === "connect") {
-      command.argument("[url]").action((url: string | undefined) => run(resolveOptions(role, command, url)));
-    } else {
-      command.action(() => run(resolveOptions(role, command, undefined)));
     }
   }
 }
 
 /**
- * `TARGET:PATH` names a path on a saved peer and `:PATH` one on the --peer or default target, as
- * with scp: a colon before any slash. A Windows drive letter such as C:\\ stays local, and a local
- * path with a colon can be written ./a:b.
+ * `DEVICE:PATH` names a path on a paired device, as with scp: a colon before any slash. A
+ * Windows drive letter such as C:\\ stays local, and a local path with a colon can be written ./a:b.
  */
-export function splitRemote(value: string, platform: NodeJS.Platform = process.platform): { target?: string; path: string } | undefined {
+export function splitRemote(value: string, platform: NodeJS.Platform = process.platform): { target: string; path: string } | undefined {
   const colon = value.indexOf(":");
   if (colon < 0) return undefined;
   const prefix = value.slice(0, colon);
   if (/[\\/]/.test(prefix)) return undefined;
   if (platform === "win32" && /^[A-Za-z]$/.test(prefix)) return undefined;
-  return { ...prefix ? { target: prefix } : {}, path: value.slice(colon + 1) };
+  if (!prefix) throw new Error(`Name the paired device before the colon: DEVICE${value}.`);
+  return { target: prefix, path: value.slice(colon + 1) };
 }
 
 // The same command definitions are used by the CLI and option unit tests.
-export function parseOptions(argv: string[]): PeerConfig {
+export function parseOptions(argv: string[]): PeerConfig | DaemonConfig {
   const program = new Command().exitOverride().configureOutput({ writeOut: () => {}, writeErr: () => {} });
-  let config: PeerConfig | undefined;
+  let config: PeerConfig | DaemonConfig | undefined;
   addPeerCommands(program, (parsed) => { config = parsed; });
+  addDaemonCommand(program, (parsed) => { config = parsed; });
   program.parse(argv, { from: "user" });
   if (!config) throw new Error("A peer command is required.");
   return config;
 }
 
 export interface McpConfig {
-  /** The listener whose peer the tools use, unless they use the daemon's peers. */
-  url: string;
-  /** The paired device the listener must be, when the target was a paired name. */
+  /** The paired device the tools reach; without one, the devices linked to the local daemon. */
   expect?: { name: string; publicKey: string; addresses: string[] };
-  daemon: boolean;
+  /** The local daemon's state file, when the tools use its linked devices. */
   state?: string;
   cwd?: string;
   /** Serve Streamable HTTP rather than stdio. */
@@ -346,9 +288,6 @@ export interface McpConfig {
 }
 
 const mcpOptionsSchema = z.strictObject({
-  bind: bindSchema().default("127.0.0.1"),
-  port: portSchema().default(47381),
-  daemon: z.boolean().default(false),
   state: z.string().min(1).optional(),
   cwd: z.string().min(1).optional(),
   http: portSchema("--http").optional(),
@@ -356,18 +295,9 @@ const mcpOptionsSchema = z.strictObject({
   allowRemote: z.boolean().default(false),
 });
 
-function resolveMcpOptions(command: Command, destination: string | undefined): McpConfig {
-  const options = { ...command.opts() };
-  const endpoint = ["bind", "port"].filter((name) => command.getOptionValueSource(name) === "cli");
-  if (destination !== undefined && options.daemon) throw new Error("Use either a listener URL or --daemon, not both.");
-  if (destination !== undefined || options.daemon) {
-    if (endpoint.length) throw new Error(`Use either ${options.daemon ? "--daemon" : "a URL"} or --${endpoint[0]}, not both.`);
-    // The URL or daemon replaces endpoint defaults, including invalid env values.
-    delete options.bind;
-    delete options.port;
-  }
-  const { bind, port, daemon, state, cwd, http, httpBind, allowRemote } = mcpOptionsSchema.parse(options);
-  if (state !== undefined && !daemon) throw new Error("--state requires --daemon.");
+function resolveMcpOptions(command: Command, device: string | undefined): McpConfig {
+  const { state, cwd, http, httpBind, allowRemote } = mcpOptionsSchema.parse({ ...command.opts() });
+  if (state !== undefined && device !== undefined) throw new Error("--state applies to the daemon's linked devices; a named device is reached directly.");
   if (http === undefined) {
     if (httpBind !== undefined) throw new Error("--http-bind requires --http.");
     if (allowRemote) throw new Error("--allow-remote requires --http.");
@@ -377,41 +307,37 @@ function resolveMcpOptions(command: Command, destination: string | undefined): M
     throw new Error("A non-loopback MCP endpoint exposes shell access. Add --allow-remote only for a trusted LAN/VPN.");
   }
   let expect: McpConfig["expect"];
-  if (destination !== undefined && !/^wss?:\/\//i.test(destination)) {
-    const resolved = resolvePeer(destination);
-    destination = resolved.url;
-    expect = resolved.peer && { name: resolved.peer.name, publicKey: resolved.peer.publicKey, addresses: resolved.peer.addresses };
+  if (device !== undefined) {
+    const peer = resolvePeer(device);
+    expect = { name: peer.name, publicKey: peer.publicKey, addresses: peer.addresses };
   }
   return {
-    url: destination !== undefined ? peerUrl(destination) : endpointUrl(bind, port), ...expect ? { expect } : {}, daemon, state, cwd,
+    ...expect ? { expect } : {}, state, cwd,
     http: http === undefined ? undefined : { bind: address, port: http, remote: !isLoopback(address) },
   };
 }
 
 export function addMcpCommand(program: Command, run: (config: McpConfig) => void | Promise<void>): void {
   const command = program.command("mcp")
-    .description("Serve MCP tools that run commands and terminal sessions on peers")
-    .usage("[target] [options]")
-    .argument("[target]", "A paired device's name, a saved alias or the ws:// URL of the listener to use")
-    .addOption(new Option("--bind <address>", "Numeric listener address (default: 127.0.0.1)").env("CNS_BIND"))
-    .addOption(new Option("--port <port>", "Listener TCP port (default: 47381)").env("CNS_PORT"))
-    .option("--daemon", "Use the peers connected to the local daemon instead of a listener")
-    .option("--state <path>", "With --daemon, its state file")
-    .addOption(new Option("--cwd <path>", "Absolute working directory on peers for calls that do not name one").env("CNS_CWD"))
+    .description("Serve MCP tools that run commands and terminal sessions on paired devices")
+    .usage("[device] [options]")
+    .argument("[device]", "A paired device's name; without one, the devices linked to the local daemon")
+    .option("--state <path>", "Without a device, the local daemon's state file")
+    .addOption(new Option("--cwd <path>", "Absolute working directory on devices for calls that do not name one").env("CNS_CWD"))
     .option("--http <port>", "Serve Streamable HTTP at http://127.0.0.1:PORT/mcp instead of stdio")
     .option("--http-bind <address>", "Numeric interface address for --http (default: 127.0.0.1)")
     .option("--allow-remote", "Explicitly allow a non-loopback --http-bind")
     .addHelpText("after", `
-By default an MCP client starts cns mcp and talks to it over stdin and stdout. The tools run
-commands on the listener at the URL, else --bind/--port, CNS_BIND/CNS_PORT or 127.0.0.1:47381,
-connecting for each call. With --daemon they use the peers connected to cns listen --daemon.
+By default an MCP client starts cns mcp and talks to it over stdin and stdout. With a device's
+name the tools reach that paired device, connecting for each call. Without one they use the
+devices linked to this device's daemon (cns up), chosen by name in each call.
 --http clients must send Authorization: Bearer TOKEN. TOKEN is CNS_MCP_TOKEN, at least 32
 characters, or else a random token printed at startup. Browser origins are refused.
-Clients get shell access as the peers' users: connect only clients you would trust with it.
-Examples: cns mcp    cns mcp ws://build-box:47381    cns mcp --daemon --cwd /srv/app
-          CNS_MCP_TOKEN=$(openssl rand -hex 32) cns mcp --http 47382`);
+Clients get shell access as the devices' users: connect only clients you would trust with it.
+Examples: cns mcp studio    cns mcp --cwd /srv/app
+          CNS_MCP_TOKEN=$(openssl rand -hex 32) cns mcp studio --http 47382`);
   rejectRepeatedOptions(command);
-  command.action((url: string | undefined) => run(resolveMcpOptions(command, url)));
+  command.action((device: string | undefined) => run(resolveMcpOptions(command, device)));
 }
 
 export function parseMcpOptions(argv: string[]): McpConfig {

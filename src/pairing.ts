@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { RpcTarget } from "capnweb";
 import { z } from "zod";
-import { validatePeerUrl } from "./aliases.js";
+import { validatePeerUrl } from "./peer-files.js";
 import { fingerprint, type PublicKey } from "./identity.js";
 import { grantsSchema, publicKeySchema, type Permission } from "./peers.js";
 

@@ -55,7 +55,7 @@ test("two devices pair, run commands within their grants, and refuse everyone el
     return { code: await child.exited, stdout: child.stdout, stderr: child.stderr, output: child.output };
   };
 
-  // A daemon that crashed leaves its state file behind; cns up recovers from it, as listen --daemon does.
+  // A daemon that crashed leaves its state file behind; cns up recovers from it.
   await writeFile(studio.state, JSON.stringify({ version: 1, pid: 2147483646, port: Number(await unusedPort("127.0.0.1")), token: "a".repeat(64) }), { mode: 0o600 });
   // Studio runs the paired daemon on loopback for this test.
   const up = await cli(studio, ["up", "--bind", "127.0.0.1", "--port", port, "--state", studio.state]);
@@ -122,12 +122,11 @@ test("two devices pair, run commands within their grants, and refuse everyone el
   const screen = await cli(laptop, ["screen", "studio", "work", "--until", "READY"]);
   assert.deepEqual([screen.code, screen.stdout], [0, "READY\n"]);
   assert.equal((await cli(laptop, ["kill", "studio", "work"])).code, 0);
-  assert.equal((await cli(laptop, ["run", "--peer", "studio", "--", "printf viaflag"])).stdout, "viaflag");
 
   // Both sides list the pairing; laptop has no daemon of its own, so studio sees it offline between commands.
   const laptopPeers = JSON.parse((await cli(laptop, ["peers", "--json", "--state", laptop.state])).stdout);
-  assert.deepEqual(laptopPeers.map((peer: Record<string, unknown>) => [peer.name, peer.kind, peer.status, peer.access, peer.grants]),
-    [["studio", "paired", "offline", ["shell", "files", "sessions:list", "sessions:create", "sessions:view", "sessions:control", "sessions:kill"], ["shell"]]]);
+  assert.deepEqual(laptopPeers.map((peer: Record<string, unknown>) => [peer.name, peer.status, peer.access, peer.grants]),
+    [["studio", "offline", ["shell", "files", "sessions:list", "sessions:create", "sessions:view", "sessions:control", "sessions:kill"], ["shell"]]]);
   const studioPeers = await cli(studio, ["peers", "--state", studio.state]);
   assert.match(studioPeers.stdout, /^NAME +STATUS +CONNECTION +ACCESS +FINGERPRINT\nlaptop +offline +- +shell +[a-z2-7-]+\n$/);
   assert.match((await cli(laptop, ["peer", "list"])).stdout, /^studio\t/);
@@ -167,7 +166,9 @@ test("two devices pair, run commands within their grants, and refuse everyone el
 
   // A device granted only files cannot run commands, and the refusal has its own exit status.
   // Its first attempt names an alias it already uses, so it stops before connecting and the invite stays open.
-  assert.equal((await cli(reader, ["peer", "add", "studio", "ws://127.0.0.1:1"])).code, 0);
+  process.env.CNS_CONFIG_DIR = reader.dir;
+  try { savePairedPeer("studio", { publicKey: generateIdentity().publicKey, addresses: [], pairedAt: new Date().toISOString(), grants: { incoming: [], outgoing: [] } }); }
+  finally { delete process.env.CNS_CONFIG_DIR; }
   const readerInvite = await startInvite(["--name", "reader", "--grant", "all"]);
   const taken = await cli(reader, ["pair", readerInvite.invite, "--yes", "--name", "studio", "--request", "files"]);
   assert.equal(taken.code, 1, taken.stderr);
@@ -200,7 +201,7 @@ test("two devices pair, run commands within their grants, and refuse everyone el
     while (Date.now() < linked && !(await readerLinked())) await new Promise((resolve) => setTimeout(resolve, 200));
     const { Client } = await import("@modelcontextprotocol/client");
     const { StdioClientTransport } = await import("@modelcontextprotocol/client/stdio");
-    const invocation = cliInvocation(["mcp", "--daemon", "--state", reader.state]);
+    const invocation = cliInvocation(["mcp", "--state", reader.state]);
     const client = new Client({ name: "test", version: "1" });
     await client.connect(new StdioClientTransport({ command: invocation.file, args: invocation.args, env: cliEnvironment(reader.env) as Record<string, string> }));
     try {
@@ -257,16 +258,16 @@ test("two devices pair, run commands within their grants, and refuse everyone el
   assert.match(accepting.output, new RegExp(`It may use this device's: shell\\.`));
   assert.match((await askedInvite.finished()).stdout, /Paired with asked \([a-z2-7-]+\)\. It may use this machine's: shell, files, sessions\. This machine may use its: shell\./);
 
-  // A device studio never paired with is refused before anything is exported, as is a legacy cns.
+  // A device studio never paired with is refused before anything is exported, and a URL is no target.
   process.env.CNS_CONFIG_DIR = stranger.dir;
   try { savePairedPeer("studio", { publicKey: studioIdentity.publicKey, addresses: [`ws://127.0.0.1:${port}`], pairedAt: new Date().toISOString(), grants: { incoming: [], outgoing: ["shell"] } }); }
   finally { delete process.env.CNS_CONFIG_DIR; }
   const unpaired = await cli(stranger, ["run", "studio", "--", "printf x"]);
   assert.equal(unpaired.code, 3, unpaired.stderr);
   assert.match(unpaired.stderr, /Not paired with this device/);
-  const legacy = await cli(stranger, ["run", `ws://127.0.0.1:${port}`, "--", "printf x"]);
-  assert.notEqual(legacy.code, 0);
-  assert.equal(legacy.stdout, "");
+  const byUrl = await cli(stranger, ["run", `ws://127.0.0.1:${port}`, "--", "printf x"]);
+  assert.notEqual(byUrl.code, 0);
+  assert.equal(byUrl.stdout, "");
 
   // When both devices run daemons and dial each other, exactly one link survives on each side.
   const laptopPort = await unusedPort("127.0.0.1");

@@ -7,7 +7,7 @@ import { installService, installedService, launchdPlist, serviceEnvironment, ser
 import { launchCli, unusedPort } from "./test-support.js";
 
 const spec: ServiceSpec = {
-  program: { file: "/opt/cns & co/bin/cns", args: ["listen", "--service", "--state", "/home/a b/.cns/daemon.json", "--relay-ish", "100%", "$HOME", "say \"hi\"\\"] },
+  program: { file: "/opt/cns & co/bin/cns", args: ["daemon", "--service", "--state", "/home/a b/.cns/daemon.json", "--relay-ish", "100%", "$HOME", "say \"hi\"\\"] },
   env: { PATH: "/usr/bin:/bin", LANG: "en_US.UTF-8 a%20b&c=$X" },
   log: "/home/a b/.cns/service.log",
 };
@@ -26,7 +26,7 @@ test("the launchd agent runs the daemon in the foreground, escaped, and restarts
 test("the systemd unit quotes every word so specifiers and variables stay literal", () => {
   const unit = systemdUnit(spec);
   const exec = /^ExecStart=(.*)$/m.exec(unit)![1]!;
-  assert.equal(exec, `"/opt/cns & co/bin/cns" "listen" "--service" "--state" "/home/a b/.cns/daemon.json" "--relay-ish" "100%%" "$$HOME" "say \\"hi\\"\\\\"`);
+  assert.equal(exec, `"/opt/cns & co/bin/cns" "daemon" "--service" "--state" "/home/a b/.cns/daemon.json" "--relay-ish" "100%%" "$$HOME" "say \\"hi\\"\\\\"`);
   assert.ok(unit.includes(`Environment="LANG=en_US.UTF-8 a%%20b&c=$X"`));
   assert.match(unit, /^Restart=on-failure$/m);
   assert.match(unit, /^WantedBy=default\.target$/m);
@@ -96,7 +96,7 @@ function unit() {
   return { exec, env };
 }
 const { exec, env } = (args.includes("restart") || args.includes("start") || args.includes("--now")) ? unit() : { exec: [], env: {} };
-const stop = () => spawnSync(exec[0], [...exec.slice(1, exec.indexOf("listen")), "stop", "--state", exec[exec.indexOf("--state") + 1]], { stdio: "ignore" });
+const stop = () => spawnSync(exec[0], [...exec.slice(1, exec.indexOf("daemon")), "stop", "--state", exec[exec.indexOf("--state") + 1]], { stdio: "ignore" });
 if (args.includes("restart") || args.includes("start")) {
   if (args.includes("restart")) stop();
   spawn(exec[0], exec.slice(1), { detached: true, stdio: "ignore", env: { HOME: process.env.HOME, ...env } }).unref();
@@ -135,7 +135,7 @@ test("cns up --install runs the daemon from the unit; cns up starts it again aft
   assert.match(installed.stdout, /^Running as \S+ \(pid \d+, a systemd user service\), listening at ws:\/\/127\.0\.0\.1:\d+\./);
   assert.ok(installed.stdout.includes(`ws://127.0.0.1:${port}`));
   const unit = await readFile(path.join(home, ".config", "systemd", "user", "cns.service"), "utf8");
-  assert.match(unit, /"listen" "--no-repl" "--paired" "--service" "--state"/);
+  assert.match(unit, /"daemon" "--service" "--state"/);
   assert.ok(unit.includes(`"--bind" "127.0.0.1" "--port" "${port}"`));
   assert.ok(installedService(state, home, env));
 

@@ -7,7 +7,7 @@ import readline from "node:readline";
 import test, { type TestContext } from "node:test";
 import { buildPiPackage, PACKAGE_NAME } from "../scripts/build-pi-package.js";
 import { connectControl } from "../src/commands/daemon.js";
-import { daemonHome, launchCli, PROJECT_ROOT, unusedPort } from "../src/test-support.js";
+import { daemonHome, launchCli, PROJECT_ROOT, settledLink, testDevices, unusedPort, type TestDevice } from "../src/test-support.js";
 import { BUN_PACKAGES, BUN_VERSION } from "./program.js";
 
 const posix = process.platform !== "win32";
@@ -109,7 +109,7 @@ function rpcPi(t: TestContext, runtime: { file: string; args: string[] }, extens
 }
 
 for (const [name, runtime] of runtimes) {
-  test(`the npm package runs in Pi on ${name} with nothing else installed, listening because of CNS_LISTEN`, {
+  test(`the npm package runs in Pi on ${name} with nothing else installed, up because of CNS_UP`, {
     skip: !posix || !bunPackage || !runtime, timeout: 90000,
   }, async (t) => {
     const extension = await install(t);
@@ -124,11 +124,14 @@ for (const [name, runtime] of runtimes) {
       await writeFile(path.join(directory, ".env"), `CNS_LEAKED=${directory}\n`);
     }
     const port = await unusedPort("127.0.0.1");
+    const config = path.join(home, ".cns");
+    await mkdir(config, { mode: 0o700 });
+    const self: TestDevice = { name: "pi", dir: config, env: { CNS_CONFIG_DIR: config, HOME: home }, state: statePath };
 
     // No bun and no cns on PATH: the package brings both.
     const pi = rpcPi(t, runtime!, extension, {
       cwd: project,
-      env: { PATH: "/usr/bin:/bin", HOME: home, PI_OFFLINE: "1", CNS_LISTEN: "1", CNS_BIND: "127.0.0.1", CNS_PORT: port },
+      env: { PATH: "/usr/bin:/bin", HOME: home, CNS_CONFIG_DIR: config, CNS_RELAY: "off", PI_OFFLINE: "1", CNS_UP: "1", CNS_BIND: "127.0.0.1", CNS_PORT: port },
     });
     await pi.notice(`listening on 127.0.0.1:${port}`);
     await pi.status(`listening 127.0.0.1:${port}`);
@@ -137,17 +140,20 @@ for (const [name, runtime] of runtimes) {
     const control = await connectControl(statePath);
     t.after(() => control.close());
 
-    launchCli(t, ["connect", `ws://127.0.0.1:${port}`, "--no-repl"], { env: { HOME: peerHome } });
-    const deadline = Date.now() + 10000;
-    while ((await control.controller.peers()).length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
-    await pi.request({ type: "prompt", message: "/cns attach p1" });
-    await pi.notice("Attached to p1");
+    // A paired device that lets Pi use it, and may run commands where Pi runs.
+    const devices = await testDevices(t, "cns-pkg-devices-");
+    const peer = await devices.device("peer", { HOME: peerHome });
+    await devices.up(peer);
+    await devices.pair(self, peer, { hostGrants: "shell", guestGrants: "all" });
+    const id = await settledLink(control, "peer");
+    await pi.request({ type: "prompt", message: `/cns attach ${id}` });
+    await pi.notice(`Attached to ${id}`);
     const remote = await pi.request({ type: "bash", command: "pwd; printf '[%s]' \"$CNS_LEAKED\"" });
     assert.equal(remote.data.output, `${peerHome}\n[]`);
     assert.equal(remote.data.exitCode, 0);
 
     // The daemon runs commands without the Bun settings of the project or the home directory.
-    const run = launchCli(t, ["run", `ws://127.0.0.1:${port}`, "--", "pwd; printf '[%s]' \"$CNS_LEAKED\""]);
+    const run = launchCli(t, ["run", "pi", "--", "pwd; printf '[%s]' \"$CNS_LEAKED\""], { env: peer.env });
     assert.equal(await run.exited, 0, run.output);
     assert.equal(run.stdout, `${home}\n[]`);
     for (const directory of [project, home]) await assert.rejects(stat(path.join(directory, "PRELOADED")), { code: "ENOENT" });

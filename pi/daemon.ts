@@ -1,19 +1,19 @@
 import { isIP } from "node:net";
 import { connectControl, daemonStatePath, startDaemon, type ControlConnection, type DaemonStatus } from "../src/commands/daemon.js";
-import { endpointUrl, isLoopback } from "../src/options.js";
+import { endpointUrl } from "../src/options.js";
 import { plain } from "../src/terminal.js";
 import type { Invocation } from "./program.js";
 import { DEFAULT_PORT } from "./target.js";
 
-/** Where `/cns listen` listens: CNS_BIND and CNS_PORT, else every interface on the default port. */
-export interface ListenSettings {
+/** Where the daemon `/cns up` starts listens: CNS_BIND and CNS_PORT, else every interface on the default port. */
+export interface UpSettings {
   bind: string;
   port: number;
   /** The daemon's state file; by default ~/.cns/daemon.json, which cns attach and stop use too. */
   state?: string;
 }
 
-export function listenSettings(env: NodeJS.ProcessEnv = process.env, state?: string): ListenSettings {
+export function upSettings(env: NodeJS.ProcessEnv = process.env, state?: string): UpSettings {
   const bind = env.CNS_BIND?.trim() || "0.0.0.0";
   if (isIP(bind) === 0) throw new Error(`CNS_BIND must be a numeric IP address, not ${bind}.`);
   const portText = env.CNS_PORT?.trim() || String(DEFAULT_PORT);
@@ -23,14 +23,14 @@ export function listenSettings(env: NodeJS.ProcessEnv = process.env, state?: str
 }
 
 /**
- * CNS_LISTEN: whether Pi listens from the start, as with --cns-listen. 1, true,
- * yes or on starts listening; 0, false, no, off or nothing does not.
+ * CNS_UP: whether Pi starts the daemon from the start, as with --cns-up. 1, true,
+ * yes or on starts it; 0, false, no, off or nothing does not.
  */
-export function listenAtStartup(env: NodeJS.ProcessEnv = process.env): boolean {
-  const value = env.CNS_LISTEN?.trim().toLowerCase() ?? "";
+export function upAtStartup(env: NodeJS.ProcessEnv = process.env): boolean {
+  const value = env.CNS_UP?.trim().toLowerCase() ?? "";
   if (["1", "true", "yes", "on"].includes(value)) return true;
   if (["", "0", "false", "no", "off"].includes(value)) return false;
-  throw new Error(`CNS_LISTEN must be 1 to listen when Pi starts, or 0 not to, not ${env.CNS_LISTEN}.`);
+  throw new Error(`CNS_UP must be 1 to start the daemon when Pi starts, or 0 not to, not ${env.CNS_UP}.`);
 }
 
 export interface Listener {
@@ -65,7 +65,7 @@ export async function findDaemon(state?: string): Promise<Listener | undefined> 
  * use it. When several start at once, the state file's exclusive creation lets
  * one win and the rest find the winner. The daemon outlives Pi.
  */
-export async function listen(settings: ListenSettings, invocation: () => Invocation): Promise<Listener> {
+export async function up(settings: UpSettings, invocation: () => Invocation): Promise<Listener> {
   let failure: unknown;
   for (let attempt = 0; attempt < 3; attempt++) {
     const running = await findDaemon(settings.state);
@@ -73,7 +73,7 @@ export async function listen(settings: ListenSettings, invocation: () => Invocat
     try {
       const started = await startDaemon({
         bind: settings.bind, port: settings.port, url: endpointUrl(settings.bind, settings.port),
-        remote: !isLoopback(settings.bind), state: daemonStatePath(settings.state),
+        state: daemonStatePath(settings.state),
       }, { invocation: invocation() });
       const control = await connectControl(started.state);
       return { control, status: await daemonStatus(control), started: true, log: started.log };

@@ -3,7 +3,7 @@
 Status: in progress, 6 November 2026. Base: `main` at `1986d6a` with the address book
 (PR 12), `peer list --json` (PR 18) and scoped handle lifetimes (PR 19). Decisions taken so
 far: `cns up` listens on all interfaces for paired devices; both sides confirm a pairing;
-the relay is a Cloudflare Worker; slices 1 and 2 are merged as PRs 21 and 22; encryption is PR 25, the relay PR 26, and session permissions with reconnecting terminals PR 27; slice 3 (pairing, peers file v2, `cns up`, `cns pair`, `cns peers`, named targets and grant enforcement at the method level) is PR 23; `status`, `doctor`, grant and address changes with live refresh, link deduplication, paired MCP targets and the fixes from PR 23's review are PR 24.
+the relay is a Cloudflare Worker; slices 1 and 2 are merged as PRs 21 and 22; encryption is PR 25, the relay PR 26, and session permissions with reconnecting terminals PR 27; slice 3 (pairing, peers file v2, `cns up`, `cns pair`, `cns peers`, named targets and grant enforcement at the method level) is PR 23; `status`, `doctor`, grant and address changes with live refresh, link deduplication, paired MCP targets and the fixes from PR 23's review are PR 24. The legacy mode (`cns listen`, `cns connect`, `ws://` targets, address aliases and `--one-way`) was removed after the built-in relay: every command now targets a paired device by name (section 9).
 
 The requirement is **two devices I know of that have paired**. Today `cns` connects a
 listener and a connector, identifies peers by connection IDs such as `p1`, grants
@@ -88,15 +88,15 @@ A grant lists the operations one device may perform on another. The granting dev
 - Enforcement is a `GrantedShell` in the manner of `RefusingShell` (`src/granted-shell.ts`, merged with slice 3 at the method level; derived handles below are slice 4): every `ShellApi` method is present, permitted ones delegate, others throw `Permission denied: <permission> not granted to <alias>`. The device that receives the refusal adds what to do about it: `To allow it, run on <its name for the other device>: cns peer grant <alias> <permissions>`, built from the refusal, so it also explains refusals from an older cns. Session handles returned through a grant are **derived capabilities**: a handle issued without `sessions:control` has `write`, `keys` and `resize` refuse. Denied operations have no side effects, as PR 16's tests already require for one-way refusal.
 - **Revocation**: `cns peers revoke studio [permission...]` rewrites the file and tells the running daemon, which closes the `HandleScope` of every shell exported to that device under the revoked permission (PR 19's mechanism), so live handles and attachments fail with "access revoked" and viewers are detached with that reason. Commands and unnamed PTYs started under a revoked `shell` grant are killed, as releasing a fork does today.
 - **Expiry**: a grant may carry `expiresAt`; the daemon applies expiry like revocation.
-- Legacy connections (`cns listen` and `cns connect` without identities) keep today's behavior, unauthenticated and bidirectional unless `--one-way`, and the README keeps calling them that. They are refused by a daemon that is `up` unless it was started with `--allow-unpaired`, which prints the existing warning.
+- Legacy connections (`cns listen` and `cns connect` without identities) were kept at first and have since been removed (section 9); a daemon refuses any connection that does not authenticate.
 - **Decision 3 (grant granularity):** the table above (seven permissions, three presets) versus the three coarse grants `shell`, `files`, `sessions`. Recommendation: implement the seven internally and expose the presets in prompts, so the CLI stays simple while scripts can be precise.
 - **Decision 4 (revocation and running work):** kill commands started under a revoked grant immediately (recommended, matches fork release) or let them finish while refusing new ones.
 
 ## 5. Symmetric peer daemon and CLI
 
-- `cns up [--name NAME] [--bind ADDRESS] [--port PORT]` starts the peer daemon, or reports the running one. It creates the identity if needed, listens for paired peers, and dials the saved addresses of paired peers to bring links up. There is one daemon per device (the existing `~/.cns/daemon.json` arbitration), and `listen --daemon`, `attach` and `stop` become aliases of the same lifecycle.
+- `cns up [--name NAME] [--bind ADDRESS] [--port PORT]` starts the peer daemon, or reports the running one. It creates the identity if needed, listens for paired peers, and dials the saved addresses of paired peers to bring links up. There is one daemon per device (the existing `~/.cns/daemon.json` arbitration), and `attach` and `stop` work on it.
 - A link between two devices is one connection whichever side dialed. If both dial at once, the daemon with the lexically smaller public key keeps its outbound link and drops the inbound duplicate; the other does the opposite. Named sessions, grants and reconnection are properties of the pair, not of who dialed.
-- Every peer command takes a **target**: `cns tty studio`, `cns run studio -- 'git status'`, `cns sessions studio`, `cns screen studio main`. Resolution order: paired alias, then unpaired address-book alias (with today's unauthenticated semantics and a warning), then a `ws://` or `wss://` URL. An unknown name fails with `Unknown peer studio. Pair with: cns pair ...`; nothing falls back to another peer. `--peer NAME` and URL arguments keep working for scripts written against PR 12.
+- Every peer command takes a **target**: `cns tty studio`, `cns run studio -- 'git status'`, `cns sessions studio`, `cns screen studio main`. The target is a paired device's name; an unknown name fails with `No paired device is saved as studio. Pair with it first: cns pair.`, and nothing falls back to another peer or to a hostname. (Address-book aliases, `ws://` URLs and `--peer NAME` were accepted until the legacy mode was removed.)
 - `cns tty studio` with no `--name` creates or attaches to the session named `main` on that peer (**Decision 5**: default session name and whether `tty` without a name should attach to `main` or open an unnamed PTY as today; recommended: `main`, because the walkthrough and recovery both depend on a named session).
 - `cns peers [--json]` lists paired and address-book peers:
 
@@ -147,16 +147,20 @@ Evaluation evidence to collect before **Decision 8 (transport)**: Bun N-API load
 
 ## 9. Compatibility and migration
 
-| Existing | After this plan |
+The plan first kept the unauthenticated mode beside paired devices. Once the relay was built in, so that paired devices reach each other on any network with nothing to set up, the legacy mode was removed without a compatibility path:
+
+| Existing | Now |
 | --- | --- |
-| `cns listen` / `cns connect URL` | Unchanged legacy mode; refused by a daemon that is `up` unless `--allow-unpaired`. |
-| `--one-way` | Unchanged for legacy connections; paired links express the same thing as an empty incoming grant. |
-| `cns peer add/remove/list [--json]` | Unchanged as the address book; paired entries appear in it marked `paired`. |
-| `--peer NAME`, URL arguments | Unchanged; positional targets are added, not substituted. |
-| Named sessions, `keys`, `screen`, `kill`, `tty --attach` | Unchanged semantics; targets may be aliases; handles follow PR 19. |
-| Daemon control (`attach`, `stop`, `~/.cns/daemon.json`) | Same daemon; `up` is its new front door. |
-| MCP, Pi | Same tools and commands; targets accept aliases; `list_peers` and `/cns status` gain identity and access fields. |
-| Older `cns` on one side | Recognized at the handshake by the missing protocol version; legacy unauthenticated behavior only, and `cns doctor` says so. |
+| `cns listen` / `cns connect URL` | Removed. `cns up` runs the daemon, which accepts only paired devices; a device that can only dial out links to the other's daemon, directly or through the relay. |
+| `--one-way` | Removed. Commands you run always offer the other device nothing back; a daemon link offers what was granted, and an empty grant is the one-way case. |
+| `cns peer add` and address aliases | Removed. `cns peer remove/list [--json]` work on paired devices; `cns peer address` changes where one is dialed. |
+| `--peer NAME`, URL arguments, `--bind`/`--port` on commands | Removed. Every command takes a paired device's name as its first argument. |
+| `cns mcp --daemon`, `cns mcp URL` | `cns mcp DEVICE` for one paired device; `cns mcp` alone for the devices linked to the daemon. |
+| Pi's `/cns listen`, `CNS_LISTEN`, `/cns attach host[:port]` | `/cns up`, `CNS_UP`; `/cns attach` takes a paired device's name or a linked device's ID. |
+| Named sessions, `keys`, `screen`, `kill`, `tty --attach` | Unchanged semantics, on a paired device; handles follow PR 19. |
+| Daemon control (`attach`, `stop`, `~/.cns/daemon.json`) | Same daemon; `up` is its only front door. |
+| Older `cns` on one side | Refused at the handshake, with a message saying so. |
+| Windows | Identities and paired devices wait for filesystem ACL checks, so Windows cannot pair until they land; it previously worked only through the legacy mode. |
 
 ## 10. Slices
 

@@ -8,7 +8,6 @@ import { newWebSocketRpcSession, type RpcStub } from "capnweb";
 import { z } from "zod";
 import { closeSocket, terminateSocket } from "../connect.js";
 import { openConsole, type PeerController } from "../console.js";
-import type { PeerConfig } from "../options.js";
 import { selfInvocation } from "../runtime.js";
 import type { ShellApi } from "../shell.js";
 import { plain, type RemoteNamedPty } from "../terminal.js";
@@ -23,10 +22,6 @@ export interface ListenerInfo {
   port: number;
   /** The listener accepts connections from other machines. */
   remote: boolean;
-  /** Peers cannot use this machine's shell or files. */
-  oneWay: boolean;
-  /** Only paired devices are accepted, after authenticating. */
-  paired?: boolean;
   /** The relay this daemon registers at: the built-in one, unless CNS_RELAY=off. */
   relay?: string;
 }
@@ -36,7 +31,7 @@ export interface DaemonStatus extends ListenerInfo {
   startedAt: number;
   /** Connected peers that completed their handshake. */
   peers: number;
-  /** This device's identity, when the daemon accepts paired devices. */
+  /** This device's identity, which paired devices authenticate. */
   identity?: { publicKey: string; fingerprint: string };
   /** The URLs other devices can use to reach this listener: direct ones, then its relay address. */
   addresses?: string[];
@@ -111,7 +106,8 @@ export async function removeStaleState(statePath?: string, options: { ignorePid?
   return true;
 }
 
-export type DaemonConfig = Pick<PeerConfig, "bind" | "port" | "url" | "remote" | "state"> & Partial<Pick<PeerConfig, "oneWay" | "paired">>;
+/** Where the daemon listens, and its state file: by default ~/.cns/daemon.json. */
+export interface DaemonSettings { bind: string; port: number; url: string; state?: string }
 export interface StartDaemonOptions {
   /** The executable and arguments that run `cns`; by default, this program. Embedders pass the cns executable. */
   invocation?: (args: string[]) => { file: string; args: string[] };
@@ -124,8 +120,8 @@ export interface StartedDaemon {
   log: string;
 }
 
-/** Start a detached listener and return once it is ready. The state file arbitrates concurrent starts. */
-export async function startDaemon(config: DaemonConfig, options: StartDaemonOptions = {}): Promise<StartedDaemon> {
+/** Start the paired daemon detached and return once it is ready. The state file arbitrates concurrent starts. */
+export async function startDaemon(config: DaemonSettings, options: StartDaemonOptions = {}): Promise<StartedDaemon> {
   const file = daemonStatePath(config.state);
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
   await removeStaleState(file);
@@ -138,16 +134,13 @@ export async function startDaemon(config: DaemonConfig, options: StartDaemonOpti
   const token = randomBytes(32).toString("hex");
   const logPath = `${file}.${randomBytes(6).toString("hex")}.log`;
   const log = await open(logPath, "wx", 0o600);
-  const args = ["listen", "--no-repl", "--state", file, "--bind", config.bind, "--port", String(config.port)];
-  if (config.remote && !config.paired) args.push("--allow-remote");
-  if (config.oneWay) args.push("--one-way");
-  if (config.paired) args.push("--paired");
+  const args = ["daemon", "--state", file, "--bind", config.bind, "--port", String(config.port)];
   const invocation = (options.invocation ?? selfInvocation)(args);
   const child = spawn(invocation.file, invocation.args, {
     detached: true,
     windowsHide: true,
     stdio: ["ignore", log.fd, log.fd, "ipc"],
-    env: { ...process.env, CNS_DAEMON_CHILD: "1", CNS_DAEMON_TOKEN: token },
+    env: { ...process.env, CNS_DAEMON_TOKEN: token },
   });
   try {
     const ready = new Promise<void>((resolve, reject) => {

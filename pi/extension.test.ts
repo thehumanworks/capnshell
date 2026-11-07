@@ -9,7 +9,7 @@ import {
   type AgentSession, type ExtensionFactory, type ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 import { connectControl } from "../src/commands/daemon.js";
-import { cliInvocation, daemonHome, launchCli, unusedPort } from "../src/test-support.js";
+import { cliInvocation, daemonHome, settledLink, testDevices, unusedPort } from "../src/test-support.js";
 import { plain } from "../src/terminal.js";
 import { detectImageMimeType } from "./image.js";
 import { createCnsExtension } from "./index.js";
@@ -51,7 +51,7 @@ async function startPi(t: TestContext, options: {
       cost: entry.cost, contextWindow: entry.contextWindow, maxTokens: entry.maxTokens, baseUrl: entry.baseUrl,
     })),
   });
-  const env = { ...process.env, CNS_LISTEN: undefined, CNS_BIND: undefined, CNS_PORT: undefined, CNS_BIN: undefined, ...options.env };
+  const env = { ...process.env, CNS_UP: undefined, CNS_BIND: undefined, CNS_PORT: undefined, CNS_BIN: undefined, ...options.env };
   const resourceLoader = new DefaultResourceLoader({
     cwd: options.cwd, agentDir,
     extensionFactories: [
@@ -116,29 +116,55 @@ function lastResult(session: AgentSession, name: string): ToolResult {
   return { text: content.filter((part) => part.type === "text").map((part) => part.text).join("\n"), isError: result.isError, content };
 }
 
-/** A cns listener whose home, the directory its tools start in, is `home`. */
-async function listener(t: TestContext, home: string, env: NodeJS.ProcessEnv = {}) {
-  const port = await unusedPort("127.0.0.1");
-  // Without this test's Pi session, which runs it, so nothing of it reaches the host.
-  const peer = launchCli(t, ["listen", "--no-repl", "--bind", "127.0.0.1", "--port", port], { env: { HOME: home, PI_SESSION_ID: undefined, ...env } });
-  await peer.waitFor("listening at");
-  return { peer, address: `127.0.0.1:${port}` };
+/**
+ * This machine, where Pi runs, with a configuration of its own for the length of the test,
+ * and the devices paired with it. Pi reads saved peers and its identity from the process's
+ * CNS_CONFIG_DIR, and the daemon it starts inherits it.
+ */
+async function thisMachine(t: TestContext, statePath?: string) {
+  const devices = await testDevices(t, "cns-pi-devices-");
+  const self = await devices.device("pi");
+  if (statePath) self.state = statePath;
+  const previous = process.env.CNS_CONFIG_DIR;
+  process.env.CNS_CONFIG_DIR = self.dir;
+  t.after(() => { if (previous === undefined) delete process.env.CNS_CONFIG_DIR; else process.env.CNS_CONFIG_DIR = previous; });
+  return {
+    devices, self,
+    /** A device that lets this one use all of it, whose home, the directory its tools start in, is `home`. */
+    async host(name: string, home: string, env: Record<string, string> = {}) {
+      // Without this test's Pi session, which runs it, so nothing of it reaches the host.
+      const device = await devices.device(name, { HOME: home, PI_SESSION_ID: undefined as unknown as string, ...env });
+      await devices.up(device);
+      await devices.pair(device, self, { hostGrants: "all" });
+      return { device, address: name, stop: async () => { await devices.cli(device, ["stop", "--state", device.state]); } };
+    },
+    /** A device linked to this machine's running daemon, which lets this machine use all of it. */
+    async linked(name: string, home: string) {
+      const device = await devices.device(name, { HOME: home });
+      await devices.up(device);
+      await devices.pair(self, device, { hostGrants: "none", guestGrants: "all" });
+      return { device, stop: async () => { await devices.cli(device, ["stop", "--state", device.state]); } };
+    },
+  };
 }
 
-test("hosts are named as peers, listeners or URLs", () => {
-  const env = { CNS_PORT: "5000" };
+/** The ID this machine's daemon gave its link to the device saved as `name`. */
+async function linkId(statePath: string, name: string): Promise<string> {
+  const control = await connectControl(statePath);
+  try {
+    return await settledLink(control, name);
+  } finally { control.close(); }
+}
+
+test("hosts are named as paired devices or the daemon's linked devices", { skip: !posix }, async (t) => {
+  const { self } = await thisMachine(t);
+  void self;
   assert.deepEqual(parseTarget("local"), { kind: "local" });
   assert.deepEqual(parseTarget("p12"), { kind: "peer", id: "p12" });
-  assert.deepEqual(parseTarget("box", env), { kind: "url", url: "ws://box:5000/" });
-  assert.deepEqual(parseTarget("10.0.0.2:47390"), { kind: "url", url: "ws://10.0.0.2:47390/" });
-  assert.deepEqual(parseTarget("::1", {}), { kind: "url", url: "ws://[::1]:47381/" });
-  assert.deepEqual(parseTarget("[fe80::1]:9"), { kind: "url", url: "ws://[fe80::1]:9/" });
-  assert.deepEqual(parseTarget("wss://relay.example/cns"), { kind: "url", url: "wss://relay.example/cns" });
   assert.throws(() => parseTarget(""), /Name a host/);
-  assert.throws(() => parseTarget("user@box"), /Not a host/);
-  assert.throws(() => parseTarget("ws://user:secret@box"), /without credentials/);
-  // Peer IDs start at p1; p0 can only be a host name.
-  assert.deepEqual(parseTarget("p0", {}), { kind: "url", url: "ws://p0:47381/" });
+  for (const value of ["box", "10.0.0.2:47390", "::1", "ws://box:47381", "user@box", "p0"]) {
+    assert.throws(() => parseTarget(value), /No paired device is saved as/, value);
+  }
 });
 
 test("find patterns match as fd matches them", () => {
@@ -161,13 +187,14 @@ test("image detection agrees with Pi's", async (t) => {
   }
 });
 
-test("Pi's tools and ! run on an attached listener, and fail closed when it goes away", { skip: !posix, timeout: 60000 }, async (t) => {
+test("Pi's tools and ! run on an attached paired device, and fail closed when it goes away", { skip: !posix, timeout: 60000 }, async (t) => {
   const local = await temporaryDirectory(t);
   const home = await temporaryDirectory(t, "cns-pi-home-");
-  // The listener's runtime may keep files in its home, so the tools work in a directory of their own.
+  // The device's runtime may keep files in its home, so the tools work in a directory of their own.
   const work = path.join(home, "work");
   await mkdir(work);
-  const { peer, address } = await listener(t, home);
+  const machine = await thisMachine(t);
+  const { stop, address } = await machine.host("studio", home);
   const pi = await startPi(t, { cwd: local, statePath: path.join(local, "daemon.json") });
 
   assert.equal((await pi.call("bash", { command: "pwd" })).text.trim(), local);
@@ -196,8 +223,7 @@ test("Pi's tools and ! run on an attached listener, and fail closed when it goes
   assert.equal(bang.output.trim(), work);
 
   // Once the host is gone, nothing runs anywhere until the user decides.
-  peer.child.kill("SIGTERM");
-  await peer.exited;
+  await stop();
   const lost = await pi.call("bash", { command: "touch MUST_NOT_EXIST" });
   assert.equal(lost.isError, true);
   assert.match(lost.text, /was lost.*Nothing runs on this machine instead/);
@@ -227,7 +253,8 @@ test("remote tools give the same results as Pi's own", { skip: !posix || !Bun.wh
     // Pi's local find honours .gitignore; with custom operations, as through cns, it skips node_modules and .git.
     await writeFile(path.join(root, ".gitignore"), "node_modules/\n");
   }
-  const { address } = await listener(t, home);
+  const machine = await thisMachine(t);
+  const { address } = await machine.host("studio", home);
   const pi = await startPi(t, { cwd: local, statePath: path.join(local, "daemon.json") });
   const calls: [string, Record<string, unknown>][] = [
     ["grep", { pattern: "needle", ignoreCase: true, path: "src/big.txt" }],
@@ -254,47 +281,46 @@ test("remote tools give the same results as Pi's own", { skip: !posix || !Bun.wh
   // A host without ripgrep says so instead of searching some other way.
   const bin = await temporaryDirectory(t, "cns-pi-bin-");
   await symlink(Bun.which("bash")!, path.join(bin, "bash"));
-  const bare = await listener(t, home, { PATH: bin });
+  const bare = await machine.host("bare", home, { PATH: bin });
   assert.equal((await pi.call("cns", { action: "attach", host: bare.address })).isError, false);
   const missing = await pi.call("grep", { pattern: "needle" });
   assert.equal(missing.isError, true);
-  assert.match(missing.text, /ripgrep \(rg\) is not installed on 127\.0\.0\.1:\d+/);
+  assert.match(missing.text, /ripgrep \(rg\) is not installed on bare/);
 });
 
 test("Pi sessions share one daemon and attach to its peers", { skip: !posix, timeout: 60000 }, async (t) => {
   const local = await temporaryDirectory(t);
   const peerHome = await temporaryDirectory(t, "cns-pi-peer-");
   const { statePath } = await daemonHome(t, "cns-pi-state-");
+  const machine = await thisMachine(t, statePath);
   const port = await unusedPort("127.0.0.1");
   const env = { CNS_BIND: "127.0.0.1", CNS_PORT: port };
   const first = await startPi(t, { cwd: local, statePath, env });
   const second = await startPi(t, { cwd: local, statePath, env });
 
   assert.match(await first.command("/cns attach p1"), /none runs/);
-  const reports = await Promise.all([first.command("/cns listen"), second.command("/cns listen")]);
+  const reports = await Promise.all([first.command("/cns up"), second.command("/cns up")]);
   assert.equal(reports.filter((report) => report.startsWith("Started the cns daemon")).length, 1, reports.join("\n---\n"));
   assert.ok(reports.every((report) => report.includes(`listening on 127.0.0.1:${port}`)), reports.join("\n"));
-  assert.ok(reports.every((report) => !report.includes("WARNING")), "a loopback listener is not exposed");
+  assert.ok(reports.every((report) => report.includes("Only paired devices can connect")), reports.join("\n"));
   const control = await connectControl(statePath);
   t.after(() => control.close());
 
-  const peer = launchCli(t, ["connect", `ws://127.0.0.1:${port}`, "--no-repl"], { env: { HOME: peerHome } });
-  const deadline = Date.now() + 10000;
-  while ((await control.controller.peers()).length === 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
-  assert.match(await first.command("/cns status"), /Peers: p1 /);
+  const peer = await machine.linked("peer", peerHome);
+  const id = await linkId(statePath, "peer");
+  assert.match(await first.command("/cns status"), new RegExp(`Linked devices: ${id} peer `));
 
-  assert.match(await first.command("/cns attach p1 /"), /Attached to p1: .* in \/\./);
+  assert.match(await first.command(`/cns attach ${id} /`), new RegExp(`Attached to ${id}: .* in /\\.`));
   assert.equal((await first.call("bash", { command: "pwd" })).text.trim(), "/");
-  assert.match(await first.command("/cns attach p1"), /Attached to p1/);
+  assert.match(await first.command(`/cns attach ${id}`), new RegExp(`Attached to ${id}`));
   assert.equal((await first.call("bash", { command: "printf %s \"$HOME\"" })).text, peerHome);
-  assert.match(await first.command("/cns run p1 printf %s \"$HOME\""), /^$/);
+  assert.match(await first.command(`/cns run ${id} printf %s "$HOME"`), /^$/);
   const run = first.session.messages.filter((message) => message.role === "custom").at(-1);
-  assert.match(JSON.stringify(run), new RegExp(`Output of .* on p1: .*\`\`\`\\\\n${peerHome.replace(/[/.]/g, "\\$&")}\\\\n\`\`\``));
+  assert.match(JSON.stringify(run), new RegExp(`Output of .* on ${id}: .*\`\`\`\\\\n${peerHome.replace(/[/.]/g, "\\$&")}\\\\n\`\`\``));
   // The other session still runs its tools here.
   assert.equal((await second.call("bash", { command: "pwd" })).text.trim(), local);
 
-  peer.child.kill("SIGTERM");
-  await peer.exited;
+  await peer.stop();
   const lost = await first.call("bash", { command: "pwd" });
   assert.equal(lost.isError, true);
   assert.match(lost.text, /was lost/);
@@ -304,37 +330,38 @@ test("Pi sessions share one daemon and attach to its peers", { skip: !posix, tim
   assert.ok((await plain(control.remote.status())).pid > 0);
 });
 
-test("CNS_LISTEN starts or finds the daemon when Pi starts, and other values are refused", { skip: !posix, timeout: 60000 }, async (t) => {
+test("CNS_UP starts or finds the daemon when Pi starts, and other values are refused", { skip: !posix, timeout: 60000 }, async (t) => {
   const local = await temporaryDirectory(t);
   const { statePath } = await daemonHome(t, "cns-pi-state-");
+  const machine = await thisMachine(t, statePath);
   const port = await unusedPort("127.0.0.1");
   const env = { CNS_BIND: "127.0.0.1", CNS_PORT: port };
-  const first = await startPi(t, { cwd: local, statePath, env: { ...env, CNS_LISTEN: "1" } });
+  const first = await startPi(t, { cwd: local, statePath, env: { ...env, CNS_UP: "1" } });
   assert.ok(first.notes.some((note) => note.startsWith("Started the cns daemon")), first.notes.join("\n"));
   assert.equal(first.statuses.get("cns"), `cns: listening 127.0.0.1:${port} (0 peers)`);
-  const second = await startPi(t, { cwd: local, statePath, env: { ...env, CNS_LISTEN: "Yes" } });
+  const second = await startPi(t, { cwd: local, statePath, env: { ...env, CNS_UP: "Yes" } });
   assert.ok(second.notes.some((note) => note.startsWith("Using the cns daemon already running")), second.notes.join("\n"));
 
   for (const value of ["0", "off", ""]) {
-    const quiet = await startPi(t, { cwd: local, statePath, env: { ...env, CNS_LISTEN: value } });
+    const quiet = await startPi(t, { cwd: local, statePath, env: { ...env, CNS_UP: value } });
     assert.deepEqual(quiet.notes, []);
     assert.equal(quiet.statuses.get("cns"), undefined);
   }
-  const wrong = await startPi(t, { cwd: local, statePath, env: { ...env, CNS_LISTEN: "127.0.0.1" } });
-  assert.match(wrong.notes.join("\n"), /cannot listen: CNS_LISTEN must be 1 to listen when Pi starts, or 0 not to/);
+  const wrong = await startPi(t, { cwd: local, statePath, env: { ...env, CNS_UP: "127.0.0.1" } });
+  assert.match(wrong.notes.join("\n"), /cannot start the daemon: CNS_UP must be 1 to start the daemon when Pi starts, or 0 not to/);
   assert.equal(wrong.statuses.get("cns"), undefined);
 
   // Without cns on PATH, Pi stops the daemon it shares with the other sessions.
   const peerHome = await temporaryDirectory(t, "cns-pi-peer-");
-  const peer = launchCli(t, ["connect", `ws://127.0.0.1:${port}`, "--no-repl"], { env: { HOME: peerHome } });
-  await peer.waitFor("Connected to");
-  assert.match(await first.command("/cns attach p1"), /Attached to p1/);
-  assert.match(await first.command("/cns stop"), /^The connection to p1 .* was lost: the local daemon stopped\..*\nStopped the cns daemon \(pid \d+\)\.$/);
+  await machine.linked("peer", peerHome);
+  const id = await linkId(statePath, "peer");
+  assert.match(await first.command(`/cns attach ${id}`), new RegExp(`Attached to ${id}`));
+  assert.match(await first.command("/cns stop"), new RegExp(`^The connection to ${id} .* was lost: the local daemon stopped\\..*\\nStopped the cns daemon \\(pid \\d+\\)\\.$`));
   const lost = await first.call("bash", { command: "touch MUST_NOT_EXIST" });
   assert.equal(lost.isError, true);
   assert.match(lost.text, /was lost/);
   await assert.rejects(stat(path.join(local, "MUST_NOT_EXIST")), { code: "ENOENT" });
-  assert.match(first.statuses.get("cns") ?? "", /^cns: p1 lost: \/cns attach or \/cns detach$/);
+  assert.equal(first.statuses.get("cns"), `cns: ${id} lost: /cns attach or /cns detach`);
   await assert.rejects(stat(statePath), { code: "ENOENT" });
   const deadline = Date.now() + 5000;
   while (!second.notes.includes("The cns daemon stopped.") && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
@@ -344,8 +371,8 @@ test("CNS_LISTEN starts or finds the daemon when Pi starts, and other values are
 
 test("a failed --cns-attach blocks the tools instead of running them here", { skip: !posix, timeout: 30000 }, async (t) => {
   const local = await temporaryDirectory(t);
-  const port = await unusedPort("127.0.0.1");
-  const pi = await startPi(t, { cwd: local, statePath: path.join(local, "daemon.json"), flags: { "cns-attach": `127.0.0.1:${port}` } });
+  await thisMachine(t);
+  const pi = await startPi(t, { cwd: local, statePath: path.join(local, "daemon.json"), flags: { "cns-attach": "absent" } });
   assert.ok(pi.notes.some((note) => note.includes("attaching failed")), pi.notes.join("\n"));
   const blocked = await pi.call("bash", { command: "touch MUST_NOT_EXIST" });
   assert.equal(blocked.isError, true);
@@ -358,7 +385,7 @@ test("a failed --cns-attach blocks the tools instead of running them here", { sk
 test("the tools take the built-ins' place and keep Pi's active set", { skip: !posix, timeout: 30000 }, async (t) => {
   const local = await temporaryDirectory(t);
   const home = await temporaryDirectory(t, "cns-pi-home-");
-  const { address } = await listener(t, home);
+  const { address } = await (await thisMachine(t)).host("studio", home);
   const pi = await startPi(t, { cwd: local, statePath: path.join(local, "daemon.json"), tools: null });
   assert.deepEqual(pi.session.getActiveToolNames().sort(), ["bash", "cns", "edit", "read", "write"]);
   assert.equal((await pi.call("cns", { action: "attach", host: address })).isError, false);
@@ -387,7 +414,7 @@ test("aborting or timing out a command stops it on the host", { skip: !posix, ti
   const home = await temporaryDirectory(t, "cns-pi-home-");
   const work = path.join(home, "work");
   await mkdir(work);
-  const { address } = await listener(t, home);
+  const { address } = await (await thisMachine(t)).host("studio", home);
   const pi = await startPi(t, { cwd: local, statePath: path.join(local, "daemon.json") });
   assert.equal((await pi.call("cns", { action: "attach", host: address, cwd: "work" })).isError, false);
 
@@ -423,7 +450,7 @@ test("a continued session goes back to its host, or runs nothing until the user 
   const home = await temporaryDirectory(t, "cns-pi-home-");
   const work = path.join(home, "work");
   await mkdir(work);
-  const { peer, address } = await listener(t, home);
+  const { stop, address } = await (await thisMachine(t)).host("studio", home);
   const statePath = path.join(local, "daemon.json");
   const sessionManager = SessionManager.inMemory(local);
   const first = await startPi(t, { cwd: local, statePath, sessionManager });
@@ -435,8 +462,7 @@ test("a continued session goes back to its host, or runs nothing until the user 
   assert.equal((await second.call("bash", { command: "pwd" })).text.trim(), work);
   second.session.dispose();
 
-  peer.child.kill("SIGTERM");
-  await peer.exited;
+  await stop();
   const third = await startPi(t, { cwd: local, statePath, sessionManager });
   const blocked = await third.call("bash", { command: "touch MUST_NOT_EXIST" });
   assert.equal(blocked.isError, true);
@@ -453,7 +479,7 @@ test("a continued session goes back to its host, or runs nothing until the user 
 test("cns does not attach while another extension's tools take the same names", { skip: !posix, timeout: 30000 }, async (t) => {
   const local = await temporaryDirectory(t);
   const home = await temporaryDirectory(t, "cns-pi-home-");
-  const { address } = await listener(t, home);
+  const { address } = await (await thisMachine(t)).host("studio", home);
   const other: ExtensionFactory = (pi) => {
     pi.registerTool({ ...createBashToolDefinition(local), label: "other bash" });
   };

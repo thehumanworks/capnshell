@@ -1,67 +1,43 @@
 # Cap’n Shell (`cns`)
 
-Bidirectional remote shells for Linux, macOS and Windows. Run one executable on each machine. Both peers can execute commands on the other over the same WebSocket; a listener can accept multiple peers.
+Shells, terminals and files on your own devices, on Linux, macOS and Windows. Run one executable on each machine, pair two devices once, and reach each by name: directly, or through the relay built into cns when they are on different networks. Every link is authenticated and encrypted end to end, and each device gets only what the other's owner granted.
 
 ## Usage
 
 ```sh
-# Machine A: accept connections
-cns listen
+# On the machine you want to reach
+studio $ cns up                     # start this device's daemon
+studio $ cns pair                   # print an invite and wait
 
-# Machine B: connect interactively
-cns connect ws://127.0.0.1:47381
-
-# Or run one command, return its output and exit status, and disconnect
-cns run ws://127.0.0.1:47381 -- 'uname -a'
+# On the other machine
+laptop $ cns pair 'cns1:...'        # compare fingerprints, then confirm on both
+laptop $ cns run studio -- 'uname -a'
+laptop $ cns tty studio
 ```
 
-The same commands work on every supported OS, including Linux under WSL. On Windows use `cns.exe`; commands execute in Windows PowerShell. On Linux and macOS they execute in Bash. The command string must use the **remote** shell's syntax, so use e.g. `'$PSVersionTable.PSVersion'` when targeting Windows.
-
-By default `listen` binds to `127.0.0.1:47381`. For another machine on a trusted private network, bind its reachable interface explicitly:
-
-```sh
-cns listen --bind 192.168.1.10 --port 47381 --allow-remote
-cns connect ws://192.168.1.10:47381
-```
-
-Use an address reachable from the other machine. This does not configure routing, VPNs, firewalls or port forwarding.
+[Paired devices](#paired-devices) below covers pairing, grants and the relay. The command string must use the **remote** shell's syntax: on Linux and macOS commands execute in Bash, on Windows in Windows PowerShell, so use e.g. `'$PSVersionTable.PSVersion'` when targeting Windows. Identities and paired devices are not yet available on Windows (see [Device identity](#device-identity)), so a Windows machine cannot pair until filesystem ACL checks are supported.
 
 | Command | Purpose |
 | --- | --- |
-| `listen` | Start a foreground listener and interactive console. |
-| `listen --no-repl` | Start a foreground listener without a console. |
-| `listen --daemon` | Start a background listener. |
-| `connect <url>` | Open a bidirectional connection and interactive console. |
-| `connect <url> --no-repl` | Connect and expose local execution without a console. |
-| `--one-way` on peer commands | Use the peer's shell without offering this machine's shell or files in return. |
-| `run [url] -- '<command>'` | Execute one shell command and exit with its status; piped stdin is forwarded. |
-| `cp SOURCE DEST` | Copy one file to or from a peer, with the remote side written `TARGET:PATH`. |
-| `tty [url] [-- '<command>']` | Open an interactive terminal (PTY) running a login shell or one command. |
-| `tty [url] --name NAME [-- '<command>']` | Start a named PTY session in the background. |
-| `tty [url] --attach NAME` | Attach to a named session; Ctrl-] detaches. |
-| `sessions [url]` | List a peer's named sessions. |
-| `keys [url] NAME KEY...` | Send keys or text to a named session. |
-| `screen [url] NAME` | Print a named session's screen, optionally once it shows some text. |
-| `kill [url] NAME` | End a named session and remove it. |
+| `up` | Start this device's daemon, which paired devices link to; `--install` makes it a service. |
+| `pair [invite]` | Pair with another device: print an invite, or paste one. |
+| `peers` | List paired devices, their status and the access each has. |
+| `peer grant/revoke/remove/address NAME` | Change a pairing. |
+| `status`, `doctor [NAME]` | Show this device's daemon and links, or check how a paired device is reached. |
+| `run DEVICE -- '<command>'` | Execute one shell command and exit with its status; piped stdin is forwarded. |
+| `cp SOURCE DEST` | Copy one file to or from a paired device, with the remote side written `DEVICE:PATH`. |
+| `tty DEVICE [-- '<command>']` | Open an interactive terminal (PTY): the device's `main` session, or one command. |
+| `tty DEVICE --name NAME [-- '<command>']` | Start a named PTY session in the background. |
+| `tty DEVICE --attach NAME` | Attach to a named session; Ctrl-] detaches. |
+| `sessions DEVICE` | List a device's named sessions. |
+| `keys DEVICE NAME KEY...` | Send keys or text to a named session. |
+| `screen DEVICE NAME` | Print a named session's screen, optionally once it shows some text. |
+| `kill DEVICE NAME` | End a named session and remove it. |
+| `mcp [DEVICE]` | Serve MCP tools on a paired device, or on the devices linked to the daemon. |
 | `attach` | Open a console for the local daemon. |
 | `stop` | Stop the local daemon and its sessions. |
 
 Use `cns <command> --help` for options.
-
-## Saved peer addresses
-
-Save an address under a local alias and select it explicitly with `--peer`:
-
-```sh
-cns peer add studio ws://127.0.0.1:47381
-cns peer list
-cns peer list --json
-cns run --peer studio -- 'uname -a'
-cns tty --peer studio
-cns peer remove studio
-```
-
-`peer list` prints one `name<TAB>url` line per alias, sorted by name. `peer list --json` prints the same entries as a JSON array of `{ "name", "url" }` objects in that order, `[]` when there are none, for scripts and agents; errors are reported the same way as for the text listing, on stderr with a failing exit status and nothing on stdout. The alias is an address-book entry, not an authenticated identity. Peer connections remain unauthenticated; use them only on trusted networks. Saved aliases are local to this user in `~/.cns/peers` (or `$CNS_CONFIG_DIR/peers`). Existing aliases cannot be replaced by `add`: remove one first to change its address. Saved addresses cannot include paths or query strings; use an explicit URL when those are needed. Missing aliases fail instead of falling back to a default. The configuration directory and its entire path must be trusted and protected by the user from modification by other users; custom `CNS_CONFIG_DIR` directories must already exist. On Unix, untrusted owners and shared-writable ancestors other than root-owned sticky directories are rejected. These pathname checks are best-effort safeguards, not a filesystem security boundary or a guarantee against path races. Saved aliases are unavailable on Windows until filesystem ACL checks are supported; use explicit URLs there. These checks do not protect against a process running as the same user. `--peer` cannot be combined with a URL or endpoint flags. This is separate from the console's connection IDs and does not rename connected peers or change MCP and Pi selection.
 
 ## Device identity
 
@@ -72,7 +48,7 @@ cns identity          # Fingerprint: k7qm-3h2x-...   Public key: ...
 cns identity --json   # { publicKey, fingerprint, createdAt, path }
 ```
 
-The key lives in `~/.cns/identity.json` (or `$CNS_CONFIG_DIR/identity.json`), readable only by your user, under the same trusted-path checks as saved peers. The public key is this device's name on the wire; the fingerprint, SHA-256 of the public key in base32, is what people compare when pairing. The file is never replaced: deleting it makes this a new device that every peer must pair with again. Identities are unavailable on Windows until filesystem ACL checks are supported.
+The key lives in `~/.cns/identity.json` (or `$CNS_CONFIG_DIR/identity.json`), readable only by your user, under the same trusted-path checks as paired devices (see Storage below). The public key is this device's name on the wire; the fingerprint, SHA-256 of the public key in base32, is what people compare when pairing. The file is never replaced: deleting it makes this a new device that every peer must pair with again. Identities are unavailable on Windows until filesystem ACL checks are supported.
 
 ## Paired devices
 
@@ -101,19 +77,19 @@ studio  online   direct      shell, files, sessions  k7qm-3h2x-...
 - **`cns up --install`** makes the daemon a service, so it survives reboots: a launchd agent (`~/Library/LaunchAgents/com.thehumanworks.cns.plist`, log in `~/.cns/service.log`) on macOS, a systemd user service (`~/.config/systemd/user/cns.service`, log in `journalctl --user -u cns`) on Linux. The service starts the daemon at login and restarts it if it fails. It keeps the running daemon's `--bind` and `--port` unless you pass new ones, and replaces that daemon. The service file is private (`0600`). `cns stop` stops the daemon until the next login or `cns up`, which starts it through the service. Run `cns up --install` again to change its settings or after moving `cns`, and `cns up --uninstall` to stop and remove it. On Linux, systemd stops user services at logout unless lingering is on (`loginctl enable-linger $USER`); `cns` says so when it is off. Other platforms are refused.
 - **`cns pair`** on the device to be reached prints a single-use invite (five minutes by default, `--expires`) and waits; the invite ends early if that `cns pair` exits. `cns pair 'cns1:...'` on the other device connects to one of the invite's addresses, proves it knows the invite's secret, and proposes a pairing: the name it suggests for itself, what it asks to use (`--request`, default `all`) and what it lets the other device use in return (`--grant`, default none). Both people see the other device's fingerprint and confirm, and each side chooses its own alias for the other (`--name`; by default the name the other device suggests, made unique). Without `--grant`, each side asks what the other may use here: the inviting side whether to allow what was requested, the accepting side `What may studio use on this device?` (`none`, the default, `shell`, `files`, `sessions`, `all` or a comma-separated list). The inviting side grants at most what was requested. `--yes` answers every prompt for scripted setups after you have compared fingerprints yourself, and alone grants nothing. A name already in use, or a device already paired, is refused before anything is sent. Declined or refused pairings and expired or unknown invites exit 3.
 - **Grants** are directional and enforced by the device that grants them: `shell` (run commands and open terminals), `files` (read, write and list files), and five session permissions, granted together as `sessions`: `sessions:list` (list them), `sessions:create` (start one), `sessions:view` (read the screen, wait for text and watch it attached), `sessions:control` (type, send keys and resize) and `sessions:kill`. A device may always view, type into and kill the sessions it started, which `cns sessions --json` shows as their `owner`, so `sessions:create` alone amounts to running commands; a viewer without `sessions:control` cannot type into, resize or answer the program's queries on a session it watches. A denied call fails with `Permission denied` and exit status 4, with no side effects; the message names the missing grant and the command to run on the other device, such as `To allow it, run on studio: cns peer grant laptop shell`. What a device may do on the other is shown under `ACCESS` in `cns peers`, which, for a device that grants this one nothing, says what to run there. `ACCESS` is what was granted at pairing; `cns doctor NAME` asks the device and saves what it says now.
-- **Targets.** `run`, `tty`, `sessions`, `keys`, `screen`, `kill` and `mcp` take a paired device's name, a saved address alias or a URL as their first argument, or `--peer NAME`. A paired name connects with this device's identity and requires the saved identity on the other end: if the device behind the address changed, the command exits 3 and nothing runs. Names never fall back to another peer. When a session shares a name with a saved peer, use `--peer`.
+- **Targets.** `run`, `tty`, `cp`, `sessions`, `keys`, `screen`, `kill` and `mcp` take a paired device's name as their first argument. They connect with this device's identity and require the saved identity on the other end: if the device behind the address changed, the command exits 3 and nothing runs. A name that is not a paired device is an error, never a hostname, and names never fall back to another device.
 - **Reconnecting terminals.** At a terminal, `cns tty studio` attaches to the session `main` on that device, starting a login shell there the first time (and again after it ended, if this device may end it); `cns tty studio --attach NAME` attaches to another named session. If the connection drops, either keeps trying to reach the device again, through any of its saved addresses, for ten minutes, and then reattaches to the same session: the screen is redrawn and `cns` reports how many bytes of output were written meanwhile. Input that was in flight is reported as possibly lost and never sent twice; keys typed while disconnected are discarded rather than typed blind, except Ctrl-C, which stops, and Ctrl-], which gives up and leaves the session running. A session that ended and was replaced while disconnected is not joined silently. If the device revoked access (exit 4), no longer accepts this one (exit 3) or the session is gone (exit 1), it says so and stops. Ctrl-] detaches; the session keeps running on the device. Piped input, `cns tty studio -- COMMAND`, and a device that grants this one no session permissions get a terminal of their own that ends with the connection, as before.
 - **`cns status [--json]`** shows this device's fingerprint, its daemon and its live links. **`cns doctor NAME`** tries each saved address of a paired device with this device's identity, within ten seconds each, and reports `ok`, `unreachable` or the handshake's refusal (`identity-changed`, `not-paired`, `refused`, `protocol`) per address, plus the grants in both directions (this device's access as the device reports it, saved when it changed) and whether the local daemon has a standing link; it exits 3 when an address answered as another device or refused the pairing and 5 when none answered or none is saved. **`cns doctor`** with no name checks this device instead: its identity, whether a paired daemon runs with that identity, the relay and whether the daemon is registered there, and each advertised address marked private or reachable from other networks, with a warning when every one is private; it exits 3 when the daemon runs as another identity and 5 when there is no identity, no paired daemon or no address.
 - **Changing a pairing.** `cns peer grant NAME shell,files` widens what a paired device may do here, at once and without interrupting its links. `cns peer revoke NAME [grants]` narrows it: the running daemon drops that device's links and dials again, so commands, terminals and session handles that relied on the revoked access end. `cns peer remove NAME` unpairs it and ends its links. `cns peer address NAME URL... [--remove]` changes where it is dialed. The daemon finds a device's links by its key, so this also works after renaming its file.
-- **Links.** Each device uses the other through the other's daemon, whose grants revocation reaches. A command you run (`cns run studio`, `cns tty studio`, `cns connect studio`) only uses the other device and offers nothing back. When both devices run daemons and dial each other at once, exactly one link survives: the device with the smaller public key keeps the one it dialed. A daemon dials only when it has no link, so a dial arriving later replaces the link this side holds, which must have died on the other side. Each side sends a heartbeat every 15 seconds when idle, and a link that delivers nothing for 45 seconds is closed, so a device that vanished shows `offline` within a minute and the daemons redial.
-- **`cns peers [--json]`** lists paired devices and address aliases with status (`online` while the local daemon has a link, else `offline`; `unpaired` for an address alias), the connection path, the access this device has there, and the fingerprint. The JSON fields are `name`, `kind`, `status`, `connection`, `fingerprint`, `access`, `grants` (what the peer may do here) and `addresses`; address aliases have `url`.
-- **Storage.** A paired device is a JSON file under `~/.cns/peers/<name>` beside plain address aliases, keyed by its public key: `cns peer list` shows both kinds. Renaming the file renames the alias without changing trust. A device cannot be saved twice under different names, and `add` never replaces an existing name.
+- **Links.** Each device uses the other through the other's daemon, whose grants revocation reaches. A command you run (`cns run studio`, `cns tty studio`) only uses the other device and offers nothing back. When both devices run daemons and dial each other at once, exactly one link survives: the device with the smaller public key keeps the one it dialed. A daemon dials only when it has no link, so a dial arriving later replaces the link this side holds, which must have died on the other side. Each side sends a heartbeat every 15 seconds when idle, and a link that delivers nothing for 45 seconds is closed, so a device that vanished shows `offline` within a minute and the daemons redial.
+- **`cns peers [--json]`** lists paired devices with status (`online` while the local daemon has a link, else `offline`), the connection path, the access this device has there, and the fingerprint. The JSON fields are `name`, `status`, `connection`, `fingerprint`, `access`, `grants` (what the peer may do here) and `addresses`. `cns peer list [--json]` prints each device's name, fingerprint and first address, for scripts.
+- **Storage.** A paired device is a private JSON file under `~/.cns/peers/<name>` (or `$CNS_CONFIG_DIR/peers`), keyed by its public key. Renaming the file renames the device without changing trust. A device cannot be saved twice under different names, and pairing never replaces an existing name. A file there that is not a paired-device record is reported and skipped by the daemon, and refused when named; remove it with `cns peer remove NAME`. The configuration directory and its entire path must be trusted and protected by the user from modification by other users; custom `CNS_CONFIG_DIR` directories must already exist. On Unix, untrusted owners and shared-writable ancestors other than root-owned sticky directories are rejected. These pathname checks are best-effort safeguards, not a filesystem security boundary or a guarantee against path races, and they do not protect against a process running as the same user. They are unavailable on Windows until filesystem ACL checks are supported, so paired devices are too.
 - **Relay.** Devices that cannot reach each other directly meet at the relay built into cns, with nothing to set up: `cns up` registers this device there by proving its key, and its invites list the relay address after its direct ones. Other devices try the direct addresses first and the relay last, for commands, pairing, `doctor`, MCP, Pi and the daemons' standing link, including for paired devices whose saved record names no relay (`cns doctor` lists that attempt as `[built-in relay]`); `cns peers`, `cns status` and `cns doctor` say which path a link uses. The relay forwards encrypted records it cannot read and cannot impersonate either device. It accepts only cns as a client: every request carries a header made with a key built into cns, which keeps other programs off the relay but not someone who takes cns apart, so the relay is never what keeps a device safe; the end-to-end authentication below is. [docs/adr/0001-built-in-relay.md](docs/adr/0001-built-in-relay.md) records the design and its limits, and [relay/](relay/README.md) is the relay itself, a Cloudflare Worker. A daemon re-registers after the relay restarts or stops answering its pings, answers at most 32 dialers through it at once, and saved addresses are tried direct first and relays last whatever their order.
-- **Security.** Links between paired devices are authenticated and encrypted end to end. Both devices prove their identities before anything is exported, and a saved identity that changes is refused. The handshake also exchanges fresh libsodium `crypto_kx` keys, covered by both signatures, so each connection has its own keys for each direction; every later message is a libsodium `secretstream` record (XChaCha20-Poly1305), which is encrypted, authenticated, kept in order and never accepted twice. A tampered, replayed or unencrypted message closes the link. The handshake itself is not encrypted: anyone on the network, or a relay, sees both devices' public keys (so the same devices can be recognized on any network), whether it is a daemon link or one command, an invite's id, refusal reasons, and the size and timing of encrypted messages, but nothing of what they carry. Close frames carry only fixed phrases. The session keys exist for one connection, so a stolen identity file does not decrypt recorded traffic; this device's own copies are wiped when the link closes, though libsodium may leave copies in its memory until reused. Legacy `listen`/`connect` are unchanged and remain unauthenticated and unencrypted.
+- **Security.** Links between paired devices are authenticated and encrypted end to end. Both devices prove their identities before anything is exported, and a saved identity that changes is refused. The handshake also exchanges fresh libsodium `crypto_kx` keys, covered by both signatures, so each connection has its own keys for each direction; every later message is a libsodium `secretstream` record (XChaCha20-Poly1305), which is encrypted, authenticated, kept in order and never accepted twice. A tampered, replayed or unencrypted message closes the link. The handshake itself is not encrypted: anyone on the network, or a relay, sees both devices' public keys (so the same devices can be recognized on any network), whether it is a daemon link or one command, an invite's id, refusal reasons, and the size and timing of encrypted messages, but nothing of what they carry. Close frames carry only fixed phrases. The session keys exist for one connection, so a stolen identity file does not decrypt recorded traffic; this device's own copies are wiped when the link closes, though libsodium may leave copies in its memory until reused.
 
 ## Multiple peers
 
-Each console can list and select its remote peers:
+`cns attach` opens a console on the local daemon, which lists and selects the devices linked to it:
 
 ```text
 :peers
@@ -121,9 +97,9 @@ Each console can list and select its remote peers:
 :info
 ```
 
-A listener remains available after a peer disconnects. Each connection owns its shell API and commands; disconnecting one does not stop other connections. Peer IDs are never reused during a listener's lifetime.
+The daemon remains available after a device disconnects. Each connection owns its shell API and commands; disconnecting one does not stop other connections. Peer IDs are never reused during a daemon's lifetime.
 
-Non-interactive connection logs identify the remote hostname and network address, including its port. Short IDs such as `p1` are used for interactive selection.
+The daemon's log identifies each connection's device, hostname and network address, including its port. Short IDs such as `p1` are used for interactive selection.
 
 The console automatically selects the initial sole peer. When several peers are present, use `:use ID` explicitly. An explicit selection remains until that peer disconnects; commands never silently switch to another peer. Each console keeps working-directory and timeout settings separately for each peer.
 
@@ -145,41 +121,17 @@ The console automatically selects the initial sole peer. When several peers are 
 Pass exactly one shell string after `--`; quote it to preserve spaces, redirects and variables for the remote shell:
 
 ```sh
-cns run ws://127.0.0.1:47381 -- 'printf "hello\n"; exit 7'
-cns run ws://127.0.0.1:47381 --cwd /tmp --timeout 10000 -- 'pwd; ls -la'
+cns run studio -- 'printf "hello\n"; exit 7'
+cns run studio --cwd /tmp --timeout 10000 -- 'pwd; ls -la'
 ```
 
 ### Environment defaults
 
-Set these environment variables in your shell to avoid repeating the endpoint and remote working directory:
-
-```sh
-export CNS_BIND=192.168.1.10
-export CNS_PORT=47381
-export CNS_CWD=/srv/project
-cns run -- 'pwd; ls -la'
-
-# Override any default for one invocation
-cns run --bind 192.168.1.20 --port 47382 --cwd /tmp -- 'pwd'
-```
-
-In PowerShell, set variables with e.g. `$env:CNS_BIND = '192.168.1.10'`.
-
-| Environment variable | CLI override | Applies to | Default when unset |
-| --- | --- | --- | --- |
-| `CNS_BIND` | `--bind <address>` | `run`/`tty` destination; `listen` interface | `127.0.0.1` |
-| `CNS_PORT` | `--port <port>` | `run`/`tty` destination; `listen` port | `47381` |
-| `CNS_CWD` | `--cwd <path>` | `run`/`tty` remote working directory | Remote user's home directory |
-
-Precedence is **CLI flag > environment variable > built-in default**. `CNS_BIND` must be a numeric IPv4 or IPv6 address, and `CNS_PORT` must be an integer from 1 to 65535. Empty or invalid values are rejected unless overridden. The working directory is an absolute path on the **remote** machine, not the local one.
-
-Without a URL, `run` and `tty` connect to `ws://<bind>:<port>` using these defaults. An explicit URL (including a hostname, path or `wss://` endpoint) replaces `CNS_BIND` and `CNS_PORT`; do not combine a URL with `--bind` or `--port`. `CNS_CWD` still applies with an explicit URL. `connect` continues to require a URL and ignores these environment variables.
-
-`listen` also uses `CNS_BIND` and `CNS_PORT`, including with `--daemon`. A non-loopback bind still requires explicit `--allow-remote`; environment variables do not opt in to remote shell access.
+`CNS_CWD` sets the remote working directory for `run`, `tty` and `mcp` when `--cwd` is not given; by default commands start in the remote user's home. It is an absolute path on the **remote** machine, not the local one. `CNS_BIND` and `CNS_PORT` set the interface and port `cns up` listens on (default every interface, port 47381) when `--bind` and `--port` are not given. Precedence is **CLI flag > environment variable > built-in default**. `CNS_BIND` must be a numeric IPv4 or IPv6 address, and `CNS_PORT` must be an integer from 1 to 65535. Empty or invalid values are rejected unless overridden. In PowerShell, set variables with e.g. `$env:CNS_CWD = 'C:\src'`.
 
 ### Output and execution behavior
 
-`run` streams remote stdout and stderr to the corresponding local streams as they are produced, byte for byte, without prompts or added newlines, and propagates the exit status. A timeout exits with status 124. When the local reader goes away, as with `| head`, the remote command is killed and `run` exits with 141, as a local command ends on SIGPIPE. The connection remains bidirectional while the command runs, so the listener can execute commands on the connecting machine too.
+`run` streams remote stdout and stderr to the corresponding local streams as they are produced, byte for byte, without prompts or added newlines, and propagates the exit status. A timeout exits with status 124. When the local reader goes away, as with `| head`, the remote command is killed and `run` exits with 141, as a local command ends on SIGPIPE.
 
 Every command starts a fresh noninteractive shell. Shell variables and standalone `cd` commands do not persist; use `:cwd` or combine operations in one command. For interactive programs, editors and TUIs, use [`tty`](#interactive-terminals-pty).
 
@@ -195,20 +147,19 @@ A command that never reads its input still ends normally. With an open stdin tha
 
 `run` keeps no output in memory, so it has no output limit. The interactive console's commands still buffer until completion, with a combined 1 MiB capture limit; excess output is drained and discarded, and truncation adds a diagnostic. Commands have no deadline by default; the maximum optional timeout is 2147483647 ms. Stopping a peer or disconnecting its session attempts to kill that session's process trees; deliberately detached processes can escape cleanup.
 
-The listener allows up to 32 connections and four concurrent commands per connection. Incomplete RPC handshakes expire after five seconds.
+The daemon allows up to 32 connections and four concurrent commands per connection. Incomplete RPC handshakes expire after five seconds.
 
 ## Copying files
 
-`cp` copies one file between this device and a peer, over the peer's `readFile` and `writeFileAt` methods in parts of up to 1 MiB and 4 MiB, so files of any size work. Exactly one path is remote, written `TARGET:PATH` as with `scp`, where `TARGET` is a paired device's name or a saved alias:
+`cp` copies one file between this device and a peer, over the peer's `readFile` and `writeFileAt` methods in parts of up to 1 MiB and 4 MiB, so files of any size work. Exactly one path is remote, written `DEVICE:PATH` as with `scp`, where `DEVICE` is a paired device's name:
 
 ```sh
 cns cp ./build.tar.gz studio:/tmp/          # into a remote directory, under the same name
 cns cp studio:~/notes.txt .                 # into the local working directory
 cns cp studio:logs/app.log ./app.log        # a relative remote path starts at the remote home
-cns cp --peer ws://box:47381 report.pdf :reports/
 ```
 
-`:PATH` uses the `--peer` target, or else `--bind`/`--port`, `CNS_BIND`/`CNS_PORT` or `127.0.0.1:47381`. A remote path that is relative or starts with `~/` is resolved against the remote user's home. A destination that is an existing directory, or ends with `/`, receives the file under its own name. An existing destination is overwritten in place and keeps its permissions; a new one gets the source's permission bits, less the umask. A copy that fails partway leaves a partial destination, as `scp` does. Directories are not copied; use `tar` through `cns run` instead, as above. On a paired device, `cp` needs only the `files` grant. A peer running an older `cns` accepts files of up to 4 MiB.
+A remote path that is relative or starts with `~/` is resolved against the remote user's home. A destination that is an existing directory, or ends with `/`, receives the file under its own name. An existing destination is overwritten in place and keeps its permissions; a new one gets the source's permission bits, less the umask. A copy that fails partway leaves a partial destination, as `scp` does. Directories are not copied; use `tar` through `cns run` instead, as above. `cp` needs only the `files` grant on the device. A peer running an older `cns` accepts files of up to 4 MiB.
 
 A local path with a colon before any slash would read as remote: write it as `./name:with:colons`. On Windows, a drive letter such as `C:\` is local.
 
@@ -217,20 +168,20 @@ A local path with a colon before any slash would read as remote: write it as `./
 `tty` runs a program on a pseudo-terminal on the peer, so interactive CLIs and full-screen TUIs such as `vim`, `top` or Claude Code render and take keyboard input:
 
 ```sh
-cns tty                                   # the remote user's login shell ($SHELL -l, else Bash; PowerShell on Windows)
-cns tty --cwd /srv/app -- 'claude'        # one command, with the run quoting rules
-cns tty ws://192.168.1.10:47381 -- 'htop'
+cns tty studio                            # the session main: the remote user's login shell ($SHELL -l, else Bash; PowerShell on Windows)
+cns tty studio --cwd /srv/app -- 'claude' # one command, with the run quoting rules
+cns tty studio -- 'htop'
 ```
 
-From a console, `:tty` and `:tty COMMAND` do the same on the selected peer, including the reverse direction from a listener or `attach` to a connected peer. The console's `:cwd` and `:timeout` apply.
+From a console, `:tty` and `:tty COMMAND` do the same on the selected peer, on any device linked to the daemon. The console's `:cwd` and `:timeout` apply.
 
 - A local terminal is switched to raw mode, so Ctrl-C, Ctrl-D, Esc and arrow keys go to the remote program. Its size is sent on start and on every resize. The local terminal is restored when the program exits or the connection drops.
 - `tty` exits with the remote program's status (124 after `--timeout`, 128 + signal number after a signal). A timeout or `:tty` hang-up sends SIGHUP to the program, then SIGKILL after one second.
 - Without a local terminal, for example from an agent, piped stdin is forwarded byte for byte and output is written raw, including escape sequences. Pass `--cols`/`--rows` for a fixed size (default 80×24) and `--term` for `TERM` (default `xterm-256color`). The end of piped input is not sent as a keystroke. Send `\x04` yourself where a program expects Ctrl-D:
 
   ```sh
-  printf 'ls --color\nexit\n' | cns tty --cols 120 --rows 40
-  printf 'hello\n\x04' | cns tty -- 'cat'
+  printf 'ls --color\nexit\n' | cns tty studio --cols 120 --rows 40
+  printf 'hello\n\x04' | cns tty studio -- 'cat'
   ```
 
 ### Rendered screens
@@ -238,9 +189,9 @@ From a console, `:tty` and `:tty COMMAND` do the same on the selected peer, incl
 Each PTY session renders its output into a headless terminal emulator ([`@xterm/headless`](https://www.npmjs.com/package/@xterm/headless)) on the executing peer, as tmux does for its panes. `--screen` prints what that terminal shows when the program ends, like `tmux capture-pane -p`, instead of the escape sequences that drew it. The renderer only renders; you choose when to look. A program's own exit captures its final screen, and `--timeout` captures a program that keeps running at that moment, then hangs it up:
 
 ```sh
-cns tty --screen --cols 120 --rows 40 --timeout 5000 -- 'htop'
-(sleep 1; printf 'ihello\033') | cns tty --screen --timeout 3000 -- 'vim notes.txt'
-cns tty --screen --history 100 -- 'make test'   # include up to 100 scrollback lines
+cns tty studio --screen --cols 120 --rows 40 --timeout 5000 -- 'htop'
+(sleep 1; printf 'ihello\033') | cns tty studio --screen --timeout 3000 -- 'vim notes.txt'
+cns tty studio --screen --history 100 -- 'make test'   # include up to 100 scrollback lines
 ```
 
 Rows are printed with trailing spaces and the blank rows below the last output removed. With `--screen`, or without a local terminal, the remote screen answers terminal queries such as cursor-position reports. TUIs that wait for such answers, including Claude Code, then draw without a real terminal attached. A program that exits through the alternate screen, as vim does on `:wq`, leaves the normal screen behind; that is what a real terminal shows then, too.
@@ -250,25 +201,25 @@ Rows are printed with trailing spaces and the blank rows below the last output r
 A named session keeps running between commands, so an agent can work with a TUI in steps, as with `tmux send-keys` and `capture-pane`:
 
 ```sh
-cns tty --name claude --cwd /srv/app -- 'claude'   # start in the background; prints nothing
-cns screen claude --until 'trust this folder'       # wait for the prompt, then print the screen
-cns keys claude Down                                 # move to "Yes, I trust this folder"
-cns screen claude --until '❯ Yes'                    # confirm the key landed before pressing Enter
-cns keys claude Enter
-cns keys claude 'fix the failing tests' Enter
-cns screen claude --history 50
-cns keys claude C-c
-cns sessions                                         # name, status, size, viewers, command
-cns kill claude
+cns tty studio --name claude --cwd /srv/app -- 'claude'  # start in the background; prints nothing
+cns screen studio claude --until 'trust this folder'      # wait for the prompt, then print the screen
+cns keys studio claude Down                               # move to "Yes, I trust this folder"
+cns screen studio claude --until '❯ Yes'                  # confirm the key landed before pressing Enter
+cns keys studio claude Enter
+cns keys studio claude 'fix the failing tests' Enter
+cns screen studio claude --history 50
+cns keys studio claude C-c
+cns sessions studio                                       # name, status, size, viewers, command
+cns kill studio claude
 ```
 
-- **Lifetime:** sessions live in the `cns` process running the program, the listener or the connected peer, not in a connection. They survive the commands and connections that use them and end when killed or when that process stops. Nothing is written to disk. Each process holds up to 16 named sessions, running or finished. A finished session keeps its final screen and exit status until it is killed. `--timeout` on `tty --name` limits the session's lifetime.
+- **Lifetime:** sessions live in the device's daemon, not in a connection. They survive the commands and connections that use them and end when killed or when that process stops. Nothing is written to disk. Each process holds up to 16 named sessions, running or finished. A finished session keeps its final screen and exit status until it is killed. `--timeout` on `tty --name` limits the session's lifetime.
 - **`keys`** takes tmux-style key names: `Enter`, `Tab`, `BTab`, `Escape`, `Space`, `BSpace`, `Up`, `Down`, `Left`, `Right`, `Home`, `End`, `PageUp`, `PageDown`, `Insert`, `Delete`, `F1`–`F12`, with `C-`, `M-` and `S-` prefixes such as `C-c` or `C-Left`. Other arguments are typed as text; `--literal` types every argument as text. The executing peer encodes keys, so arrow keys follow the program's cursor-key mode.
 - **`screen`** prints the current screen like `tty --screen`. `--until TEXT` first waits for the screen to show TEXT, checking after every chunk of output. It exits 0 when the text appears, 1 if the program ends first and 124 after `--timeout` (default 30000 ms; 0 waits indefinitely). It prints the screen in each case. The renderer does not decide when a program is finished; `--until` is a convenience over it. To confirm that a key took effect, wait for the screen it should produce rather than sleeping.
 - **`tty --attach NAME`** shows a session in your terminal, on its alternate screen as tmux does: detaching or the program's exit returns your terminal to what it showed before. It redraws the current screen, then streams live output and sends your keys. When the program switches between its normal and alternate screens, as vim does, `cns` redraws from its own copy of the session's screen instead of letting your terminal switch. As in tmux, lines that scroll by while attached are not added to your terminal's scrollback; `cns screen NAME --history N` has them. Ctrl-] detaches and leaves the program running; exiting the program ends the attach with its status. Attaching from a terminal resizes the session to that terminal, as in tmux. Several viewers can attach at once. Without a local terminal, `--attach` streams raw output and forwards stdin, without detach key or resize.
 - **Terminal queries** are answered by the session's screen unless an attached terminal answers them, so programs keep drawing with no one attached.
 
-If an attachment loses its connection while the process hosting a named session is still running, reconnect to the same host using its original URL, for example `cns tty ws://192.168.1.10:47381 --attach NAME`, or its saved alias, `cns tty --peer studio --attach NAME`. This is a manual reattachment: the new attachment redraws the current screen and streams subsequent output. It does not replay all output missed during the outage, and input in flight when the connection failed may or may not have reached the program; inspect the session before retrying it. Unnamed PTYs end with their connection. Named sessions also end when their hosting `cns` process stops, including when an outbound `connect` process exits on disconnect; they do not survive a host process restart. `cns kill` with the same target and session name explicitly ends and removes a named session.
+At a terminal, `cns tty studio --attach NAME` reconnects by itself when its connection drops (see [Paired devices](#paired-devices)). Without a terminal, run it again: the new attachment redraws the current screen and streams subsequent output. It does not replay all output missed during the outage, and input in flight when the connection failed may or may not have reached the program; inspect the session before retrying it. Unnamed PTYs end with their connection. Named sessions end when the device's daemon stops; they do not survive a daemon restart. `cns kill` with the same target and session name explicitly ends and removes a named session.
 
 ### RPC interface
 
@@ -314,11 +265,11 @@ File methods take absolute paths on the executing peer and reject with its syste
 | `writeFile(path, data)` | Replaces a file's contents with up to 4 MiB in place, as a local write does: links are followed and the file keeps its inode, owner and permissions. The data arrives whole before anything is written. Parent directories are not created. |
 | `writeFileAt(path, data, { offset, truncate, mode })` | Writes up to 4 MiB at `offset`, creating the file if needed, so a larger file is sent in several calls: the first with `truncate: true`, the rest at increasing offsets. `mode` sets the permission bits of a file the call creates, less the umask. Links are followed and an existing file keeps its inode, owner and permissions. A broken connection between calls leaves the file partly written. |
 
-`ShellApi.fork()` returns another `ShellApi` on the same peer, with its own limit of four commands and the same named sessions. Releasing the fork kills its commands and revokes the named-session handles it issued, so a caller can cancel a `run` without closing its connection; the named sessions themselves keep running. Each shell has up to 32 unreleased forks; closing a shell closes them. Daemon control's `runWhileConnected(id, command, options)` uses a fork so the command ends with the control connection, as `cns mcp` needs. Its `run` leaves commands running after an attached console detaches. Peers running a `cns` without `fork` fall back to `run`. Daemon control's `shell(id)` returns a fork of a connected peer's whole `ShellApi`, proxied by the daemon, and `status()` reports the daemon's listener (`url`, `bind`, `port`, `remote`, `oneWay`), `pid`, `startedAt` and its number of peers.
+`ShellApi.fork()` returns another `ShellApi` on the same peer, with its own limit of four commands and the same named sessions. Releasing the fork kills its commands and revokes the named-session handles it issued, so a caller can cancel a `run` without closing its connection; the named sessions themselves keep running. Each shell has up to 32 unreleased forks; closing a shell closes them. Daemon control's `runWhileConnected(id, command, options)` uses a fork so the command ends with the control connection, as `cns mcp` needs. Its `run` leaves commands running after an attached console detaches. Peers running a `cns` without `fork` fall back to `run`. Daemon control's `shell(id)` returns a fork of a connected peer's whole `ShellApi`, proxied by the daemon, and `status()` reports the daemon's listener (`url`, `bind`, `port`, `remote`), `pid`, `startedAt` and its number of peers.
 
-A peer started with `--one-way` offers its peers only the handshake's `info()`; every other method is refused. This includes one-shot commands such as `cns run --one-way -- 'pwd'` and `cns tty --one-way`. Without the flag, these commands retain their bidirectional behavior. `cns mcp` always refuses reverse shell access. The flag does not authenticate the peer or encrypt a `ws://` connection; continue to use only trusted networks.
+Commands you run (`run`, `tty`, `cp`, `sessions`, `keys`, `screen`, `kill` and `cns mcp`) offer the other device only the handshake's `info()`; every other method is refused, whatever this device granted it. What a paired device may do through its daemon's link is set by its grants.
 
-One-way refusal is not a per-user authorization system. A peer that has shell access can use the named sessions in that process, including through a forked shell; a session name is not a credential. Releasing a fork stops its own commands and unnamed PTYs and revokes the named-session handles and attachments it returned; the sessions keep running. Killing a named session invalidates handles to that session, even if its name is reused.
+Grants are not a per-user authorization system inside a device. A device that has shell access can use the named sessions in that process, including through a forked shell; a session name is not a credential. Releasing a fork stops its own commands and unnamed PTYs and revokes the named-session handles and attachments it returned; the sessions keep running. Killing a named session invalidates handles to that session, even if its name is reused.
 
 On Windows peers, programs run on a ConPTY in Windows PowerShell, with the same quoting as `run`. **This path is untested.** It compiles, and `src/shell.test.ts` has a Windows-only PTY test, but it has not been run on Windows yet. The `Windows` GitHub Actions workflow (`.github/workflows/windows.yml`), which runs every Monday and on demand, runs both test suites on `windows-latest`, including Windows versions of the named-session tests. Expected differences, from [Bun's ConPTY notes](https://bun.com/docs/runtime/child-process#platform-differences):
 
@@ -330,19 +281,19 @@ On Windows peers, programs run on a ConPTY in Windows PowerShell, with the same 
 ## Background operation
 
 ```sh
-cns listen --daemon
+cns up
 cns attach
 # :peers, :use p1, then commands; :quit detaches
 cns stop
 ```
 
-The daemon is a detached process, not an installed OS service; it does not restart automatically. Its private local state defaults to `~/.cns/daemon.json`. To run separate daemons, use different ports and pass the same custom `--state PATH` to `listen --daemon`, `attach` and `stop`. Startup prints the log location. The state file allows one daemon per path: a second `listen --daemon` fails while the first runs. If a daemon crashed, the next `listen --daemon` removes its state once the control endpoint does not answer and its process no longer exists.
+`cns up` starts the daemon as a detached process; `cns up --install` makes it a service that starts at login and restarts if it fails. Its private local state defaults to `~/.cns/daemon.json`. To run separate daemons, use different ports and pass the same custom `--state PATH` to `up`, `attach` and `stop`. Startup prints the log location. The state file allows one daemon per path: `cns up` reports the daemon already running. If a daemon crashed, the next `cns up` removes its state once the control endpoint does not answer and its process no longer exists.
 
-Detaching with `:quit` or Ctrl+C leaves the daemon, peer connections and pending commands running. `stop` shuts down the daemon and cleans up its sessions. A foreground listener stops when its console exits or it receives a termination signal. It does not create daemon state.
+Detaching with `:quit` or Ctrl+C leaves the daemon, its links and pending commands running. `stop` shuts down the daemon and cleans up its sessions.
 
 ## MCP server
 
-`cns mcp` gives MCP clients such as Claude Code, Codex and Cursor tools that use a peer the way the commands above do:
+`cns mcp` gives MCP clients such as Claude Code, Codex and Cursor tools that use a paired device the way the commands above do:
 
 | Tool | Purpose |
 | --- | --- |
@@ -358,15 +309,15 @@ Detaching with `:quit` or Ctrl+C leaves the daemon, peer connections and pending
 | `list_directory` | A directory's entries and their kinds. |
 | `glob` | Absolute paths of files matching a pattern such as `**/*.ts`, with `ignore` patterns. |
 
-With `--daemon`, `list_peers` also gives each paired device's `name` and `fingerprint`, and `peer` accepts the name. Results include text for the agent and structured content matching each tool's output schema. A command that exits nonzero is a normal result with its exit code; an unreachable peer, a missing session or invalid arguments are tool errors. `run_command` has a default deadline of 120 seconds (`timeoutMs: 0` removes it) and returns the start and end of output longer than 30,000 characters. Peers still keep at most 1 MiB. With several daemon peers connected, calls must name a `peer`.
+`list_peers` also gives each paired device's `name` and `fingerprint`, and `peer` accepts the name. Results include text for the agent and structured content matching each tool's output schema. A command that exits nonzero is a normal result with its exit code; an unreachable peer, a missing session or invalid arguments are tool errors. `run_command` has a default deadline of 120 seconds (`timeoutMs: 0` removes it) and returns the start and end of output longer than 30,000 characters. Peers still keep at most 1 MiB. With several devices linked to the daemon, calls must name a `peer`.
 
-The file tools take paths in the peer's own syntax. A relative path starts from `--cwd`, else the peer user's home, and `~` means that home. `read_file` refuses binary files and returns at most 30,000 characters per call. On a paired device these tools need the `files` grant (`cns peer grant NAME files` on that device); without it they fail with a permission error, while `run_command` only needs `shell`.
+The file tools take paths in the peer's own syntax. A relative path starts from `--cwd`, else the peer user's home, and `~` means that home. `read_file` refuses binary files and returns at most 30,000 characters per call. These tools need the `files` grant (`cns peer grant NAME files` on that device); without it they fail with a permission error, while `run_command` only needs `shell`.
 
-By default the client starts `cns mcp` and talks to it over stdin and stdout. The tools use the listener at the URL, or else `--bind`/`--port`, `CNS_BIND`/`CNS_PORT` or `127.0.0.1:47381`, as `cns run` does. With `--daemon [--state PATH]` they use the peers connected to `cns listen --daemon`, which suits machines behind NAT that connect out to yours. `--cwd PATH` (or `CNS_CWD`) sets the working directory for calls that do not pass `cwd`.
+By default the client starts `cns mcp` and talks to it over stdin and stdout. With a device's name, `cns mcp studio`, the tools use that paired device, connecting to it for each call as `cns run` does. Without one (`--state PATH` names another daemon) they use the devices linked to this device's daemon, chosen by name in each call, which suits devices that only link out to yours. `--cwd PATH` (or `CNS_CWD`) sets the working directory for calls that do not pass `cwd`.
 
 ```sh
-claude mcp add cns -- /absolute/path/to/cns mcp ws://build-box:47381
-codex mcp add cns -- /absolute/path/to/cns mcp --daemon
+claude mcp add cns -- /absolute/path/to/cns mcp build-box
+codex mcp add cns -- /absolute/path/to/cns mcp
 ```
 
 Cursor reads `.cursor/mcp.json` or `~/.cursor/mcp.json`:
@@ -379,16 +330,16 @@ Cursor reads `.cursor/mcp.json` or `~/.cursor/mcp.json`:
 
 ```sh
 export CNS_MCP_TOKEN=$(openssl rand -hex 32)
-cns mcp --http 47382 &
+cns mcp studio --http 47382 &
 claude mcp add -t http -H "Authorization: Bearer $CNS_MCP_TOKEN" cns http://127.0.0.1:47382/mcp
 codex mcp add cns --url http://127.0.0.1:47382/mcp --bearer-token-env-var CNS_MCP_TOKEN
 ```
 
-The server speaks MCP 2026-07-28 and serves 2025-era clients too. Over HTTP, a 2025-era client gets a protocol session so that its cancellations reach its calls; the server keeps no events for it to resume from, so a dropped response also cancels its call. Up to 64 sessions can be open; past that the longest-idle one is closed, and a session idle for an hour is closed too. The server connects to the listener or daemon for each call and closes the connection when the call ends. Cancelling a call, or a client disconnecting, therefore kills its command and ends its screen wait; named sessions keep running. Through a daemon, cancelling a command needs the daemon and the peer to run a `cns` with this server; with older ones the command runs until it ends. While a long call runs, the server reports elapsed time to clients that ask for progress. Clients impose their own tool-call time limits, for example Codex's 300-second default `tool_timeout_sec`, so pass `until` and `waitMs` rather than waiting indefinitely. A listener sees each call as a short-lived peer, but the MCP server refuses its requests: it never gives a listener a shell on its own machine.
+The server speaks MCP 2026-07-28 and serves 2025-era clients too. Over HTTP, a 2025-era client gets a protocol session so that its cancellations reach its calls; the server keeps no events for it to resume from, so a dropped response also cancels its call. Up to 64 sessions can be open; past that the longest-idle one is closed, and a session idle for an hour is closed too. The server connects to the device or daemon for each call and closes the connection when the call ends. Cancelling a call, or a client disconnecting, therefore kills its command and ends its screen wait; named sessions keep running. Through a daemon, cancelling a command needs the daemon and the peer to run a `cns` with this server; with older ones the command runs until it ends. While a long call runs, the server reports elapsed time to clients that ask for progress. Clients impose their own tool-call time limits, for example Codex's 300-second default `tool_timeout_sec`, so pass `until` and `waitMs` rather than waiting indefinitely. A device sees each call as a short-lived connection, but the MCP server refuses its requests: it never gives a device a shell on the MCP server's machine.
 
 ## Pi extension
 
-The Pi extension in `pi/` runs [Pi](https://pi.dev)'s own tools on a cns host: while Pi is attached, `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls` and `!` commands work on that host's files and shell. `/cns listen` (or `CNS_LISTEN=1`) lets hosts connect to Pi's machine, and `/cns attach HOST` sends the tools there; `HOST` may be a paired device's name, reached over its encrypted link within its grants. Nothing falls back to Pi's machine when a host goes away. [pi/README.md](pi/README.md) documents its use; it is also the npm package's README.
+The Pi extension in `pi/` runs [Pi](https://pi.dev)'s own tools on a cns host: while Pi is attached, `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls` and `!` commands work on that host's files and shell. `/cns attach HOST` sends the tools to a paired device, reached over its encrypted link within its grants, and `/cns up` (or `CNS_UP=1`) starts Pi's machine's daemon so paired devices can link to it. Nothing falls back to Pi's machine when a host goes away. [pi/README.md](pi/README.md) documents its use; it is also the npm package's README.
 
 ```sh
 pi install npm:@nothumanwork/pi-cns
@@ -433,7 +384,7 @@ The flake supports x86_64 Linux, aarch64 Linux and Apple Silicon macOS:
 ```sh
 nix build
 ./result/bin/cns --help
-nix run . -- listen
+nix run . -- up
 nix develop
 nix flake check
 ```
@@ -444,7 +395,7 @@ The default package/app is also available as `cns` (and the legacy flake attribu
 
 ## Security
 
-Peer connections provide **unauthenticated arbitrary command execution in both directions** as the running users, unless a peer uses `--one-way`: then the other peers cannot run commands or read files on its machine, though anyone who can reach a one-way listener can still connect to it, and it can run commands on them. Use only trusted loopback, LAN or private VPN connections, never elevated or exposed to the public internet. Binding outside loopback requires `--allow-remote`. Browser-origin WebSocket requests are rejected; this is not authentication. Built-in listeners use `ws://`; clients can also connect to externally provided `wss://` endpoints.
+A paired device can do on this one what it was granted, as the user running the daemon: `shell` and `sessions:create` amount to running any command. Grant only what a device needs, and revoke it with `cns peer revoke`. Only paired devices that authenticate with their identities can connect, and every link is encrypted end to end (see [Paired devices](#paired-devices)), so the daemon listens on every interface by default; `--bind` narrows it. Browser-origin WebSocket requests are rejected.
 
 Daemon control uses authenticated Cap’n Web RPC on a separate loopback endpoint, with its token in private local state. Keep the state directory private. Peer selection prevents accidental routing; it is not an authorization boundary or sandbox.
 
@@ -467,4 +418,4 @@ lefthook install
 
 The hook runs `ast-grep scan . .github`. The rules in `lint/rules` check that every file stating Bun's version agrees, that Nix builds with `nix/bun.nix` and that CI reads the version from `package.json`.
 
-Tests exercise multiple bidirectional peers, target selection, disconnect isolation, reverse calls during one-shot commands and PTY sessions, output/exit-status handling, PTY input, sizing, hang-up, timeouts and flow control, rendered screens and scrollback, named sessions across connections and CLI calls (keys, waits, attach redraws, detach, kill and limits), PTY proxying through the daemon, streaming commands with flow control and cancellation (also through the daemon), file operations and their validation, one-way peers refusing every reverse call, process cleanup, connection limits, daemon attachment, startup races and stale-state recovery. MCP tests drive `cns mcp` with the official SDK client over stdio and HTTP, in both protocol eras: every tool, tool errors, cancellation and disconnects killing commands and freeing screen waits, 2025-era session limits, HTTP authentication, origin and host checks, calls beyond Bun's idle timeout with progress, daemon peer selection and the refusal of reverse calls. The Pi extension tests run Pi's agent sessions with a scripted model against real listeners and the daemon: each tool and `!` on a host, results matching Pi's local tools for `grep`, `find`, `ls` and `read`, images, aborts and timeouts stopping the host's command, long commands, sessions sharing one daemon and attaching to its peers, `CNS_LISTEN`, `/cns stop`, lost hosts and failed startup attachments blocking every tool, and continued sessions attaching again. The package tests build the npm package, install it beside a Bun package, and drive it in Pi processes in RPC mode, on Node and with the installed `pi` when there is one, with neither `bun` nor `cns` on `PATH` and hostile `.env` and `bunfig.toml` files where the daemon would read them. The compiled suite additionally tests the executable outside its checkout without a JavaScript runtime on `PATH`.
+Tests exercise pairing, grants and links between devices, target selection, disconnect isolation, reverse calls during one-shot commands and PTY sessions, output/exit-status handling, PTY input, sizing, hang-up, timeouts and flow control, rendered screens and scrollback, named sessions across connections and CLI calls (keys, waits, attach redraws, detach, kill and limits), PTY proxying through the daemon, streaming commands with flow control and cancellation (also through the daemon), file operations and their validation, commands refusing every reverse call, process cleanup, connection limits, daemon attachment, startup races and stale-state recovery. MCP tests drive `cns mcp` with the official SDK client over stdio and HTTP, in both protocol eras: every tool, tool errors, cancellation and disconnects killing commands and freeing screen waits, 2025-era session limits, HTTP authentication, origin and host checks, calls beyond Bun's idle timeout with progress, daemon peer selection and the refusal of reverse calls. The Pi extension tests run Pi's agent sessions with a scripted model against paired devices and the daemon: each tool and `!` on a host, results matching Pi's local tools for `grep`, `find`, `ls` and `read`, images, aborts and timeouts stopping the host's command, long commands, sessions sharing one daemon and attaching to its peers, `CNS_UP`, `/cns stop`, lost hosts and failed startup attachments blocking every tool, and continued sessions attaching again. The package tests build the npm package, install it beside a Bun package, and drive it in Pi processes in RPC mode, on Node and with the installed `pi` when there is one, with neither `bun` nor `cns` on `PATH` and hostile `.env` and `bunfig.toml` files where the daemon would read them. The compiled suite additionally tests the executable outside its checkout without a JavaScript runtime on `PATH`.

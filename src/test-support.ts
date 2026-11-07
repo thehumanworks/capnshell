@@ -1,12 +1,12 @@
 import { spawn, type SpawnOptionsWithoutStdio } from "node:child_process";
 import { EventEmitter, once } from "node:events";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import type { TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
-import { stopDaemon } from "./commands/daemon.js";
+import { connectControl, stopDaemon } from "./commands/daemon.js";
 import { selfInvocation } from "./runtime.js";
 
 export const PROJECT_ROOT = fileURLToPath(new URL("../", import.meta.url));
@@ -115,4 +115,83 @@ export function launchCli(t: TestContext, args: string[], options: SpawnOptionsW
       return output.slice(from);
     },
   };
+}
+
+/** A device a test runs: its own configuration directory, identity, peers and daemon state. */
+export interface TestDevice {
+  name: string;
+  dir: string;
+  env: Record<string, string>;
+  state: string;
+  /** Where its daemon listens, once `up` started it. */
+  port?: string;
+}
+
+/**
+ * Devices for a test, each with its own configuration, that run `cns up` and pair with each
+ * other as people do. Hooks stop every daemon started here and then remove the directories.
+ */
+export async function testDevices(t: TestContext, prefix = "cns-devices-") {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), prefix)));
+  const daemons: TestDevice[] = [];
+  t.after(async () => {
+    for (const device of daemons.reverse()) {
+      try { await stopDaemon(device.state); } catch { /* Not running. */ }
+    }
+    await rm(root, { recursive: true, force: true });
+  });
+  const cli = async (device: TestDevice, args: string[], input = "") => {
+    const child = launchCli(t, args, { env: device.env });
+    child.child.stdin.end(input);
+    return { code: await child.exited, stdout: child.stdout, stderr: child.stderr, output: child.output };
+  };
+  return {
+    root,
+    cli,
+    async device(name: string, env: Record<string, string> = {}): Promise<TestDevice> {
+      const dir = path.join(root, name);
+      await mkdir(dir, { mode: 0o700 });
+      return { name, dir, env: { CNS_CONFIG_DIR: dir, HOME: dir, ...env }, state: path.join(dir, "daemon.json") };
+    },
+    /** Start the device's daemon on loopback. */
+    async up(device: TestDevice, port?: string): Promise<string> {
+      device.port = port ?? await unusedPort("127.0.0.1");
+      const result = await cli(device, ["up", "--bind", "127.0.0.1", "--port", device.port, "--state", device.state]);
+      if (result.code !== 0) throw new Error(`cns up failed on ${device.name}:\n${result.output}`);
+      daemons.push(device);
+      return device.port;
+    },
+    /**
+     * Pair two devices: `host`, whose daemon runs, prints an invite that `guest` pastes. Each
+     * saves the other under its name. `hostGrants` is what the guest may do on the host;
+     * `guestGrants` what the host may do on the guest.
+     */
+    async pair(host: TestDevice, guest: TestDevice, { hostGrants = "all", guestGrants = "none" }: { hostGrants?: string; guestGrants?: string } = {}) {
+      const inviting = launchCli(t, ["pair", "--yes", "--name", guest.name, "--grant", hostGrants, "--state", host.state], { env: host.env });
+      inviting.child.stdin.end();
+      await inviting.waitFor("Invite: cns1:");
+      const invite = /Invite: (cns1:[A-Za-z0-9_-]+)/.exec(inviting.stdout)![1]!;
+      const accepting = await cli(guest, ["pair", invite, "--yes", "--name", host.name, "--grant", guestGrants, "--state", guest.state]);
+      if (accepting.code !== 0) throw new Error(`Pairing failed on ${guest.name}:\n${accepting.output}`);
+      if (await inviting.exited !== 0) throw new Error(`Pairing failed on ${host.name}:\n${inviting.output}`);
+    },
+  };
+}
+
+/**
+ * The ID a daemon gave its link to the paired device saved as `name`. Once paired, both
+ * daemons dial each other and keep one of the two links, so this waits until one settles.
+ */
+export async function settledLink(control: Awaited<ReturnType<typeof connectControl>>, name: string, timeoutMs = 15000): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  let seen: string | undefined;
+  let since = 0;
+  for (;;) {
+    const links = (await control.controller.peers()).filter((peer) => peer.peer?.name === name && peer.peer.daemon);
+    const id = links.length === 1 ? links[0]!.id : undefined;
+    if (id && id === seen && Date.now() - since >= 1000) return id;
+    if (id !== seen) { seen = id; since = Date.now(); }
+    if (Date.now() > deadline) throw new Error(`No settled link to ${name}`);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
 }
