@@ -1,3 +1,4 @@
+import path from "node:path";
 import os from "node:os";
 import readline from "node:readline";
 import { AuthError } from "../auth.js";
@@ -13,12 +14,14 @@ import { describeGrants, expandGrants, findPairedPeer, getPeer, listPeers, saveP
 import { plain } from "../terminal.js";
 import type { ShellApi } from "../shell.js";
 import { RefusingShell } from "../refusing-shell.js";
-import { connectControl, removeStaleState, startDaemon, type ControlConnection } from "./daemon.js";
+import { connectControl, daemonStatePath, removeStaleState, startDaemon, stopDaemon, type ControlConnection } from "./daemon.js";
+import { selfInvocation } from "../runtime.js";
+import { describeService, installService, installedService, lingering, serviceEnvironment, serviceFile, serviceKind, serviceName, startService, uninstallService } from "../service.js";
 
 /** How long the invited device waits for the inviting person to decide. */
 const PROPOSAL_WAIT_MS = 10 * 60 * 1000;
 
-export interface UpOptions { bind?: string; port?: string; relay?: string; state?: string }
+export interface UpOptions { bind?: string; port?: string; relay?: string; state?: string; install?: boolean; uninstall?: boolean }
 export interface PairOptions { name?: string; yes?: boolean; request?: string; grant?: string; expires?: string; state?: string }
 export interface PeersOptions { json?: boolean; state?: string }
 export interface StatusOptions { json?: boolean; state?: string }
@@ -84,6 +87,31 @@ async function chooseName(prompt: Prompt, question: string, given: string | unde
   }
 }
 
+/** Where the paired daemon listens and the relay it registers at, from the options, then the environment, then the defaults. */
+function daemonSettings(options: { bind?: string; port?: string; relay?: string }): { bind: string; port: number; relay?: string } {
+  const bind = options.bind ?? process.env.CNS_BIND ?? "0.0.0.0";
+  const port = Number(options.port ?? process.env.CNS_PORT ?? 47381);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("--port requires an integer from 1 to 65535.");
+  const relay = options.relay ?? process.env.CNS_RELAY;
+  if (relay) {
+    relayEndpoint(relay, "accept", "A".repeat(43)); // Refuse a malformed relay URL before starting anything.
+    if (new URL(relay).protocol === "ws:" && !isLoopback(new URL(relay).hostname)) console.error("The relay URL is ws://, so the relay token and registration travel unencrypted; links themselves stay encrypted. Use wss:// for a relay beyond this machine.");
+  }
+  return { bind, port, ...relay ? { relay } : {} };
+}
+
+/** The control connection of a daemon that is starting, once it answers. */
+async function awaitControl(statePath: string | undefined, timeoutMs = 15_000): Promise<ControlConnection> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try { return await connectControl(statePath); }
+    catch (error) {
+      if (Date.now() >= deadline) throw new Error(`The daemon did not start within ${timeoutMs / 1000} seconds: ${errorMessage(error)}`, { cause: error });
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+}
+
 /** The local paired daemon, started if it is not running, or if the one that was has crashed. */
 async function pairedDaemon(options: { bind?: string; port?: string; relay?: string; state?: string }, quiet = false): Promise<{ control: ControlConnection; started: boolean }> {
   const { created } = ensureIdentity();
@@ -107,14 +135,21 @@ async function pairedDaemon(options: { bind?: string; port?: string; relay?: str
       throw error;
     }
   }
-  const bind = options.bind ?? process.env.CNS_BIND ?? "0.0.0.0";
-  const port = Number(options.port ?? process.env.CNS_PORT ?? 47381);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("--port requires an integer from 1 to 65535.");
-  const relay = options.relay ?? process.env.CNS_RELAY;
-  if (relay) {
-    relayEndpoint(relay, "accept", "A".repeat(43)); // Refuse a malformed relay URL before starting anything.
-    if (new URL(relay).protocol === "ws:" && !isLoopback(new URL(relay).hostname)) console.error("The relay URL is ws://, so the relay token and registration travel unencrypted; links themselves stay encrypted. Use wss:// for a relay beyond this machine.");
+  const service = installedService(daemonStatePath(options.state));
+  if (service) {
+    // The installed service owns the daemon's settings; start it rather than a second, unsupervised daemon.
+    const given = (["bind", "port", "relay"] as const).filter((name) => options[name] !== undefined);
+    if (given.length) console.error(`The installed service's settings apply, not --${given.join(", --")}. Run cns up --install with them to change it.`);
+    try {
+      startService(service.kind);
+      const control = await awaitControl(options.state);
+      if (!quiet) console.error(`Started the peer daemon through ${describeService(service.kind)}.`);
+      return { control, started: true };
+    } catch (error) {
+      console.error(`Cannot start the installed service (${errorMessage(error)}); starting the daemon without it.`);
+    }
   }
+  const { bind, port, relay } = daemonSettings(options);
   const daemon = await startDaemon({ bind, port, url: endpointUrl(bind, port), remote: !isLoopback(bind), state: options.state, paired: true, ...relay ? { relay } : {} });
   if (!quiet) console.error(`Started the peer daemon (pid ${daemon.pid}) listening at ${daemon.url}. Log: ${daemon.log}`);
   return { control: await connectControl(options.state), started: true };
@@ -122,11 +157,15 @@ async function pairedDaemon(options: { bind?: string; port?: string; relay?: str
 
 /** `cns up`: run this device as a paired peer. */
 export async function up(options: UpOptions): Promise<void> {
+  if (options.install && options.uninstall) throw new Error("Use either --install or --uninstall, not both.");
+  if (options.uninstall) { await uninstall(options); return; }
+  if (options.install) await install(options);
   const { control, started } = await pairedDaemon(options, true);
   try {
     const status = await control.remote.status();
     const peers = await control.controller.peers();
-    console.log(`${started ? "Started" : "Running"} as ${status.identity?.fingerprint} (pid ${status.pid}), listening at ${status.url}.`);
+    const service = installedService(daemonStatePath(options.state));
+    console.log(`${started ? "Started" : "Running"} as ${status.identity?.fingerprint} (pid ${status.pid}${service ? `, ${describeService(service.kind)}` : ""}), listening at ${status.url}.`);
     if (status.addresses?.length) console.log(`Reachable at ${status.addresses.join(", ")}.`);
     if (status.relay) console.log(`Relay: ${redactRelay(status.relay)}${status.relayRegistered ? ", registered" : ", registering"}.`);
     const paired = listPeers().filter((peer) => peer.kind === "paired");
@@ -134,6 +173,64 @@ export async function up(options: UpOptions): Promise<void> {
       ? `Paired devices: ${paired.map((peer) => `${peer.name}${peers.some((connected) => connected.peer?.daemon && connected.peer.fingerprint === peer.fingerprint) ? " (online)" : ""}`).join(", ")}.`
       : "No paired devices yet. Run cns pair here and paste the invite on the other device.");
   } finally { control.close(); }
+}
+
+function requireServiceKind() {
+  const kind = serviceKind();
+  if (!kind) throw new Error("cns up --install supports macOS (launchd) and Linux (systemd). On this platform, start cns up from your system's startup mechanism.");
+  return kind;
+}
+
+/** `cns up --install`: run the daemon as a launchd agent or systemd user service, so it starts at login and restarts after a crash. */
+async function install(options: UpOptions): Promise<void> {
+  const kind = requireServiceKind();
+  const { created } = ensureIdentity();
+  if (created) console.error(`Created this device's identity at ${identityPath()}. Keep the file private; losing it means pairing again.`);
+  const state = daemonStatePath(options.state);
+  // Settings not given now are kept from a daemon that is running, so installing makes it permanent as it is.
+  let running: { bind: string; port: number; relay?: string } | undefined;
+  let control: ControlConnection | undefined;
+  try { control = await connectControl(state); }
+  catch { await removeStaleState(state); }
+  if (control) {
+    try {
+      const status = await control.remote.status();
+      if (!status.paired) throw new Error("A daemon that is not for paired devices is running. Stop it with cns stop, then run cns up --install.");
+      running = { bind: status.bind, port: status.port, ...status.relay ? { relay: status.relay } : {} };
+    } finally { control.close(); }
+  }
+  const settings = daemonSettings({
+    bind: options.bind ?? running?.bind,
+    port: options.port ?? (running ? String(running.port) : undefined),
+    relay: options.relay ?? running?.relay,
+  });
+  const file = serviceFile(kind, {
+    program: selfInvocation(["listen", "--no-repl", "--paired", "--service", "--state", state, "--bind", settings.bind, "--port", String(settings.port)]),
+    // The relay URL may carry its token: the service file is private, and the daemon reads it from its environment.
+    env: { ...serviceEnvironment(), ...settings.relay ? { CNS_DAEMON_RELAY: settings.relay } : {} },
+    log: path.join(path.dirname(state), "service.log"),
+  });
+  if (running) {
+    await stopDaemon(state);
+    console.error("Stopped the running daemon; the service runs it from now on.");
+  }
+  await installService(file);
+  console.error(`Installed ${describeService(kind)} at ${file.path}. It starts the daemon at login and restarts it if it fails; cns stop stops it until the next cns up or login.`);
+  if (kind === "launchd") console.error(`Its log: ${path.join(path.dirname(state), "service.log")}.`);
+  else {
+    console.error("Its log: journalctl --user -u cns.");
+    if (lingering() === false) console.error(`systemd stops user services when you log out. To keep the daemon running without a login, run: loginctl enable-linger ${os.userInfo().username}`);
+  }
+  console.error("Run cns up --install again after moving or upgrading cns to a new path, or to change --bind, --port or --relay.");
+  (await awaitControl(options.state)).close();
+}
+
+/** `cns up --uninstall`: stop the service's daemon and remove the service. */
+async function uninstall(options: UpOptions): Promise<void> {
+  if (options.bind !== undefined || options.port !== undefined || options.relay !== undefined) throw new Error("--uninstall takes no --bind, --port or --relay.");
+  const kind = requireServiceKind();
+  if (await uninstallService(kind)) console.log(`Removed the ${serviceName(kind)}; the daemon is stopped. Run cns up to start it without the service.`);
+  else console.log(`No ${serviceName(kind)} is installed.`);
 }
 
 /** `cns pair`: print an invite and wait for the other device; `cns pair INVITE`: pair with the device that printed it. */

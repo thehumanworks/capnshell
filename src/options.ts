@@ -27,6 +27,7 @@ const peerOptionsSchema = z.strictObject({
   paired: z.boolean().default(false),
   relay: z.string().min(1).optional(),
   daemon: z.boolean().default(false),
+  service: z.boolean().default(false),
   state: z.string().min(1).optional(),
   cwd: z.string().min(1).optional(),
   timeout: z.string().regex(/^\d+$/, "--timeout requires an integer.").transform(Number)
@@ -61,6 +62,8 @@ export interface PeerConfig {
   /** The paired device this connection must reach, from a saved peer name, and every address saved for it. */
   expect?: { name: string; publicKey: string; outgoing: Permission[]; addresses: string[] };
   daemon: boolean;
+  /** Run the paired daemon in the foreground under launchd or systemd: it serves its control endpoint without a parent. */
+  service?: boolean;
   state?: string;
   /** The shell string for run; optional for tty, which otherwise starts a login shell. */
   command?: string;
@@ -129,7 +132,7 @@ function resolveOptions(role: PeerRole, command: Command, destination: string | 
       delete options[name];
     }
   }
-  const { bind, port, repl, allowRemote, oneWay, paired, relay, daemon, state, cwd, timeout, cols, rows, term, screen, history, name, attach, literal, until, json } = peerOptionsSchema.parse(options);
+  const { bind, port, repl, allowRemote, oneWay, paired, relay, daemon, service, state, cwd, timeout, cols, rows, term, screen, history, name, attach, literal, until, json } = peerOptionsSchema.parse(options);
   if (relay !== undefined) {
     if (!paired) throw new Error("--relay is for the paired daemon; start it with cns up --relay URL.");
     relayEndpoint(relay, "accept", "A".repeat(43));
@@ -146,6 +149,7 @@ function resolveOptions(role: PeerRole, command: Command, destination: string | 
   if (mode === "listen" && !isLoopback(bind) && !allowRemote && !paired) {
     throw new Error("A non-loopback listener exposes shell access. Add --allow-remote only for a trusted LAN/VPN test.");
   }
+  if (service && (!paired || daemon)) throw new Error("--service runs the paired daemon in the foreground; cns up --install sets it up.");
   if (paired && oneWay) throw new Error("A paired listener grants each device what it was granted; --one-way does not apply.");
   let url = endpointUrl(bind, port);
   if (role === "connect" || destination !== undefined) {
@@ -153,7 +157,7 @@ function resolveOptions(role: PeerRole, command: Command, destination: string | 
     url = peerUrl(destination);
   }
   return {
-    role, mode, bind, port, url, noRepl: role === "run" || role === "tty" || !repl, oneWay, paired, relay, expect, daemon, state, cwd, timeoutMs: timeout,
+    role, mode, bind, port, url, noRepl: role === "run" || role === "tty" || !repl, oneWay, paired, relay, expect, daemon, service, state, cwd, timeoutMs: timeout,
     cols, rows, term, screen: screen || role === "screen" ? { history: history ?? 0 } : undefined,
     name: name ?? attach, attach: attach !== undefined, literal, until, json,
     remote: mode === "listen" ? !isLoopback(bind) : !isLoopback(new URL(url).hostname),
@@ -185,7 +189,8 @@ export function addPeerCommands(program: Command, run: (config: PeerConfig) => v
     if (role !== "listen") command.option("--peer <name>", "Use a saved peer: a paired device, or an address alias");
     if (role === "listen") {
       command.addOption(new Option("--paired", "Accept only paired devices (used by cns up)").hideHelp())
-        .addOption(new Option("--relay <url>", "With --paired: also register at this relay (used by cns up)").hideHelp());
+        .addOption(new Option("--relay <url>", "With --paired: also register at this relay (used by cns up)").hideHelp())
+        .addOption(new Option("--service", "With --paired: run the daemon in the foreground for launchd or systemd (used by cns up --install)").hideHelp());
     }
     if (role !== "connect") {
       command.addOption(new Option("--bind <address>", `Numeric ${role === "listen" ? "interface" : "remote peer"} address (default: 127.0.0.1)`).env("CNS_BIND"))
