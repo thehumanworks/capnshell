@@ -285,3 +285,14 @@ export async function stopDaemon(statePath?: string): Promise<number> {
   }
   return state.pid;
 }
+
+/** This device's relay, if it has one: CNS_RELAY, else the relay of the paired daemon running here. */
+export async function localRelay(state?: string): Promise<string | undefined> {
+  if (process.env.CNS_RELAY) return process.env.CNS_RELAY;
+  let control: ControlConnection;
+  try { control = await connectControl(state); } catch { return undefined; }
+  try {
+    const status = await control.remote.status();
+    return status.paired ? status.relay : undefined;
+  } catch { return undefined; } finally { control.close(); }
+}
