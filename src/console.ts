@@ -19,7 +19,7 @@ export type RemoteFiles = Pick<RpcStub<ShellApi>, "stat" | "readFile" | "writeFi
 export interface PeerController {
   peers(): Promise<PeerSummary[]>;
   info(id: string): Promise<ShellInfo>;
-  /** Aborting `signal` kills the command, unless the peer's cns predates ShellApi.fork. */
+  /** Aborting `signal` kills the command. */
   run(id: string, command: string, options: RunOptions, signal?: AbortSignal): Promise<RunResult>;
   openPty(id: string, sink: PtySink, options: PtyOptions): Promise<RemotePty>;
   ptySessions(id: string): Promise<PtySessionInfo[]>;
@@ -28,7 +28,6 @@ export interface PeerController {
   /**
    * A fork of the peer's shell with its own command limit, for callers that use the
    * whole ShellApi: commands, files and sessions. Releasing it kills its commands.
-   * Rejects when the peer's cns predates ShellApi.fork.
    */
   shell(id: string): Promise<RpcStub<ShellApi>>;
 }
@@ -37,7 +36,7 @@ export interface PeerController {
 export interface ConnectionController extends PeerController {
   /**
    * Like run, but stream the output to `sink` as it arrives and, with `input`, feed the
-   * command's standard input from it. A peer whose cns predates exec input closes it.
+   * command's standard input from it.
    */
   exec(id: string, sink: ExecSink, command: string, options: RunOptions, input?: ExecInput): Promise<ExecResult>;
   /** The peer's file operations on this connection. Unlike `shell`, they need only the files grant. */

@@ -198,7 +198,6 @@ export async function startPeer(config: PeerConfig): Promise<void> {
       if (!signal) return await plain(remote.run(command, options));
       signal.throwIfAborted();
       const shell = await forkShell(remote);
-      if (!shell) return await plain(remote.run(command, options));
       // Releasing the fork makes the peer kill the command.
       const release = () => shell[Symbol.dispose]();
       signal.addEventListener("abort", release, { once: true });
@@ -228,9 +227,7 @@ export async function startPeer(config: PeerConfig): Promise<void> {
       return await requireSession(id).remote.ptySession(name) as unknown as RemoteNamedPty;
     },
     async shell(id) {
-      const shell = await forkShell(requireSession(id).remote);
-      if (!shell) throw new Error(`Peer ${id} runs a cns without fork; update it to use its shell this way.`);
-      return shell;
+      return await forkShell(requireSession(id).remote);
     },
   };
 
@@ -276,8 +273,8 @@ export async function startPeer(config: PeerConfig): Promise<void> {
    * Ask a paired device on a standing link where it can be reached now and what it lets
    * this device do there, and save both in its record: a device that moved networks or
    * changed relays is then dialed where it is rather than where it was, and the access
-   * `cns peers` shows follows grants changed on that device since pairing. A device whose
-   * cns predates either question leaves that part of the record as saved.
+   * `cns peers` shows follows grants changed on that device since pairing. A question that
+   * fails leaves that part of the record as saved.
    */
   async function learnFromPeer(session: Session) {
     const peer = session.peer!;
