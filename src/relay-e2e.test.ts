@@ -118,7 +118,7 @@ test("devices that cannot reach each other directly pair and link through the bu
   const { Client } = await import("@modelcontextprotocol/client");
   const { StdioClientTransport } = await import("@modelcontextprotocol/client/stdio");
   const { cliInvocation, cliEnvironment } = await import("./test-support.js");
-  const invocation = cliInvocation(["mcp", "--daemon", "--state", laptop.state]);
+  const invocation = cliInvocation(["mcp", "--state", laptop.state]);
   const client = new Client({ name: "test", version: "1" });
   await client.connect(new StdioClientTransport({ command: invocation.file, args: invocation.args, env: cliEnvironment(laptop.env) as Record<string, string> }));
   cleanups.push(() => client.close());

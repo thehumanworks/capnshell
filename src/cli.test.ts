@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { execa } from "execa";
+import { generateIdentity } from "./identity.js";
+import { savePairedPeer } from "./peers.js";
 import { cliEnvironment, cliInvocation } from "./test-support.js";
 
 function runCli(args: string[], cwd: string, reject = true) {
@@ -20,29 +22,26 @@ async function temporaryDirectory(t: TestContext): Promise<string> {
 test("the CLI exposes only cross-platform peer commands with side-effect-free help", async (t) => {
   const cwd = await temporaryDirectory(t);
   const { stdout } = await runCli(["--help"], cwd);
-  for (const command of ["listen", "connect", "run", "tty", "cp", "sessions", "keys", "screen", "kill", "attach", "stop"]) {
+  for (const command of ["up", "pair", "peers", "run", "tty", "cp", "sessions", "keys", "screen", "kill", "mcp", "attach", "stop"]) {
     assert.ok(stdout.includes(command));
     const result = await runCli([command, "--help"], cwd);
     assert.match(result.stdout, /Usage: cns/);
     assert.doesNotMatch(result.stdout, /listening at/);
-    if (command !== "connect" && command !== "attach" && command !== "stop") {
-      assert.match(result.stdout, /CNS_BIND/);
-      assert.match(result.stdout, /CNS_PORT/);
-    }
     if (command === "run" || command === "tty") assert.match(result.stdout, /CNS_CWD/);
   }
+  // The daemon command is cns up's to run, and the unauthenticated commands are gone.
+  assert.doesNotMatch(stdout, /^\s+(daemon|listen|connect)\b/m);
   assert.doesNotMatch(stdout, /bundle-mac|install-windows|integration-smoke|\bwindows\b|\bwsl\b/);
   assert.deepEqual(await readdir(cwd), []);
 });
 
-test("CLI syntax errors and removed setup commands exit nonzero without side effects", async (t) => {
+test("CLI syntax errors and removed commands exit nonzero without side effects", async (t) => {
   const cwd = await temporaryDirectory(t);
-  for (const args of [[], ["unknown"], ["connect"], ["listen", "--bogus"],
-    ["run"], ["run", "ws://127.0.0.1:1"],
-    ["run", "ws://127.0.0.1:1", "echo bad"],
-    ["run", "ws://127.0.0.1:1", "--", "echo", "bad"],
-    ["run", "ws://127.0.0.1:1", "--", ""],
+  for (const args of [[], ["unknown"], ["connect"], ["connect", "ws://127.0.0.1:1"], ["listen"], ["listen", "--bogus"],
+    ["run"], ["run", "ws://127.0.0.1:1", "--", "echo bad"], ["run", "--", "echo bad"],
+    ["run", "--peer", "studio", "--", "echo bad"], ["peer", "add", "studio", "ws://127.0.0.1:1"],
     ["tty", "htop"], ["tty", "--", "echo", "bad"], ["tty", "--cols", "0"], ["tty", "--history", "5"],
+    ["mcp", "--daemon"], ["daemon"],
     ["bundle-mac"], ["install-windows"], ["integration-smoke"], ["windows"], ["wsl"]]) {
     const result = await runCli(args, cwd, false);
     assert.notEqual(result.exitCode, 0, `Expected rejection: ${args.join(" ")}`);
@@ -80,7 +79,7 @@ test("the device identity is created once and reported consistently", { skip: pr
   assert.equal(json.path, path.join(env.CNS_CONFIG_DIR, "identity.json"));
 });
 
-test("saved peer addresses persist across CLI invocations", { skip: process.platform === "win32" }, async (t) => {
+test("paired devices are listed and removed across CLI invocations", { skip: process.platform === "win32" }, async (t) => {
   const cwd = await temporaryDirectory(t);
   const env = { ...cliEnvironment(), CNS_CONFIG_DIR: path.join(cwd, "config") };
   await mkdir(env.CNS_CONFIG_DIR, { mode: 0o700 });
@@ -88,18 +87,23 @@ test("saved peer addresses persist across CLI invocations", { skip: process.plat
     const invocation = cliInvocation(args);
     return execa(invocation.file, invocation.args, { cwd, reject, env });
   }
-  // An empty address book lists nothing as text and an empty array as JSON.
+  // No paired devices list nothing as text and an empty array as JSON.
   assert.equal((await call(["peer", "list"])).stdout, "");
   assert.deepEqual(JSON.parse((await call(["peer", "list", "--json"])).stdout), []);
-  await call(["peer", "add", "studio", "ws://127.0.0.1:12345"]);
-  await call(["peer", "add", "build", "ws://127.0.0.1:12346"]);
-  assert.match((await call(["peer", "list"])).stdout, /studio\s+ws:\/\/127\.0\.0\.1:12345\//);
-  // JSON lists the same entries, sorted by name, with name before url in each object.
-  const json = (await call(["peer", "list", "--json"])).stdout;
-  assert.deepEqual(JSON.parse(json), [{ name: "build", url: "ws://127.0.0.1:12346/" }, { name: "studio", url: "ws://127.0.0.1:12345/" }]);
-  assert.deepEqual(JSON.parse(json).map((peer: object) => Object.keys(peer)), [["name", "url"], ["name", "url"]]);
-  await call(["peer", "remove", "build"]);
-  assert.notEqual((await call(["peer", "add", "studio", "ws://127.0.0.1:12346"], false)).exitCode, 0);
+  const studio = generateIdentity();
+  const build = generateIdentity();
+  process.env.CNS_CONFIG_DIR = env.CNS_CONFIG_DIR;
+  try {
+    for (const [name, identity, port] of [["studio", studio, 12345], ["build", build, 12346]] as const) {
+      savePairedPeer(name, { publicKey: identity.publicKey, addresses: [`ws://127.0.0.1:${port}`], pairedAt: new Date().toISOString(), grants: { incoming: [], outgoing: ["shell"] } });
+    }
+  } finally { delete process.env.CNS_CONFIG_DIR; }
+  assert.equal((await call(["peer", "list"])).stdout, `build\t${build.fingerprint}\tws://127.0.0.1:12346\nstudio\t${studio.fingerprint}\tws://127.0.0.1:12345`);
+  // JSON lists the same devices, sorted by name.
+  const json = JSON.parse((await call(["peer", "list", "--json"])).stdout);
+  assert.deepEqual(json.map((peer: { name: string; fingerprint: string }) => [peer.name, peer.fingerprint]), [["build", build.fingerprint], ["studio", studio.fingerprint]]);
+  assert.deepEqual(json.map((peer: object) => Object.keys(peer)), [["name", "fingerprint", "publicKey", "addresses", "grants"], ["name", "fingerprint", "publicKey", "addresses", "grants"]]);
+  assert.equal((await call(["peer", "remove", "build"])).stdout, "Removed build.");
   // Errors are the same with --json: a message on stderr, nothing on stdout and a failing status.
   await chmod(env.CNS_CONFIG_DIR, 0o755);
   for (const args of [["peer", "list"], ["peer", "list", "--json"]]) {
@@ -109,7 +113,7 @@ test("saved peer addresses persist across CLI invocations", { skip: process.plat
   }
   await chmod(env.CNS_CONFIG_DIR, 0o700);
   await call(["peer", "remove", "studio"]);
-  const missing = await call(["run", "--peer", "studio", "--", "pwd"], false);
+  const missing = await call(["run", "studio", "--", "pwd"], false);
   assert.notEqual(missing.exitCode, 0);
-  assert.match(missing.stderr, /Unknown peer alias/);
+  assert.match(missing.stderr, /No paired device is saved as studio/);
 });

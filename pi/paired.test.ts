@@ -49,7 +49,7 @@ test("Pi attaches to a paired device by name over an encrypted link, within its 
   const target = parseTarget("studio");
   assert.equal(target.kind, "paired");
   assert.equal(targetLabel(target), "studio");
-  assert.deepEqual(parseTarget("elsewhere"), { kind: "url", url: "ws://elsewhere:47381/" }, "an unknown word is still a hostname");
+  assert.throws(() => parseTarget("elsewhere"), /No paired device is saved as elsewhere/, "an unknown word is not a hostname");
   const host = await connectPaired(target as Extract<typeof target, { kind: "paired" }>, AbortSignal.timeout(10000));
   t.after(() => host.close());
   assert.equal(host.info.hostname, os.hostname());
@@ -74,10 +74,8 @@ test("Pi attaches to a paired device by name over an encrypted link, within its 
   assert.equal(ran, "shell-only");
   await assert.rejects(shelled.stat(shelled.home), /Permission denied: files not granted/);
 
-  // A saved name that cannot be read is an error, never a hostname; an address alias is its URL.
+  // A saved name that cannot be read is an error, never a hostname.
   const { writeFile } = await import("node:fs/promises");
   await writeFile(path.join(shellOnly.dir, "peers", "broken"), '{"version":9}', { mode: 0o600 });
   assert.throws(() => parseTarget("broken"), /The saved peer broken cannot be read/);
-  assert.equal((await cli(shellOnly, ["peer", "add", "box", "ws://127.0.0.1:1"])).code, 0);
-  assert.deepEqual(parseTarget("box"), { kind: "url", url: "ws://127.0.0.1:1/" });
 });

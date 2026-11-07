@@ -8,9 +8,9 @@ import { builtInRelay } from "../relay-config.js";
 import { errorMessage } from "../errors.js";
 import { ensureIdentity, fingerprint as fingerprintOf, identityPath, loadIdentity } from "../identity.js";
 import { allPrivate } from "../addresses.js";
-import { endpointUrl, isLoopback } from "../options.js";
+import { endpointUrl } from "../options.js";
 import { decisionSchema, decodeInvite, DEFAULT_INVITE_MS, MAX_INVITE_MS, suggestedName, type Decision, type Invite, type PairingApi, type Proposal } from "../pairing.js";
-import { peerFileExists, peerNamePattern, removeAlias, validatePeerUrl } from "../aliases.js";
+import { peerFileExists, peerNamePattern, removePeerFile, validatePeerUrl } from "../peer-files.js";
 import { describeGrants, expandGrants, findPairedPeer, getPeer, listPeers, savePairedPeer, updatePairedPeer, PERMISSIONS, type Permission } from "../peers.js";
 import { plain } from "../terminal.js";
 import { selfCheck, type SelfFacts } from "../self-check.js";
@@ -130,16 +130,7 @@ async function pairedDaemon(options: { bind?: string; port?: string; state?: str
     // A daemon that crashed, or a reboot, leaves its state file behind; remove it once its process is gone.
     if (!missing && !(await removeStaleState(options.state))) throw error;
   }
-  if (running) {
-    try {
-      const status = await running.remote.status();
-      if (!status.paired) throw new Error("A daemon that is not for paired devices is running. Stop it with cns stop, then run cns up.");
-      return { control: running, started: false };
-    } catch (error) {
-      running.close();
-      throw error;
-    }
-  }
+  if (running) return { control: running, started: false };
   const service = installedService(daemonStatePath(options.state));
   if (service) {
     // The installed service owns the daemon's settings; start it rather than a second, unsupervised daemon.
@@ -155,7 +146,7 @@ async function pairedDaemon(options: { bind?: string; port?: string; state?: str
     }
   }
   const { bind, port } = daemonSettings(options);
-  const daemon = await startDaemon({ bind, port, url: endpointUrl(bind, port), remote: !isLoopback(bind), state: options.state, paired: true });
+  const daemon = await startDaemon({ bind, port, url: endpointUrl(bind, port), state: options.state });
   if (!quiet) console.error(`Started the peer daemon (pid ${daemon.pid}) listening at ${daemon.url}. Log: ${daemon.log}`);
   return { control: await connectControl(options.state), started: true };
 }
@@ -173,7 +164,7 @@ export async function up(options: UpOptions): Promise<void> {
     console.log(`${started ? "Started" : "Running"} as ${status.identity?.fingerprint} (pid ${status.pid}${service ? `, ${describeService(service.kind)}` : ""}), listening at ${status.url}.`);
     if (status.addresses?.length) console.log(`Reachable at ${status.addresses.join(", ")}.`);
     if (status.relay) console.log(`Relay: ${status.relay}${status.relayRegistered ? ", registered" : ", registering"}.`);
-    const paired = listPeers().filter((peer) => peer.kind === "paired");
+    const paired = listPeers();
     console.log(paired.length
       ? `Paired devices: ${paired.map((peer) => `${peer.name}${peers.some((connected) => connected.peer?.daemon && connected.peer.fingerprint === peer.fingerprint) ? " (online)" : ""}`).join(", ")}.`
       : "No paired devices yet. Run cns pair here and paste the invite on the other device.");
@@ -200,7 +191,6 @@ async function install(options: UpOptions): Promise<void> {
   if (control) {
     try {
       const status = await control.remote.status();
-      if (!status.paired) throw new Error("A daemon that is not for paired devices is running. Stop it with cns stop, then run cns up --install.");
       running = { bind: status.bind, port: status.port };
     } finally { control.close(); }
   }
@@ -209,7 +199,7 @@ async function install(options: UpOptions): Promise<void> {
     port: options.port ?? (running ? String(running.port) : undefined),
   });
   const file = serviceFile(kind, {
-    program: selfInvocation(["listen", "--no-repl", "--paired", "--service", "--state", state, "--bind", settings.bind, "--port", String(settings.port)]),
+    program: selfInvocation(["daemon", "--service", "--state", state, "--bind", settings.bind, "--port", String(settings.port)]),
     env: serviceEnvironment(),
     log: path.join(path.dirname(state), "service.log"),
   });
@@ -327,14 +317,13 @@ async function acceptInvite(text: string, options: PairOptions): Promise<void> {
     if (askGrants) offers = await chooseGrants(prompt, name);
     // Our own daemon's addresses, if it runs, so the other device can dial back.
     let addresses: string[] | undefined;
-    let pairedDaemonRuns = false;
+    let daemonRuns = false;
     try { control = await connectControl(options.state); } catch { control = undefined; }
     if (control) {
       try {
-        const status = await control.remote.status();
-        pairedDaemonRuns = !!status.paired;
-        if (status.paired) addresses = status.addresses;
-      } catch { /* Not a daemon this device can use; pair without dialing back. */ }
+        addresses = (await control.remote.status()).addresses;
+        daemonRuns = true;
+      } catch { /* A daemon that does not answer; pair without dialing back. */ }
     }
     try { ({ channel } = await connectFirst(invite.addresses, identity, { expect: invite.key, invite: { id: invite.id, secret: invite.secret } })); }
     catch (error) {
@@ -365,7 +354,7 @@ async function acceptInvite(text: string, options: PairOptions): Promise<void> {
       throw new Error(`The other device saved the pairing, but this device could not: ${errorMessage(error)}. Remove this device there with cns peer remove, then pair again.`);
     }
     console.log(`Paired with ${name} (${peerFingerprint}). This device may use its: ${describeGrants(decision.granted ?? [])}. It may use this device's: ${describeGrants(offers)}.`);
-    if (control && pairedDaemonRuns) await control.remote.dial(name);
+    if (control && daemonRuns) await control.remote.dial(name);
   } finally {
     channel?.close();
     control?.close();
@@ -395,18 +384,17 @@ export async function status(options: StatusOptions): Promise<void> {
   if (control) {
     try {
       const info = await control.remote.status();
-      daemon = { pid: info.pid, url: info.url, paired: !!info.paired, addresses: info.addresses ?? [], relay: info.relay ?? null, relayRegistered: info.relayRegistered ?? null, startedAt: new Date(info.startedAt).toISOString() };
+      daemon = { pid: info.pid, url: info.url, addresses: info.addresses ?? [], relay: info.relay ?? null, relayRegistered: info.relayRegistered ?? null, startedAt: new Date(info.startedAt).toISOString() };
       for (const [fingerprint, link] of await standingLinks(control)) links.push({ name: link.name, fingerprint, address: link.via, hostname: link.hostname });
     } finally { control.close(); }
   }
-  const paired = listPeers().filter((peer) => peer.kind === "paired");
+  const paired = listPeers();
   if (options.json) {
     console.log(JSON.stringify({ identity: identity ? { publicKey: identity.publicKey, fingerprint: identity.fingerprint } : null, daemon, links, paired: paired.length }, null, 2));
     return;
   }
   console.log(`This device: ${identity ? identity.fingerprint : "no identity yet (cns identity or cns up creates one)"}`);
   if (!daemon) console.log("Daemon:      not running (cns up starts it)");
-  else if (!daemon.paired) console.log(`Daemon:      pid ${daemon.pid} at ${daemon.url}, legacy listener (not for paired devices)`);
   else {
     console.log(`Daemon:      pid ${daemon.pid} at ${daemon.url}${(daemon.addresses as string[]).length ? `, reachable at ${(daemon.addresses as string[]).join(", ")}` : ""}`);
     if (daemon.relay) console.log(`Relay:       ${daemon.relay} (${daemon.relayRegistered ? "registered" : "registering"})`);
@@ -432,13 +420,13 @@ async function doctorSelf(options: DoctorOptions): Promise<void> {
   if (control) {
     try {
       const info = await control.remote.status();
-      daemon = { running: true, pid: info.pid, url: info.url, paired: !!info.paired, addresses: info.addresses ?? [], ...info.identity ? { identity: info.identity } : {}, ...info.relay ? { relay: info.relay } : {}, ...info.relayRegistered !== undefined ? { relayRegistered: info.relayRegistered } : {} };
+      daemon = { running: true, pid: info.pid, url: info.url, addresses: info.addresses ?? [], ...info.identity ? { identity: info.identity } : {}, ...info.relay ? { relay: info.relay } : {}, ...info.relayRegistered !== undefined ? { relayRegistered: info.relayRegistered } : {} };
     } catch (error) {
       daemon = { running: false, error: `it does not answer: ${printable(errorMessage(error))}` };
     } finally { control.close(); }
   }
   const relay = builtInRelay();
-  const { report, lines, exitCode } = selfCheck({ identity, identityPath: identityPath(), daemon, paired: listPeers().filter((peer) => peer.kind === "paired").length, ...relay ? { relay } : {} });
+  const { report, lines, exitCode } = selfCheck({ identity, identityPath: identityPath(), daemon, paired: listPeers().length, ...relay ? { relay } : {} });
   if (options.json) console.log(JSON.stringify(report, null, 2));
   else console.log(lines.join("\n"));
   if (exitCode) process.exitCode = exitCode;
@@ -448,74 +436,69 @@ async function doctorSelf(options: DoctorOptions): Promise<void> {
 export async function doctor(name: string | undefined, options: DoctorOptions): Promise<void> {
   if (name === undefined) return doctorSelf(options);
   const entry = getPeer(name);
-  if (!entry) throw new Error(`Unknown peer: ${name}. cns peers lists the saved ones.`);
-  const report: Record<string, unknown> = { name, kind: entry.kind };
+  if (!entry) throw new Error(`No paired device is saved as ${name}. cns peers lists the paired devices.`);
+  const report: Record<string, unknown> = { name };
   const lines: string[] = [];
-  if (entry.kind === "address") {
-    lines.push(`${name} is a saved address, not a paired device: ${entry.url}. Pair with it to authenticate it.`);
-    report.url = entry.url;
-  } else {
-    const identity = ensureIdentity().identity;
-    report.fingerprint = entry.fingerprint;
-    report.access = entry.grants.outgoing;
-    report.grants = entry.grants.incoming;
-    lines.push(`${name}: paired device ${entry.fingerprint}`, `  This device may use its:  ${describeGrants(entry.grants.outgoing)}`, `  It may use this device's: ${describeGrants(entry.grants.incoming)}`);
-    const accessLine = lines.length - 2;
-    const control = await daemonIfRunning(options.state);
-    let linked = false;
-    if (control) {
-      let via: string | undefined;
-      try { via = (await standingLinks(control)).get(entry.fingerprint)?.via; } finally { control.close(); }
-      linked = via !== undefined;
-      lines.push(`  Daemon link: ${via ? `online (${via})` : "offline"}`);
-    } else lines.push("  Daemon link: no daemon running here (cns up)");
-    report.link = control ? (linked ? "online" : "offline") : "no-daemon";
-    const attempts: Array<{ address: string; result: string; detail?: string }> = [];
-    /** What the device says this one may use there now, from the first address that answers. */
-    let live: Permission[] | undefined;
-    // The saved addresses and, when none is a relay, the built-in relay, as commands dial them.
-    const addresses = dialAddresses(entry, builtInRelay());
-    if (!addresses.length) lines.push("  No saved address: cns peer address NAME ws://HOST:PORT adds one.");
-    for (const address of addresses) {
-      const cancelled = new AbortController();
-      // The deadline covers the whole attempt: connecting, authenticating and the first call.
-      const timer = setTimeout(() => cancelled.abort(new Error("Timed out after 10 s.")), 10_000);
+  const identity = ensureIdentity().identity;
+  report.fingerprint = entry.fingerprint;
+  report.access = entry.grants.outgoing;
+  report.grants = entry.grants.incoming;
+  lines.push(`${name}: paired device ${entry.fingerprint}`, `  This device may use its:  ${describeGrants(entry.grants.outgoing)}`, `  It may use this device's: ${describeGrants(entry.grants.incoming)}`);
+  const accessLine = lines.length - 2;
+  const control = await daemonIfRunning(options.state);
+  let linked = false;
+  if (control) {
+    let via: string | undefined;
+    try { via = (await standingLinks(control)).get(entry.fingerprint)?.via; } finally { control.close(); }
+    linked = via !== undefined;
+    lines.push(`  Daemon link: ${via ? `online (${via})` : "offline"}`);
+  } else lines.push("  Daemon link: no daemon running here (cns up)");
+  report.link = control ? (linked ? "online" : "offline") : "no-daemon";
+  const attempts: Array<{ address: string; result: string; detail?: string }> = [];
+  /** What the device says this one may use there now, from the first address that answers. */
+  let live: Permission[] | undefined;
+  // The saved addresses and, when none is a relay, the built-in relay, as commands dial them.
+  const addresses = dialAddresses(entry, builtInRelay());
+  if (!addresses.length) lines.push("  No saved address: cns peer address NAME ws://HOST:PORT adds one.");
+  for (const address of addresses) {
+    const cancelled = new AbortController();
+    // The deadline covers the whole attempt: connecting, authenticating and the first call.
+    const timer = setTimeout(() => cancelled.abort(new Error("Timed out after 10 s.")), 10_000);
+    try {
+      const { channel } = await connectSecure(address, identity, { expect: entry.publicKey, signal: cancelled.signal });
+      const hangUp = () => channel.close("Timed out");
+      cancelled.signal.addEventListener("abort", hangUp, { once: true });
       try {
-        const { channel } = await connectSecure(address, identity, { expect: entry.publicKey, signal: cancelled.signal });
-        const hangUp = () => channel.close("Timed out");
-        cancelled.signal.addEventListener("abort", hangUp, { once: true });
+        const remote = rpcSession<ShellApi>(channel, new RefusingShell());
         try {
-          const remote = rpcSession<ShellApi>(channel, new RefusingShell());
-          try {
-            const info = await plain(remote.info());
-            attempts.push({ address, result: "ok", detail: printable(`${info.hostname}, ${info.platform}/${info.shell}, encrypted`) });
-            live ??= await liveAccess(remote);
-          } finally { remote[Symbol.dispose](); }
-        } finally {
-          cancelled.signal.removeEventListener("abort", hangUp);
-          channel.close();
-        }
-      } catch (error) {
-        const detail = cancelled.signal.aborted ? "Timed out after 10 s." : printable(errorMessage(error));
-        attempts.push({ address, result: error instanceof AuthError && !cancelled.signal.aborted ? error.code : "unreachable", detail });
-      } finally { clearTimeout(timer); }
-    }
-    report.attempts = attempts;
-    for (const attempt of attempts) lines.push(`  ${attempt.address}${isRelayAddress(attempt.address) ? (entry.addresses.includes(attempt.address) ? " [relay]" : " [built-in relay]") : ""}: ${attempt.result}${attempt.detail ? ` (${attempt.detail})` : ""}`);
-    if (live) {
-      report.access = live;
-      const saved = entry.grants.outgoing;
-      if (live.length !== saved.length || live.some((permission) => !saved.includes(permission))) {
-        // Kept for display only, since the other device enforces it: record what it says now.
-        updatePairedPeer(name, (peer) => ({ ...peer, grants: { ...peer.grants, outgoing: live! } }));
-        lines[accessLine] = `  This device may use its:  ${describeGrants(live)} (changed since it was saved as ${describeGrants(saved)}; saved now)`;
+          const info = await plain(remote.info());
+          attempts.push({ address, result: "ok", detail: printable(`${info.hostname}, ${info.platform}/${info.shell}, encrypted`) });
+          live ??= await liveAccess(remote);
+        } finally { remote[Symbol.dispose](); }
+      } finally {
+        cancelled.signal.removeEventListener("abort", hangUp);
+        channel.close();
       }
-      if (!live.length) lines.push(`  ${noAccessHint([name]).split("\n").slice(0, 2).join("\n  ")}`);
-    }
-    if (attempts.some((attempt) => attempt.result === "identity-changed")) process.exitCode = 3;
-    else if (attempts.some((attempt) => attempt.result === "not-paired")) process.exitCode = 3;
-    else if (!attempts.some((attempt) => attempt.result === "ok")) process.exitCode = 5;
+    } catch (error) {
+      const detail = cancelled.signal.aborted ? "Timed out after 10 s." : printable(errorMessage(error));
+      attempts.push({ address, result: error instanceof AuthError && !cancelled.signal.aborted ? error.code : "unreachable", detail });
+    } finally { clearTimeout(timer); }
   }
+  report.attempts = attempts;
+  for (const attempt of attempts) lines.push(`  ${attempt.address}${isRelayAddress(attempt.address) ? (entry.addresses.includes(attempt.address) ? " [relay]" : " [built-in relay]") : ""}: ${attempt.result}${attempt.detail ? ` (${attempt.detail})` : ""}`);
+  if (live) {
+    report.access = live;
+    const saved = entry.grants.outgoing;
+    if (live.length !== saved.length || live.some((permission) => !saved.includes(permission))) {
+      // Kept for display only, since the other device enforces it: record what it says now.
+      updatePairedPeer(name, (peer) => ({ ...peer, grants: { ...peer.grants, outgoing: live! } }));
+      lines[accessLine] = `  This device may use its:  ${describeGrants(live)} (changed since it was saved as ${describeGrants(saved)}; saved now)`;
+    }
+    if (!live.length) lines.push(`  ${noAccessHint([name]).split("\n").slice(0, 2).join("\n  ")}`);
+  }
+  if (attempts.some((attempt) => attempt.result === "identity-changed")) process.exitCode = 3;
+  else if (attempts.some((attempt) => attempt.result === "not-paired")) process.exitCode = 3;
+  else if (!attempts.some((attempt) => attempt.result === "ok")) process.exitCode = 5;
   if (options.json) console.log(JSON.stringify(report, null, 2));
   else console.log(lines.join("\n"));
 }
@@ -532,7 +515,7 @@ async function liveAccess(remote: RpcStub<ShellApi>): Promise<Permission[] | und
 async function refresh(name: string, state?: string) {
   const control = await daemonIfRunning(state);
   if (!control) return;
-  try { if ((await control.remote.status()).paired) await control.remote.refresh(name); } finally { control.close(); }
+  try { await control.remote.refresh(name); } finally { control.close(); }
 }
 
 /** `cns peer grant NAME GRANTS`: let a paired device do more here, at once and without interrupting its links. */
@@ -563,22 +546,22 @@ export async function address(name: string, urls: string[], options: { remove?: 
   console.log(updated.addresses.length ? `${name} is dialed at: ${updated.addresses.join(", ")}.` : `${name} has no saved address.`);
 }
 
-/** `cns peer remove NAME`: forget a saved peer; for a paired device, the running daemon drops its links at once. */
+/** `cns peer remove NAME`: unpair a device here; the running daemon drops its links at once. */
 export async function removePeer(name: string, options: { state?: string }): Promise<void> {
   let publicKey: string | undefined;
-  try { const entry = getPeer(name); if (entry?.kind === "paired") publicKey = entry.publicKey; }
+  try { publicKey = getPeer(name)?.publicKey; }
   catch { /* An unreadable record is removed all the same. */ }
-  removeAlias(name);
+  removePeerFile(name);
   if (publicKey) {
     const control = await daemonIfRunning(options.state);
     if (control) {
-      try { if ((await control.remote.status()).paired) await control.remote.forget(publicKey); } finally { control.close(); }
+      try { await control.remote.forget(publicKey); } finally { control.close(); }
     }
   }
   console.log(`Removed ${name}.`);
 }
 
-/** `cns peers`: every saved device with its status. */
+/** `cns peers`: every paired device with its status. */
 export async function peers(options: PeersOptions): Promise<void> {
   const saved = listPeers();
   let online = new Map<string, { via: "direct" | "relay" }>();
@@ -588,17 +571,15 @@ export async function peers(options: PeersOptions): Promise<void> {
     catch { /* A daemon that cannot answer: everything is offline. */ }
     finally { control.close(); }
   }
-  const rows = saved.map((peer) => peer.kind === "paired"
-    ? { name: peer.name, kind: "paired" as const, fingerprint: peer.fingerprint, status: online.has(peer.fingerprint) ? "online" : "offline", connection: online.get(peer.fingerprint)?.via ?? null, access: peer.grants.outgoing, grants: peer.grants.incoming, addresses: peer.addresses }
-    : { name: peer.name, kind: "address" as const, status: "unpaired", connection: null, url: peer.url });
+  const rows = saved.map((peer) => ({ name: peer.name, fingerprint: peer.fingerprint, status: online.has(peer.fingerprint) ? "online" : "offline", connection: online.get(peer.fingerprint)?.via ?? null, access: peer.grants.outgoing, grants: peer.grants.incoming, addresses: peer.addresses }));
   if (options.json) { console.log(JSON.stringify(rows, null, 2)); return; }
-  if (!rows.length) { console.error("No saved peers. Run cns pair to pair with another device."); return; }
+  if (!rows.length) { console.error("No paired devices. Run cns pair to pair with another device."); return; }
   const table = [["NAME", "STATUS", "CONNECTION", "ACCESS", "FINGERPRINT"], ...rows.map((row) => [
-    row.name, row.status, row.connection ?? "-", row.kind === "paired" ? describeGrants(row.access) : "-", row.kind === "paired" ? row.fingerprint : row.url,
+    row.name, row.status, row.connection ?? "-", describeGrants(row.access), row.fingerprint,
   ])];
   const widths = table.reduce((max, row) => row.map((cell, index) => Math.max(cell.length, max[index] ?? 0)), [] as number[]);
   console.log(table.map((row) => row.map((cell, index) => index === row.length - 1 ? cell : cell.padEnd(widths[index]!)).join("  ")).join("\n"));
-  const blocked = rows.flatMap((row) => row.kind === "paired" && !row.access.length ? [row.name] : []);
+  const blocked = rows.flatMap((row) => !row.access.length ? [row.name] : []);
   if (blocked.length) console.error(`\n${noAccessHint(blocked)}`);
 }
 

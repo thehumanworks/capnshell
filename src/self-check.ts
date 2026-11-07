@@ -9,7 +9,7 @@ export interface SelfFacts {
   /** The running daemon, or why there is none. */
   daemon:
     | { running: false; error?: string }
-    | { running: true; pid: number; url: string; paired: boolean; identity?: { publicKey: string; fingerprint: string }; addresses: string[]; relay?: string; relayRegistered?: boolean };
+    | { running: true; pid: number; url: string; identity?: { publicKey: string; fingerprint: string }; addresses: string[]; relay?: string; relayRegistered?: boolean };
   /** The relay a daemon started now would use: the built-in one, unless CNS_RELAY changes it. */
   relay?: string;
   /** How many paired devices are saved. */
@@ -20,7 +20,7 @@ export interface AddressCheck { address: string; relay: boolean; private: boolea
 
 export interface SelfReport {
   identity: { fingerprint: string; publicKey: string; path: string } | null;
-  daemon: { pid: number; url: string; paired: boolean; matchesIdentity: boolean | null } | null;
+  daemon: { pid: number; url: string; matchesIdentity: boolean | null } | null;
   relay: { url: string; registered: boolean } | null;
   addresses: AddressCheck[];
   /** Whether a device on another network has an address here it could reach: a public direct address or a registered relay that is not private. */
@@ -65,14 +65,9 @@ export function selfCheck(facts: SelfFacts): { report: SelfReport; lines: string
     lines.push(`Daemon:    not running${daemon.error ? ` (${daemon.error})` : ""}`);
     problems.push("No daemon runs here, so paired devices cannot reach this one and it keeps no standing links. Start it with cns up.");
     exitCode = 5;
-  } else if (!daemon.paired) {
-    reportDaemon = { pid: daemon.pid, url: daemon.url, paired: false, matchesIdentity: null };
-    lines.push(`Daemon:    pid ${daemon.pid} at ${daemon.url}, legacy listener (not for paired devices)`);
-    problems.push("The running daemon is a legacy listener that paired devices cannot use. Stop it with cns stop, then run cns up.");
-    exitCode = 5;
   } else {
     const matches = identity && daemon.identity ? daemon.identity.publicKey === identity.publicKey : null;
-    reportDaemon = { pid: daemon.pid, url: daemon.url, paired: true, matchesIdentity: matches };
+    reportDaemon = { pid: daemon.pid, url: daemon.url, matchesIdentity: matches };
     lines.push(`Daemon:    pid ${daemon.pid} at ${daemon.url}`);
     if (matches === false) {
       lines.push(`           runs as ${daemon.identity!.fingerprint}, not this device's identity`);
@@ -104,7 +99,7 @@ export function selfCheck(facts: SelfFacts): { report: SelfReport; lines: string
   }
 
   const reachableBeyondNetwork = addresses.some((entry) => !entry.private && (!entry.relay || relay?.registered));
-  if (daemon.running && daemon.paired && addresses.length && !reachableBeyondNetwork) {
+  if (daemon.running && addresses.length && !reachableBeyondNetwork) {
     warnings.push(relay
       ? "Every address here is private and the relay is not usable from other networks right now, so only devices on this network can reach this one."
       : "Every address here is private and the relay is off, so only devices on this network can reach this one. Unset CNS_RELAY and restart with cns stop, then cns up.");

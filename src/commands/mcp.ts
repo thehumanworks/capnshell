@@ -6,7 +6,7 @@ import { serve } from "bun";
 import { errorMessage } from "../errors.js";
 import { LegacySessions } from "../mcp/legacy-sessions.js";
 import { createMcpServer } from "../mcp/server.js";
-import { daemonTarget, listenerTarget, type McpTarget } from "../mcp/target.js";
+import { daemonTarget, pairedTarget, type McpTarget } from "../mcp/target.js";
 import type { McpConfig } from "../options.js";
 
 /** Where the Streamable HTTP endpoint answers. */
@@ -15,7 +15,7 @@ const tokenPattern = /^[A-Za-z0-9._~+/-]{32,1024}=*$/;
 
 /** Serve the MCP tools on stdio or Streamable HTTP until stopped. */
 export async function startMcp(config: McpConfig): Promise<void> {
-  const target = config.daemon ? daemonTarget(config.state, config.cwd) : listenerTarget(config.url, config.cwd, config.expect);
+  const target = config.expect ? pairedTarget(config.expect, config.cwd) : daemonTarget(config.state, config.cwd);
   if (config.http) await serveHttp(target, config.http);
   else await serveOnStdio(target);
 }

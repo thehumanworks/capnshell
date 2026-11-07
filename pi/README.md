@@ -10,33 +10,7 @@ The package contains the extension and cns. It also depends on Bun, which runs c
 
 ## Reaching a host
 
-The host connects to Pi, which works from behind NAT:
-
-```sh
-# Pi's machine: CNS_LISTEN=1 pi, or /cns listen in Pi
-cns connect ws://PI_MACHINE:47381    # on the host
-# then in Pi: /cns attach p1
-```
-
-Or Pi connects to a host's listener:
-
-```sh
-cns listen --bind 0.0.0.0 --allow-remote    # on the host
-# then in Pi: /cns attach HOST
-```
-
-| Command | Purpose |
-| --- | --- |
-| `/cns listen` | Start this machine's cns daemon, or use the one running, so hosts can connect. |
-| `/cns status` | The daemon, its peers and where the tools run. |
-| `/cns attach HOST [DIRECTORY]` | Run the tools on `HOST`: a device paired with this one (`cns pair`) by its name, a daemon peer (`p1`), a listener (`host[:port]`) or a `ws://`/`wss://` URL. `DIRECTORY` is absolute or relative to the host's home, which is the default. |
-| `/cns detach` | Run the tools on Pi's machine again. |
-| `/cns run HOST COMMAND` | Run one command on `HOST` and add its output, fenced and labelled with the host and directory, to the conversation. |
-| `/cns stop` | Stop the daemon, for every Pi session and `cns attach` console using it. |
-
-The model gets a `cns` tool with `status`, `attach` and `detach`, to attach to a host you name. While attached, the footer shows the host and its directory. The system prompt tells the model where the tools run and that `~` is the host's home. Commands get the host's environment: nothing from Pi's, such as its `PI_*` session variables, is forwarded.
-
-Or, with devices paired by `cns pair`, attach by name. Pi reaches the device at the first of its saved addresses that answers, directly or through its relay, over an encrypted link that both devices authenticate, and the device's grants decide what Pi's tools may do there (`shell` for `bash` and `!`, `files` for the file tools):
+Hosts are devices paired with Pi's machine by `cns pair`. Pi reaches one at the first of its saved addresses that answers, directly or through the relay built into cns, over an encrypted link that both devices authenticate, and the host's grants decide what Pi's tools may do there (`shell` for `bash` and `!`, `files` for the file tools):
 
 ```sh
 cns up                           # on the host, once
@@ -44,22 +18,35 @@ cns pair                         # on the host; paste the invite on Pi's machine
 # then in Pi: /cns attach studio
 ```
 
+A host can also reach Pi's machine, which works when only one side can be dialed: run `/cns up` in Pi (or start Pi with `CNS_UP=1`), and the daemons of paired devices link to it. `/cns status` lists those links, and `/cns attach p1` attaches to one by its ID.
+
+| Command | Purpose |
+| --- | --- |
+| `/cns up` | Start this machine's cns daemon, or use the one running, so paired devices can link to it. |
+| `/cns status` | The daemon, its linked devices and where the tools run. |
+| `/cns attach HOST [DIRECTORY]` | Run the tools on `HOST`: a paired device's name, or the ID of a device linked to the daemon (`p1`). `DIRECTORY` is absolute or relative to the host's home, which is the default. |
+| `/cns detach` | Run the tools on Pi's machine again. |
+| `/cns run HOST COMMAND` | Run one command on `HOST` and add its output, fenced and labelled with the host and directory, to the conversation. |
+| `/cns stop` | Stop the daemon, for every Pi session and `cns attach` console using it. |
+
+The model gets a `cns` tool with `status`, `attach` and `detach`, to attach to a host you name. While attached, the footer shows the host and its directory. The system prompt tells the model where the tools run and that `~` is the host's home. Commands get the host's environment: nothing from Pi's, such as its `PI_*` session variables, is forwarded. An unknown name is an error: Pi never treats it as a hostname.
+
 ## Configuration
 
 Nothing needs configuring. These environment variables change the defaults:
 
 | Variable | Effect |
 | --- | --- |
-| `CNS_LISTEN` | `1` (or `true`, `yes`, `on`): listen when Pi starts, as `/cns listen` does. `0`, `false`, `no`, `off` or unset: do not. Pi reports any other value and does not listen. |
-| `CNS_BIND` | The address to listen on, a numeric IP. Default `0.0.0.0`, every interface. |
-| `CNS_PORT` | The port to listen on, and the port `/cns attach HOST` uses when `HOST` names none. Default 47381. |
+| `CNS_UP` | `1` (or `true`, `yes`, `on`): start the daemon when Pi starts, as `/cns up` does. `0`, `false`, `no`, `off` or unset: do not. Pi reports any other value and does not start it. |
+| `CNS_BIND` | The address the daemon listens on, a numeric IP. Default `0.0.0.0`, every interface. |
+| `CNS_PORT` | The port the daemon listens on. Default 47381. |
 | `CNS_BIN` | A `cns` executable to run the daemon instead of the package's own. |
 
 ```sh
-export CNS_LISTEN=1 CNS_BIND=100.64.0.7 CNS_PORT=47381   # every Pi session listens on this VPN address
+export CNS_UP=1 CNS_BIND=100.64.0.7 CNS_PORT=47381   # every Pi session starts the daemon, on this VPN address
 ```
 
-Flags do the same for one run of Pi: `--cns-listen`; `--cns-attach HOST`, with `--cns-cwd DIRECTORY`; and `--cns-bin PATH`.
+Flags do the same for one run of Pi: `--cns-up`; `--cns-attach HOST`, with `--cns-cwd DIRECTORY`; and `--cns-bin PATH`.
 
 ## Behaviour
 
@@ -83,4 +70,4 @@ The tools keep Pi's behaviour, with these differences on a host:
 
 ## Security
 
-The listener has **no authentication**. By default it listens on every interface, so anyone who can reach its port can run commands and read and write files on Pi's machine as you. Set `CNS_BIND=127.0.0.1`, or listen only on a trusted LAN or VPN address. Pi's own connections to listeners are one-way: a listener Pi attaches to cannot run commands on Pi's machine.
+The daemon accepts only paired devices, which authenticate with their identities before anything is exported, and each gets only what Pi's machine granted it when pairing (`cns peers` shows it, `cns peer revoke` narrows it). A device granted nothing here can still be used by Pi but cannot run commands or read files on Pi's machine. Links are encrypted end to end, directly or through the relay. Pi's own connections to a host offer nothing back.

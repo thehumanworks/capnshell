@@ -1,8 +1,8 @@
 import { randomBytes } from "node:crypto";
 import path from "node:path";
-import { newWebSocketRpcSession, RpcTarget, type RpcStub } from "capnweb";
+import { RpcTarget, type RpcStub } from "capnweb";
 import type { ControlConnection } from "../src/commands/daemon.js";
-import { closeSocket, forkShell, openSocket } from "../src/connect.js";
+import { forkShell } from "../src/connect.js";
 import { errorMessage } from "../src/errors.js";
 import { RefusingShell } from "../src/refusing-shell.js";
 import {
@@ -314,39 +314,19 @@ function withTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
   ]).finally(() => clearTimeout(timer));
 }
 
-/** Connect to a listener directly, offering it nothing but the handshake. */
-export async function connectUrl(target: Extract<Target, { kind: "url" }>, signal: AbortSignal): Promise<Host> {
-  const socket = await openSocket(target.url, signal);
-  const shell = newWebSocketRpcSession<ShellApi>(socket, new RefusingShell());
-  const release = () => {
-    shell[Symbol.dispose]();
-    closeSocket(socket, "Pi detached");
-  };
-  let info: ShellInfo;
-  try { info = await withTimeout(plain(shell.info()), target.url); }
-  catch (error) {
-    release();
-    throw error;
-  }
-  const host = new Host(target, info, shell, {
-    release,
-    fork: () => forkShell(shell),
-  });
-  shell.onRpcBroken((error) => host.markLost(errorMessage(error) || "the connection closed"));
-  return checked(host);
-}
-
 /**
- * Connect to a paired device over an encrypted link, at the first saved address that
- * answers as that device. Pi offers it nothing but the handshake, and the device's own
+ * Connect to a paired device over an encrypted link, at the first saved address, or the
+ * relay, that answers as that device. Pi offers it nothing but the handshake, and the device's own
  * grants decide what Pi's tools may do there.
  */
 export async function connectPaired(target: Extract<Target, { kind: "paired" }>, signal: AbortSignal): Promise<Host> {
   const { loadIdentity } = await import("../src/identity.js");
   const { connectFirst, rpcSession } = await import("../src/secure.js");
+  const { builtInRelay } = await import("../src/relay-config.js");
+  const { dialAddresses } = await import("../src/relay-hub.js");
   const identity = loadIdentity();
   if (!identity) throw new Error(`This machine has no cns identity, so it cannot be paired with ${target.name}. Pair it first with cns pair.`);
-  const { channel } = await connectFirst(target.addresses, identity, { expect: target.publicKey, signal });
+  const { channel } = await connectFirst(dialAddresses(target, builtInRelay()), identity, { expect: target.publicKey, signal });
   const shell = rpcSession<ShellApi>(channel, new RefusingShell());
   const release = () => {
     shell[Symbol.dispose]();

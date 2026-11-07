@@ -7,7 +7,7 @@ import type { ConnectionController, PeerController } from "../console.js";
 import type { Decision, Proposal } from "../pairing.js";
 import type { AccessOptions, GlobOptions, PtyOptions, PtySessionOptions, PtySink, ReadFileOptions, RunOptions, ShellApi } from "../shell.js";
 
-/** What a paired daemon offers local clients for pairing and links; absent on a legacy listener. */
+/** What the daemon offers local clients for pairing and links. */
 export interface PairingController {
   identity(): { publicKey: string; fingerprint: string };
   addresses(): string[];
@@ -72,12 +72,12 @@ export class ControlApi extends RpcTarget {
   async status(): Promise<DaemonStatus> {
     const peers = (await this.#controller.peers()).length;
     return {
-      ...(this.#listener ?? { url: "", bind: "", port: 0, remote: false, oneWay: false }), pid: process.pid, startedAt: this.#startedAt, peers,
+      ...(this.#listener ?? { url: "", bind: "", port: 0, remote: false }), pid: process.pid, startedAt: this.#startedAt, peers,
       ...this.#pairing ? { identity: this.#pairing.identity(), addresses: this.#pairing.addresses(), relayRegistered: this.#pairing.relayRegistered() } : {},
     };
   }
   #paired(): PairingController {
-    if (!this.#pairing) throw new Error("This daemon does not accept paired devices. Start it with cns up.");
+    if (!this.#pairing) throw new Error("This control endpoint does not manage pairing.");
     return this.#pairing;
   }
   async invite(ttlMs: number) {
@@ -170,5 +170,3 @@ export async function serveControl(controller: PeerController, stop: () => void,
     await removeOwnedState(file, token);
   };
 }
-
-/** What `startDaemon` needs of a listen configuration. */

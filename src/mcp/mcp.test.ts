@@ -10,7 +10,7 @@ import { connectControl } from "../commands/daemon.js";
 import { GrantedShell } from "../granted-shell.js";
 import type { Permission } from "../peers.js";
 import { ShellApi, type FileChunk } from "../shell.js";
-import { LOOPBACK, LOOPBACK_HOST, cliEnvironment, cliInvocation, launchCli, unusedPort } from "../test-support.js";
+import { cliEnvironment, cliInvocation, launchCli, testDevices, unusedPort } from "../test-support.js";
 import { LegacySessions, MAX_SESSIONS } from "./legacy-sessions.js";
 import { clip, createMcpServer, MAX_RESULT_CHARS, readLines } from "./server.js";
 import type { McpTarget, PeerFiles, ToolController } from "./target.js";
@@ -19,18 +19,21 @@ const posix = process.platform !== "win32";
 const print = (marker: string) => posix ? `printf '${marker}'` : `[Console]::Write('${marker}')`;
 const TOKEN = "t".repeat(40);
 
-async function listener(t: TestContext, repl = false) {
-  const port = await unusedPort();
-  const peer = launchCli(t, ["listen", "--bind", LOOPBACK, "--port", port, ...repl ? [] : ["--no-repl"]]);
-  await peer.waitFor("listening at");
-  return { peer, url: `ws://${LOOPBACK_HOST}:${port}` };
+/** Studio runs its daemon and grants laptop everything; laptop's cns mcp studio reaches it. */
+async function paired(t: TestContext) {
+  const devices = await testDevices(t, "cns-mcp-");
+  const studio = await devices.device("studio");
+  const laptop = await devices.device("laptop");
+  await devices.up(studio);
+  await devices.pair(studio, laptop, { hostGrants: "all" });
+  return { devices, studio, laptop, env: laptop.env };
 }
 
 /** Start cns mcp over stdio as an MCP client would, speaking the protocol revision `mode` selects. */
-async function stdioClient(t: TestContext, args: string[], mode: "auto" | "legacy" = "auto") {
+async function stdioClient(t: TestContext, args: string[], mode: "auto" | "legacy" = "auto", env: Record<string, string> = {}) {
   const invocation = cliInvocation(["mcp", ...args]);
   const transport = new StdioClientTransport({
-    command: invocation.file, args: invocation.args, env: cliEnvironment() as Record<string, string>, stderr: "pipe",
+    command: invocation.file, args: invocation.args, env: cliEnvironment(env) as Record<string, string>, stderr: "pipe",
   });
   let stderr = "";
   transport.stderr?.on("data", (chunk) => { stderr += chunk; });
@@ -40,10 +43,10 @@ async function stdioClient(t: TestContext, args: string[], mode: "auto" | "legac
   return { client, transport, get stderr() { return stderr; } };
 }
 
-/** Serve cns mcp --http for a listener and return its endpoint. */
-async function httpServer(t: TestContext, args: string[], token = TOKEN) {
+/** Serve cns mcp --http for a paired device and return its endpoint. */
+async function httpServer(t: TestContext, args: string[], token = TOKEN, env: Record<string, string> = {}) {
   const port = await unusedPort("127.0.0.1");
-  const server = launchCli(t, ["mcp", ...args, "--http", port], { env: { CNS_MCP_TOKEN: token } });
+  const server = launchCli(t, ["mcp", ...args, "--http", port], { env: { ...env, CNS_MCP_TOKEN: token } });
   await server.waitFor("Tools reach");
   return { server, endpoint: `http://127.0.0.1:${port}/mcp`, port };
 }
@@ -222,9 +225,9 @@ test("2025-era HTTP sessions starting at once stay within the limit", { timeout:
   }
 });
 
-test("stdio MCP server runs commands on a listener and reports failures as tool errors", { timeout: 30000 }, async (t) => {
-  const { url } = await listener(t);
-  const { client } = await stdioClient(t, [url]);
+test("stdio MCP server runs commands on a paired device and reports failures as tool errors", { skip: !posix, timeout: 30000 }, async (t) => {
+  const { env } = await paired(t);
+  const { client } = await stdioClient(t, ["studio"], "auto", env);
   assert.equal(client.getNegotiatedProtocolVersion(), "2026-07-28");
   assert.match(client.getInstructions() ?? "", /run_command/);
   const { tools } = await client.listTools();
@@ -239,7 +242,10 @@ test("stdio MCP server runs commands on a listener and reports failures as tool 
   const peers = succeeded(await client.callTool({ name: "list_peers", arguments: {} }));
   assert.equal(peers.peers.length, 1);
   assert.equal(peers.peers[0].id, "p1");
+  assert.equal(peers.peers[0].name, "studio");
   assert.equal(peers.peers[0].shell, posix ? "Bash" : "PowerShell");
+  // The device's name selects it too.
+  assert.equal(succeeded(await client.callTool({ name: "run_command", arguments: { command: print("BY_NAME"), peer: "studio" } })).stdout, "BY_NAME");
 
   const ran = succeeded(await client.callTool({ name: "run_command", arguments: { command: print("MCP_OK") } }));
   assert.equal(ran.stdout, "MCP_OK");
@@ -275,8 +281,8 @@ test("stdio MCP server runs commands on a listener and reports failures as tool 
 });
 
 test("terminal session tools drive an interactive program", { skip: !posix, timeout: 30000 }, async (t) => {
-  const { url } = await listener(t);
-  const { client } = await stdioClient(t, [url]);
+  const { env } = await paired(t);
+  const { client } = await stdioClient(t, ["studio"], "auto", env);
   const started = succeeded(await client.callTool({ name: "start_session", arguments: {
     name: "repl", command: "printf 'ready> '; while read -r line; do printf 'got:%s\\nready> ' \"$line\"; done", cols: 100, rows: 30, until: "ready>",
   } }));
@@ -312,16 +318,16 @@ test("terminal session tools drive an interactive program", { skip: !posix, time
   assert.deepEqual(succeeded(await client.callTool({ name: "list_sessions", arguments: {} })).sessions, []);
 });
 
-test("a 2025-era stdio client is served too", { timeout: 30000 }, async (t) => {
-  const { url } = await listener(t);
-  const { client } = await stdioClient(t, [url], "legacy");
+test("a 2025-era stdio client is served too", { skip: !posix, timeout: 30000 }, async (t) => {
+  const { env } = await paired(t);
+  const { client } = await stdioClient(t, ["studio"], "legacy", env);
   assert.notEqual(client.getNegotiatedProtocolVersion(), "2026-07-28");
   assert.equal(succeeded(await client.callTool({ name: "run_command", arguments: { command: print("LEGACY_OK") } })).stdout, "LEGACY_OK");
 });
 
 test("cancelling calls kills their commands and frees their screen waits", { skip: !posix, timeout: 30000 }, async (t) => {
-  const { url } = await listener(t);
-  const { client } = await stdioClient(t, [url]);
+  const { env } = await paired(t);
+  const { client } = await stdioClient(t, ["studio"], "auto", env);
   const directory = await temporaryDirectory(t);
   const controller = new AbortController();
   const { call, pid } = await startSleeper(client, directory, controller.signal);
@@ -347,31 +353,34 @@ test("cancelling calls kills their commands and frees their screen waits", { ski
   succeeded(await client.callTool({ name: "kill_session", arguments: { name: "idle" } }));
 });
 
-test("the stdio server exits when its client closes stdin", { timeout: 30000 }, async (t) => {
-  const { url } = await listener(t);
-  const server = launchCli(t, ["mcp", url]);
+test("the stdio server exits when its client closes stdin", { skip: !posix, timeout: 30000 }, async (t) => {
+  const { env } = await paired(t);
+  const server = launchCli(t, ["mcp", "studio"], { env });
   server.child.stdin.end();
   assert.equal(await server.exited, 0, server.output);
   assert.equal(server.stdout, "");
 });
 
-test("a listener cannot run commands on the MCP server's machine", { skip: !posix, timeout: 30000 }, async (t) => {
-  const { peer, url } = await listener(t, true);
-  const { client } = await stdioClient(t, [url]);
+test("the device cannot run commands on the MCP server's machine", { skip: !posix, timeout: 30000 }, async (t) => {
+  const { env, studio } = await paired(t);
+  const { client } = await stdioClient(t, ["studio"], "auto", env);
   const controller = new AbortController();
   const directory = await temporaryDirectory(t);
   const { call } = await startSleeper(client, directory, controller.signal);
   t.after(() => controller.abort());
-  await peer.send(":peers", "p");
-  const refused = await peer.send(":use p1\n" + print("REVERSE_SHELL"), "does not run commands");
-  assert.doesNotMatch(refused, /REVERSE_SHELL/);
+  const control = await connectControl(studio.state);
+  try {
+    const connection = (await control.controller.peers()).find((peer) => peer.peer?.name === "laptop" && !peer.peer.daemon);
+    assert.ok(connection, "the call's connection is listed");
+    await assert.rejects(() => control.controller.run(connection.id, print("REVERSE_SHELL"), {}), /does not run commands/);
+  } finally { control.close(); }
   controller.abort();
   await assert.rejects(call);
 });
 
-test("Streamable HTTP requires the token, refuses browsers and serves both protocol eras", { timeout: 60000 }, async (t) => {
-  const { url } = await listener(t);
-  const { server, endpoint, port } = await httpServer(t, [url]);
+test("Streamable HTTP requires the token, refuses browsers and serves both protocol eras", { skip: !posix, timeout: 60000 }, async (t) => {
+  const { env } = await paired(t);
+  const { server, endpoint, port } = await httpServer(t, ["studio"], TOKEN, env);
   assert.match(server.stdout, /MCP endpoint: http:\/\/127\.0\.0\.1:\d+\/mcp/);
   assert.doesNotMatch(server.stdout, new RegExp(TOKEN));
   const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" });
@@ -442,57 +451,49 @@ test("HTTP refuses a weak CNS_MCP_TOKEN and prints a generated one", { timeout: 
   assert.match(generated.stdout, /Authorization: Bearer [A-Za-z0-9_-]{43}\n/);
 });
 
-test("the daemon target chooses among connected peers and kills cancelled commands", { skip: !posix, timeout: 60000 }, async (t) => {
-  // Not temporaryDirectory: the daemon must stop before its state is removed.
-  const directory = await mkdtemp(path.join(os.tmpdir(), "cns-mcp-"));
-  const statePath = path.join(directory, "daemon.json");
-  const port = await unusedPort("127.0.0.1");
-  let daemonPid: number | undefined;
-  t.after(async () => {
-    try {
-      const connection = await connectControl(statePath);
-      try { await connection.remote.stop(); } catch { /* It stops before answering. */ } finally { connection.close(); }
-    } catch { /* Not running, or its state is unreadable. */ }
-    if (daemonPid !== undefined) {
-      await eventually(() => !alive(daemonPid!), "the daemon to stop", 3000).catch(() => process.kill(daemonPid!, "SIGKILL"));
-    }
-    await rm(directory, { force: true, recursive: true });
-  });
-  const daemon = launchCli(t, ["listen", "--daemon", "--state", statePath, "--bind", "127.0.0.1", "--port", port]);
-  assert.equal(await daemon.exited, 0, daemon.output);
-  daemonPid = JSON.parse(await readFile(statePath, "utf8")).pid;
-  assert.ok(daemonPid && alive(daemonPid));
-  const absent = await stdioClient(t, ["--daemon", "--state", path.join(directory, "absent.json")]);
+test("the daemon target chooses among linked devices and kills cancelled commands", { skip: !posix, timeout: 90000 }, async (t) => {
+  const devices = await testDevices(t, "cns-mcp-daemon-");
+  const studio = await devices.device("studio");
+  await devices.up(studio);
+  const directory = await temporaryDirectory(t);
+  const absent = await stdioClient(t, ["--state", path.join(directory, "absent.json")], "auto", studio.env);
   const notRunning = await absent.client.callTool({ name: "list_peers", arguments: {} });
   assert.equal(notRunning.isError, true);
-  assert.match(text(notRunning), /No local daemon is running\. Start one with cns listen --daemon --state .*absent\.json/);
+  assert.match(text(notRunning), /No local daemon is running\. Start it with cns up --state .*absent\.json/);
 
-  const { client } = await stdioClient(t, ["--daemon", "--state", statePath]);
+  const { client } = await stdioClient(t, ["--state", studio.state], "auto", studio.env);
   const none = await client.callTool({ name: "run_command", arguments: { command: print("x") } });
   assert.equal(none.isError, true);
   assert.match(text(none), /No peers are connected/);
 
-  const first = launchCli(t, ["connect", `ws://127.0.0.1:${port}`], { env: { CNS_TEST_PEER: "FIRST" } });
-  await first.waitFor("Connected to");
+  /** A device whose daemon links to studio's and lets studio use all of it. */
+  const linked = async (name: string, marker: string) => {
+    const device = await devices.device(name, { CNS_TEST_PEER: marker });
+    await devices.up(device);
+    await devices.pair(studio, device, { hostGrants: "none", guestGrants: "all" });
+    return device;
+  };
+  await linked("first", "FIRST");
+  await eventually(async () => succeeded(await client.callTool({ name: "list_peers", arguments: {} })).peers.length === 1, "the first link");
   const only = succeeded(await client.callTool({ name: "run_command", arguments: { command: `printf "$CNS_TEST_PEER"` } }));
   assert.equal(only.stdout, "FIRST");
-  assert.equal(only.peer, "p1");
+  assert.match(only.peer, /^p\d+$/);
+  const first = only.peer as string;
   const noteFile = path.join(directory, "via-daemon", "note.txt");
   assert.equal(succeeded(await client.callTool({ name: "write_file", arguments: { path: noteFile, content: "via daemon" } })).created, true);
   assert.equal(succeeded(await client.callTool({ name: "read_file", arguments: { path: noteFile } })).content, "via daemon");
   assert.deepEqual(succeeded(await client.callTool({ name: "glob", arguments: { pattern: "**/*.txt", path: directory } })).paths, [noteFile]);
 
-  const second = launchCli(t, ["connect", `ws://127.0.0.1:${port}`], { env: { CNS_TEST_PEER: "SECOND" } });
-  await second.waitFor("Connected to");
-  await eventually(async () => succeeded(await client.callTool({ name: "list_peers", arguments: {} })).peers.length === 2, "both peers");
+  await linked("second", "SECOND");
+  await eventually(async () => succeeded(await client.callTool({ name: "list_peers", arguments: {} })).peers.length === 2, "both links");
   const ambiguous = await client.callTool({ name: "run_command", arguments: { command: print("x") } });
   assert.equal(ambiguous.isError, true);
-  assert.match(text(ambiguous), /Several peers are connected \(p1, p2\); pass peer/);
-  assert.equal(succeeded(await client.callTool({ name: "run_command", arguments: { command: `printf "$CNS_TEST_PEER"`, peer: "p2" } })).stdout, "SECOND");
+  assert.match(text(ambiguous), /Several peers are connected \(p\d+, p\d+\); pass peer/);
+  assert.equal(succeeded(await client.callTool({ name: "run_command", arguments: { command: `printf "$CNS_TEST_PEER"`, peer: "second" } })).stdout, "SECOND");
 
   const controller = new AbortController();
   const pidFile = path.join(directory, "daemon.pid");
-  const call = client.callTool({ name: "run_command", arguments: { command: `echo $$ > '${pidFile}'; sleep 30`, peer: "p1", timeoutMs: 0 } }, { signal: controller.signal });
+  const call = client.callTool({ name: "run_command", arguments: { command: `echo $$ > '${pidFile}'; sleep 30`, peer: first, timeoutMs: 0 } }, { signal: controller.signal });
   call.catch(() => {});
   await eventually(async () => existsSync(pidFile) && (await readFile(pidFile, "utf8")).trim() !== "", "the command to start");
   const pid = Number((await readFile(pidFile, "utf8")).trim());
@@ -502,8 +503,8 @@ test("the daemon target chooses among connected peers and kills cancelled comman
 
   // Commands from an attached console still outlive its connection.
   const keptFile = path.join(directory, "kept.pid");
-  const console = await connectControl(statePath);
-  const kept = console.controller.run("p1", `echo $$ > '${keptFile}'; sleep 30`, {});
+  const console = await connectControl(studio.state);
+  const kept = console.controller.run(first, `echo $$ > '${keptFile}'; sleep 30`, {});
   kept.catch(() => {});
   await eventually(async () => existsSync(keptFile) && (await readFile(keptFile, "utf8")).trim() !== "", "the console's command to start");
   const keptPid = Number((await readFile(keptFile, "utf8")).trim());
@@ -553,7 +554,7 @@ test("readLines returns line ranges across chunks and stops before results grow 
   await assert.rejects(readLines(chunkedFiles(new Uint8Array([0x7f, 0x45, 0x4c, 0x46, 0, 1]), 64), "/bin", 1, 10), /binary file/);
 });
 
-test("file tools read, write, list and find files on a listener", { timeout: 30000 }, async (t) => {
+test("file tools read, write, list and find files on a paired device", { skip: !posix, timeout: 30000 }, async (t) => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "cns-mcp-files-"));
   t.after(() => rm(directory, { force: true, recursive: true }));
   await mkdir(path.join(directory, "src", "deep"), { recursive: true });
@@ -562,8 +563,8 @@ test("file tools read, write, list and find files on a listener", { timeout: 300
   await writeFile(path.join(directory, "src", "deep", "b.ts"), "b");
   await writeFile(path.join(directory, "node_modules", "pkg", "c.ts"), "c");
   await writeFile(path.join(directory, "blob.bin"), Buffer.from([1, 0, 2]));
-  const { url } = await listener(t);
-  const { client } = await stdioClient(t, [url, "--cwd", directory]);
+  const { env } = await paired(t);
+  const { client } = await stdioClient(t, ["studio", "--cwd", directory], "auto", env);
 
   const { tools } = await client.listTools();
   assert.equal(tools.find((tool) => tool.name === "read_file")!.annotations?.readOnlyHint, true);

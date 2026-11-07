@@ -2,10 +2,9 @@ import { afterEach, beforeEach, expect, test } from "bun:test";
 import { mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { addAlias, listAliases, resolveAlias } from "./aliases.js";
 import { generateIdentity } from "./identity.js";
 import { describeGrants, expandGrants, explainDenial, grantWords, findPairedPeer, getPeer, learnAddresses, listPeers, PRESETS, resolvePeer, savePairedPeer, updatePairedPeer } from "./peers.js";
-import { peerNames } from "./aliases.js";
+import { peerNames } from "./peer-files.js";
 
 let dir: string;
 const previous = process.env.CNS_CONFIG_DIR;
@@ -37,31 +36,25 @@ test("a refusal says which grant is missing and the command that adds it on the 
   expect(explainDenial("Permission denied: shell not granted to $(rm -rf ~).")).toBe("Permission denied: shell not granted to $(rm -rf ~).");
 });
 
-test.skipIf(process.platform === "win32")("paired devices live beside address aliases and are keyed by identity", () => {
+test.skipIf(process.platform === "win32")("paired devices are saved under a name and keyed by identity", () => {
   const studio = generateIdentity();
-  addAlias("build", "ws://127.0.0.1:47381");
   savePairedPeer("studio", { publicKey: studio.publicKey, addresses: ["ws://192.168.1.10:47381"], pairedAt: new Date().toISOString(), grants: { incoming: ["shell"], outgoing: expandGrants(["all"]) } });
-  expect(listPeers().map((peer) => [peer.name, peer.kind])).toEqual([["build", "address"], ["studio", "paired"]]);
-  expect(listAliases()).toEqual([{ name: "build", url: "ws://127.0.0.1:47381/" }]);
+  expect(listPeers().map((peer) => peer.name)).toEqual(["studio"]);
   expect(findPairedPeer(studio.publicKey)?.name).toBe("studio");
   expect(findPairedPeer(generateIdentity().publicKey)).toBeUndefined();
-  const entry = getPeer("studio");
-  expect(entry?.kind).toBe("paired");
-  if (entry?.kind === "paired") expect(entry.fingerprint).toBe(studio.fingerprint);
-  // The same device cannot be saved twice, and an alias is never replaced.
+  expect(getPeer("studio")?.fingerprint).toBe(studio.fingerprint);
+  // The same device cannot be saved twice, and a name is never replaced.
   expect(() => savePairedPeer("other", { publicKey: studio.publicKey, addresses: [], pairedAt: new Date().toISOString(), grants: { incoming: [], outgoing: [] } })).toThrow("already paired as studio");
   expect(() => savePairedPeer("studio", { publicKey: generateIdentity().publicKey, addresses: [], pairedAt: new Date().toISOString(), grants: { incoming: [], outgoing: [] } })).toThrow();
-  // Targets: a paired device resolves to its address and expected identity; an alias to its URL alone.
-  expect(resolvePeer("studio")).toEqual({ url: "ws://192.168.1.10:47381", peer: { name: "studio", publicKey: studio.publicKey, outgoing: expandGrants(["all"]), addresses: ["ws://192.168.1.10:47381"] } });
-  expect(resolvePeer("build")).toEqual({ url: "ws://127.0.0.1:47381/" });
-  expect(() => resolvePeer("missing")).toThrow("Unknown peer alias");
-  expect(() => resolveAlias("studio")).toThrow("paired device");
+  // A command's target: the identity to expect and every saved address.
+  expect(resolvePeer("studio")).toEqual({ name: "studio", publicKey: studio.publicKey, outgoing: expandGrants(["all"]), addresses: ["ws://192.168.1.10:47381"] });
+  expect(() => resolvePeer("missing")).toThrow("No paired device is saved as missing");
   // Grants and addresses change; the key never does.
   const updated = updatePairedPeer("studio", (peer) => ({ ...peer, grants: { ...peer.grants, incoming: [] }, addresses: [] }));
   expect(updated.grants.incoming).toEqual([]);
-  expect(() => resolvePeer("studio")).toThrow("no saved address");
+  // With no saved address, the relay is still tried.
+  expect(resolvePeer("studio").addresses).toEqual([]);
   expect(() => updatePairedPeer("studio", (peer) => ({ ...peer, publicKey: generateIdentity().publicKey }))).toThrow("cannot change");
-  expect(() => updatePairedPeer("build", (peer) => peer)).toThrow("saved address");
 });
 
 test.skipIf(process.platform === "win32")("stray and corrupt files in the peers directory are skipped, not fatal", () => {
@@ -80,7 +73,7 @@ test.skipIf(process.platform === "win32")("stray and corrupt files in the peers 
   try { expect(findPairedPeer(studio.publicKey)?.name).toBe("studio"); }
   finally { console.error = error; }
   // Looking one up by name stays strict.
-  expect(() => getPeer("broken")).toThrow("not valid JSON");
+  expect(() => getPeer("broken")).toThrow("not a paired-device record");
   expect(() => getPeer("extra")).toThrow("not a valid paired-device record");
 });
 
@@ -90,7 +83,7 @@ test.skipIf(process.platform === "win32")("changing a paired device replaces its
   updatePairedPeer("studio", (peer) => ({ ...peer, addresses: ["ws://127.0.0.1:47382"] }));
   expect(readdirSync(path.join(dir, "peers"))).toEqual(["studio"]);
   expect(statSync(path.join(dir, "peers", "studio")).mode & 0o777).toBe(0o600);
-  expect(resolvePeer("studio").url).toBe("ws://127.0.0.1:47382");
+  expect(resolvePeer("studio").addresses).toEqual(["ws://127.0.0.1:47382"]);
   expect(() => updatePairedPeer("missing", (peer) => peer)).toThrow("Unknown peer");
 });
 

@@ -13,7 +13,7 @@ export type ServiceKind = "launchd" | "systemd";
 
 /** What the service runs: the daemon in the foreground, as `cns up` would start it. */
 export interface ServiceSpec {
-  /** The executable and arguments that run `cns listen --service ...`. */
+  /** The executable and arguments that run `cns daemon --service ...`. */
   program: { file: string; args: string[] };
   /** Environment for the daemon: PATH and the like. */
   env: Record<string, string>;

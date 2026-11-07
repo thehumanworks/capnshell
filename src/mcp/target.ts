@@ -1,10 +1,8 @@
-import { newWebSocketRpcSession } from "capnweb";
 import { connectControl } from "../commands/daemon.js";
 import { builtInRelay } from "../relay-config.js";
-import { dialAddresses } from "../relay-hub.js";
-import { closeSocket, openSocket } from "../connect.js";
+import { dialAddresses, isRelayAddress } from "../relay-hub.js";
 import type { PeerController } from "../console.js";
-import { loadIdentity } from "../identity.js";
+import { fingerprint, loadIdentity } from "../identity.js";
 import { connectFirst, rpcSession } from "../secure.js";
 import { RefusingShell } from "../refusing-shell.js";
 import type { ShellApi } from "../shell.js";
@@ -29,9 +27,9 @@ export interface Link {
   close(): void;
 }
 
-/** Where the tools' peers are: one listener, or the local daemon's connected peers. */
+/** Where the tools' peers are: one paired device, or the devices linked to the local daemon. */
 export interface McpTarget {
-  /** For messages, such as the listener's URL. */
+  /** For messages, such as the paired device's name. */
   readonly label: string;
   /** This device's name for the paired device the tools reach, when there is one. */
   readonly device?: string;
@@ -40,12 +38,12 @@ export interface McpTarget {
   open(signal: AbortSignal): Promise<Link>;
 }
 
-/** The ID a listener has in this server, as in the console of `cns connect`. */
-export const LISTENER_PEER = "p1";
+/** The ID the one paired device of a `cns mcp DEVICE` server has. */
+export const DEVICE_PEER = "p1";
 /** Tool calls in progress at once; each holds a connection. */
 export const MAX_CALLS = 16;
 
-/** Refuse calls beyond MAX_CALLS, so a busy client cannot exhaust a listener's peer slots. */
+/** Refuse calls beyond MAX_CALLS, so a busy client cannot exhaust a device's connection slots. */
 function limitCalls(open: (signal: AbortSignal) => Promise<Link>): (signal: AbortSignal) => Promise<Link> {
   let active = 0;
   return async (signal) => {
@@ -74,36 +72,29 @@ function limitCalls(open: (signal: AbortSignal) => Promise<Link>): (signal: Abor
 }
 
 /**
- * Reach the listener at `url`, on a new connection for each call as `cns run`
- * does. Closing a call's connection makes the listener kill its commands and
- * end its waits.
+ * Reach one paired device, on a new encrypted connection for each call as `cns run`
+ * does. Closing a call's connection makes the device kill its commands and end its waits.
  */
-export function listenerTarget(url: string, cwd?: string, expect?: { name: string; publicKey: string; addresses: string[] }): McpTarget {
+export function pairedTarget(expect: { name: string; publicKey: string; addresses: string[] }, cwd?: string): McpTarget {
   return {
-    label: expect ? expect.name : url,
-    ...expect ? { device: expect.name } : {},
+    label: expect.name,
+    device: expect.name,
     cwd,
     open: limitCalls(async (signal) => {
-      // A paired device: prove this device's identity and require the saved one on the other end.
-      const identity = expect ? loadIdentity() : undefined;
-      if (expect && !identity) throw new Error("This device has no identity yet; run cns identity or cns up first.");
-      let hangUp: (reason: string) => void;
-      let remote: ReturnType<typeof newWebSocketRpcSession<ShellApi>>;
-      if (expect) {
-        // An encrypted channel to the paired device, at the first saved address, or the relay, that answers as it.
-        const { channel } = await connectFirst(dialAddresses(expect, builtInRelay()), identity!, { expect: expect.publicKey, signal });
-        remote = rpcSession<ShellApi>(channel, new RefusingShell());
-        hangUp = (reason) => channel.close(reason);
-      } else {
-        const socket = await openSocket(url, signal);
-        remote = newWebSocketRpcSession<ShellApi>(socket, new RefusingShell());
-        hangUp = (reason) => closeSocket(socket, reason);
-      }
+      // Prove this device's identity and require the saved one on the other end.
+      const identity = loadIdentity();
+      if (!identity) throw new Error("This device has no identity yet; run cns identity or cns up first.");
+      // An encrypted channel to the paired device, at the first saved address, or the relay, that answers as it.
+      const { channel, url } = await connectFirst(dialAddresses(expect, builtInRelay()), identity, { expect: expect.publicKey, signal });
+      const via = isRelayAddress(url) ? "relay" as const : "direct" as const;
+      const remote = rpcSession<ShellApi>(channel, new RefusingShell());
       let closed = false;
       let lost = false;
       remote.onRpcBroken(() => { if (!closed) lost = true; });
       const controller: ToolController = {
-        async peers() { return [{ id: LISTENER_PEER, info: await plain(remote.info()) }]; },
+        async peers() {
+          return [{ id: DEVICE_PEER, info: await plain(remote.info()), peer: { name: expect.name, fingerprint: fingerprint(expect.publicKey), daemon: false, via } }];
+        },
         async run(_id, command, options) { return await plain(remote.run(command, options)); },
         async ptySessions() { return await plain(remote.ptySessions()); },
         async startPtySession(_id, name, options) {
@@ -117,16 +108,16 @@ export function listenerTarget(url: string, cwd?: string, expect?: { name: strin
         controller,
         get lost() { return lost; },
         async peer(requested) {
-          if (requested !== undefined && requested !== LISTENER_PEER) {
-            throw new Error(`Unknown peer ${requested}. This server reaches one listener, ${url}, as peer ${LISTENER_PEER}.`);
+          if (requested !== undefined && requested !== DEVICE_PEER && requested !== expect.name) {
+            throw new Error(`Unknown peer ${requested}. This server reaches one paired device, ${expect.name}, as peer ${DEVICE_PEER}.`);
           }
-          return LISTENER_PEER;
+          return DEVICE_PEER;
         },
         close() {
           if (closed) return;
           closed = true;
           remote[Symbol.dispose]();
-          hangUp("MCP call ended");
+          channel.close("MCP call ended");
         },
       };
     }),
@@ -147,7 +138,7 @@ export function daemonTarget(statePath?: string, cwd?: string): McpTarget {
       const connection = await connectControl(statePath).catch((error: unknown) => {
         if (error instanceof Error && "code" in error && error.code === "ENOENT") {
           const state = statePath === undefined ? "" : ` --state ${statePath}`;
-          throw new Error(`No local daemon is running. Start one with cns listen --daemon${state}.`, { cause: error });
+          throw new Error(`No local daemon is running. Start it with cns up${state}.`, { cause: error });
         }
         throw error;
       });

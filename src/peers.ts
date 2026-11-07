@@ -1,13 +1,12 @@
 import { z } from "zod";
-import { createPeerFile, isPairedEntry, peerFile, peerNames, readPeerFile, rewritePeerFile, validatePeerUrl } from "./aliases.js";
+import { createPeerFile, peerFile, peerNames, readPeerFile, rewritePeerFile, validatePeerUrl } from "./peer-files.js";
 import { isIP } from "node:net";
 import { errorMessage } from "./errors.js";
 import { fingerprint, type PublicKey } from "./identity.js";
 import { isRelayAddress } from "./relay-hub.js";
 
 /**
- * Paired devices, saved under an alias in the peers directory beside plain address
- * aliases. Trust is keyed by the device's public key; the alias is only this user's
+ * Paired devices, each saved under an alias in the peers directory. Trust is keyed by the device's public key; the alias is only this user's
  * name for it. Grants are directional: `incoming` is what this device lets the peer
  * do here, enforced here; `outgoing` is what the peer said it lets this device do,
  * kept for display and enforced there.
@@ -84,23 +83,21 @@ export const pairedPeerSchema = z.strictObject({
 });
 export type PairedPeer = z.infer<typeof pairedPeerSchema>;
 
-export type PeerEntry =
-  | { name: string; kind: "paired"; fingerprint: string } & PairedPeer
-  | { name: string; kind: "address"; url: string };
+/** A saved paired device: its record, the alias it is saved under and its key's fingerprint. */
+export type PeerEntry = { name: string; fingerprint: string } & PairedPeer;
 
 function entryFor(name: string, content: string): PeerEntry {
-  if (!isPairedEntry(content)) return { name, kind: "address", url: validatePeerUrl(content.trim()) };
   let parsed: unknown;
-  try { parsed = JSON.parse(content); } catch { throw new Error(`Saved peer ${name} is not valid JSON.`); }
+  try { parsed = JSON.parse(content); } catch { throw new Error(`Saved peer ${name} is not a paired-device record. Remove it with cns peer remove ${name}, then pair again.`); }
   const peer = pairedPeerSchema.safeParse(parsed);
   if (!peer.success) throw new Error(`Saved peer ${name} is not a valid paired-device record: ${errorMessage(peer.error)}`);
-  return { name, kind: "paired", fingerprint: fingerprint(peer.data.publicKey), ...peer.data };
+  return { name, fingerprint: fingerprint(peer.data.publicKey), ...peer.data };
 }
 
 const reportInvalid = (name: string, error: unknown) => console.error(`cns: skipping saved peer ${name}: ${errorMessage(error)}`);
 
 /**
- * Every saved peer, address aliases and paired devices alike, sorted by name. A file
+ * Every saved paired device, sorted by name. A file
  * that cannot be read as a peer is reported and skipped, so one bad file never stops
  * the others from working; `getPeer` by name stays strict.
  */
@@ -122,9 +119,9 @@ export function getPeer(name: string): PeerEntry | undefined {
 }
 
 /** The paired device with this key, under whatever alias it was saved. */
-export function findPairedPeer(publicKey: PublicKey): (PeerEntry & { kind: "paired" }) | undefined {
+export function findPairedPeer(publicKey: PublicKey): PeerEntry | undefined {
   // Called for every connection: bad files are reported by listings, not here.
-  for (const entry of listPeers(() => {})) if (entry.kind === "paired" && entry.publicKey === publicKey) return entry;
+  for (const entry of listPeers(() => {})) if (entry.publicKey === publicKey) return entry;
   return undefined;
 }
 
@@ -141,8 +138,7 @@ export function savePairedPeer(name: string, peer: Omit<PairedPeer, "version">):
 export function updatePairedPeer(name: string, change: (peer: PairedPeer) => PairedPeer): PairedPeer {
   const entry = getPeer(name);
   if (!entry) throw new Error(`Unknown peer: ${name}`);
-  if (entry.kind !== "paired") throw new Error(`${name} is a saved address, not a paired device.`);
-  const { name: _name, kind: _kind, fingerprint: _fingerprint, ...current } = entry;
+  const { name: _name, fingerprint: _fingerprint, ...current } = entry;
   const updated = pairedPeerSchema.parse(change(current));
   if (updated.publicKey !== current.publicKey) throw new Error("A paired device's key cannot change; pair with the new device instead.");
   rewritePeerFile(name, JSON.stringify(updated, null, 2) + "\n");
@@ -177,16 +173,9 @@ export function learnAddresses(saved: readonly string[], advertised: readonly st
   return [...all.filter((url) => !isRelayAddress(url)).slice(0, 16 - relays.length), ...relays];
 }
 
-/** Whether a name is saved, without throwing where saved peers are unsupported. */
-export function isSavedPeer(name: string): boolean {
-  try { return getPeer(name) !== undefined; } catch { return false; }
-}
-
-/** What `--peer NAME` or a positional NAME means: an address to dial and, for a paired device, the identity to expect. */
-export function resolvePeer(name: string): { url: string; peer?: { name: string; publicKey: PublicKey; outgoing: Permission[]; addresses: string[] } } {
+/** The paired device a command names: the identity to expect and every address to try. */
+export function resolvePeer(name: string): { name: string; publicKey: PublicKey; outgoing: Permission[]; addresses: string[] } {
   const entry = getPeer(name);
-  if (!entry) throw new Error(`Unknown peer alias: ${name}`);
-  if (entry.kind === "address") return { url: entry.url };
-  if (!entry.addresses.length) throw new Error(`Paired device ${name} has no saved address. Add one with cns peer address ${name} ws://HOST:PORT`);
-  return { url: entry.addresses[0]!, peer: { name, publicKey: entry.publicKey, outgoing: entry.grants.outgoing, addresses: entry.addresses } };
+  if (!entry) throw new Error(`No paired device is saved as ${name}. Pair with it first: cns pair. cns peers lists the paired devices.`);
+  return { name, publicKey: entry.publicKey, outgoing: entry.grants.outgoing, addresses: entry.addresses };
 }

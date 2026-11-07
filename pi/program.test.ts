@@ -26,8 +26,8 @@ async function installed(t: TestContext, version: string | undefined) {
 
 test("the package runs its cns with its own Bun, isolated from the directory it starts in", { skip: !posix || !bunPackage }, async (t) => {
   const { from, extension, bun } = await installed(t, "1.4.4");
-  assert.deepEqual(cnsInvocation(undefined, { PATH: "" }, from)(["listen"]), {
-    file: bun, args: ["--no-env-file", `--config=${path.join(extension, "daemon.bunfig.toml")}`, path.join(extension, "cns.js"), "listen"],
+  assert.deepEqual(cnsInvocation(undefined, { PATH: "" }, from)(["daemon"]), {
+    file: bun, args: ["--no-env-file", `--config=${path.join(extension, "daemon.bunfig.toml")}`, path.join(extension, "cns.js"), "daemon"],
   });
   // --cns-bin, then CNS_BIN, take precedence.
   assert.deepEqual(cnsInvocation(" /opt/cns ", { CNS_BIN: "/usr/local/bin/cns" }, from)(["stop"]), { file: "/opt/cns", args: ["stop"] });

@@ -54,11 +54,11 @@ const help = `
     :sessions          List its named PTY sessions (started with cns tty --name).
     :attach NAME       Attach to a named session; Ctrl-] detaches and leaves it running.
     :help              Show this help.
-    :quit              Exit this console (a foreground listener stops its peers).
+    :quit              Exit this console; the daemon keeps running.
   Each command starts a fresh shell without persistent state; use :tty for TUIs.
 `;
 
-/** Selection belongs to a console, never to the shared listener or another attachment. */
+/** Selection belongs to a console, never to the shared daemon or another attachment. */
 export function openConsole(controller: PeerController, onQuit: () => void) {
   const lines = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: !!process.stdin.isTTY });
   const settings = new Map<string, { cwd: string; timeoutMs: number }>();

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdtemp, realpath, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -8,8 +8,8 @@ import { execa } from "execa";
 import { commandExitCode } from "./commands/peer.js";
 import { LOOPBACK, PROJECT_ROOT, unusedPort } from "./test-support.js";
 
-test("shutdown during daemon startup cleans up subsequently acquired control resources", { timeout: 15000 }, async (t) => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "cns-startup-"));
+test("shutdown during daemon startup cleans up subsequently acquired control resources", { skip: process.platform === "win32", timeout: 15000 }, async (t) => {
+  const directory = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-startup-")));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const state = path.join(directory, "state.json");
   const port = await unusedPort();
@@ -18,12 +18,11 @@ test("shutdown during daemon startup cleans up subsequently acquired control res
   const script = `
     import { startPeer } from ${JSON.stringify(pathToFileURL(path.join(PROJECT_ROOT, "src/commands/peer.ts")).href)};
     import { parseOptions } from ${JSON.stringify(pathToFileURL(path.join(PROJECT_ROOT, "src/options.ts")).href)};
-    process.env.CNS_DAEMON_CHILD = '1';
-    const task = startPeer(parseOptions(${JSON.stringify(["listen", "--no-repl", "--bind", LOOPBACK, "--port", port, "--state", state])}));
+    const task = startPeer(parseOptions(${JSON.stringify(["daemon", "--bind", LOOPBACK, "--port", port, "--state", state])}));
     process.emit('SIGTERM');
     await task;
   `;
-  const result = await execa(process.execPath, ["--eval", script], { timeout: 5000 });
+  const result = await execa(process.execPath, ["--eval", script], { timeout: 5000, env: { CNS_CONFIG_DIR: directory, CNS_RELAY: "off" } });
   assert.equal(result.exitCode, 0);
   assert.doesNotMatch(result.stdout, /listening at/);
   await assert.rejects(() => stat(state), { code: "ENOENT" });
