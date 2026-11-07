@@ -68,6 +68,10 @@ test("relay URLs and routes", () => {
   assert.equal(route(new URL("wss://x/v1/accept/short")), undefined);
   assert.equal(route(new URL(`wss://x/v1/answer/${key}/bad`)), undefined);
   assert.deepEqual(route(new URL("https://x/")), { kind: "health" });
+  // The built-in relay lives under /relay; the same routes work there.
+  assert.deepEqual(route(new URL(relayEndpoint("wss://x/relay", "answer", key, "A".repeat(22)))), { kind: "answer", key, id: "A".repeat(22) });
+  assert.deepEqual(route(new URL("https://x/relay")), { kind: "health" });
+  assert.equal(route(new URL(`wss://x/other/v1/accept/${key}`)), undefined);
 });
 
 test("dialAddresses adds the relay only when the record has no relay address", () => {
@@ -239,7 +243,8 @@ test("the built-in relay needs no setting; CNS_RELAY replaces it only for develo
   try {
     delete process.env.CNS_RELAY;
     assert.equal(builtInRelay(), DEFAULT_RELAY);
-    assert.match(DEFAULT_RELAY, /^wss:\/\/[^/?#]+$/);
+    assert.match(DEFAULT_RELAY, /^wss:\/\/[^/?#]+(\/[^?#]*)?$/);
+    assert.ok(isRelayAddress(relayEndpoint(DEFAULT_RELAY, "dial", generateIdentity().publicKey)));
     process.env.CNS_RELAY = "off";
     assert.equal(builtInRelay(), undefined);
     process.env.CNS_RELAY = "ws://127.0.0.1:8787";

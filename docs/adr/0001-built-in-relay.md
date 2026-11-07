@@ -18,8 +18,8 @@ networks, and a device without the setting silently only works on its own networ
 
 ## Decision
 
-1. **The relay is part of cns.** `src/relay-config.ts` names one relay, the Cloudflare
-   Worker in `relay/`. Every `cns up` registers there, every invite lists it after the
+1. **The relay is part of cns.** `src/relay-config.ts` names one relay,
+   `wss://cns.nothuman.work/relay`, served by the Cloudflare Worker in `relay/`. Every `cns up` registers there, every invite lists it after the
    direct addresses, and commands, `doctor`, MCP, Pi and the daemons' standing links try a
    paired device there after its direct addresses. There is nothing to configure.
 2. **No relay URL or token for users.** `cns config relay`, `cns up --relay`, the

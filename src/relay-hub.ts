@@ -278,9 +278,14 @@ export type RelayRoute =
   | { kind: "answer"; key: string; id: string }
   | { kind: "health" };
 
-/** Parse a relay request; undefined for anything else. */
+/**
+ * Parse a relay request; undefined for anything else. The built-in relay is served under
+ * /relay on its host (src/relay-config.ts); the same paths also work at the root, as on
+ * the Worker's workers.dev address and the Bun relay the tests run.
+ */
 export function route(url: URL): RelayRoute | undefined {
-  const parts = url.pathname.split("/").filter(Boolean);
+  let parts = url.pathname.split("/").filter(Boolean);
+  if (parts[0] === "relay") parts = parts.slice(1);
   if (!parts.length) return { kind: "health" };
   if (parts[0] !== "v1") return undefined;
   const [, kind, key, id] = parts;

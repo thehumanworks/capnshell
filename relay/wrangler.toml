@@ -5,6 +5,11 @@ name = "cns-relay"
 main = "worker.ts"
 compatibility_date = "2026-10-01"
 
+# The built-in relay's address is wss://cns.nothuman.work/relay (src/relay-config.ts): the
+# Worker owns the custom domain cns.nothuman.work and serves the relay under /relay (and at
+# the root, as on its workers.dev address).
+routes = [{ pattern = "cns.nothuman.work", custom_domain = true }]
+
 [[durable_objects.bindings]]
 name = "RELAY_KEYS"
 class_name = "RelayKey"
