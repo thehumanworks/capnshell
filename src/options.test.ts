@@ -3,11 +3,25 @@ import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { after, before, test } from "node:test";
+import { mock } from "bun:test";
+import * as config from "./config.js";
 import { generateIdentity } from "./identity.js";
 import { isLoopback, parseMcpOptions, parseOptions as parsePeerOptions, splitRemote, type DaemonConfig, type PeerConfig } from "./options.js";
 import { expandGrants, savePairedPeer } from "./peers.js";
 
 const posix = process.platform !== "win32";
+// These tests are about parsing, not about trusting the filesystem, and `nix build` runs
+// them in a sandbox whose / is owned by an unmapped user, which checkAncestors rightly
+// refuses. Keep the private-directory check on the test's own directory and leave the
+// ancestor walk to the tests of config and peers, which run outside the sandbox.
+// Bun's module mocks outlive the file, so the real module is put back once these tests end.
+const real = { ...config };
+const { checkPrivateDirectory, configDirectory } = real;
+mock.module("./config.js", () => ({
+  ...real,
+  checkAncestors: () => {},
+  checkConfigDirectory: () => { const directory = configDirectory(); checkPrivateDirectory(directory); return directory; },
+}));
 const studio = generateIdentity();
 let dir: string;
 const previous = process.env.CNS_CONFIG_DIR;
@@ -17,6 +31,7 @@ before(() => {
   if (posix) savePairedPeer("studio", { publicKey: studio.publicKey, addresses: ["ws://192.168.1.10:47381"], pairedAt: new Date().toISOString(), grants: { incoming: [], outgoing: expandGrants(["all"]) } });
 });
 after(() => {
+  mock.module("./config.js", () => real);
   if (previous === undefined) delete process.env.CNS_CONFIG_DIR; else process.env.CNS_CONFIG_DIR = previous;
   rmSync(dir, { recursive: true, force: true });
 });
