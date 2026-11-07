@@ -4,8 +4,9 @@ build/
 *.log
 result
 result-*
-.env*
+.env.keys
 .DS_Store
 .direnv
 .pi/worktrees
 .wrangler
+relay-token
