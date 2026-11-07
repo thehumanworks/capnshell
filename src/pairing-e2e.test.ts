@@ -188,6 +188,34 @@ test("two devices pair, run commands within their grants, and refuse everyone el
   const fetched = await cli(reader, ["cp", "studio:note.txt", path.join(reader.dir, "back.txt")]);
   assert.equal(fetched.code, 0, fetched.stderr);
   assert.equal(await readFile(path.join(reader.dir, "back.txt"), "utf8"), "from reader");
+  // The MCP file tools through reader's daemon need only the files grant too.
+  const readerUp = await cli(reader, ["up", "--bind", "127.0.0.1", "--port", await unusedPort("127.0.0.1"), "--state", reader.state]);
+  assert.equal(readerUp.code, 0, readerUp.stderr);
+  try {
+    const linked = Date.now() + 15000;
+    const readerLinked = async () => {
+      const control = await connectControl(reader.state);
+      try { return (await control.controller.peers()).some((peer) => peer.peer?.name === "studio"); } finally { control.close(); }
+    };
+    while (Date.now() < linked && !(await readerLinked())) await new Promise((resolve) => setTimeout(resolve, 200));
+    const { Client } = await import("@modelcontextprotocol/client");
+    const { StdioClientTransport } = await import("@modelcontextprotocol/client/stdio");
+    const invocation = cliInvocation(["mcp", "--daemon", "--state", reader.state]);
+    const client = new Client({ name: "test", version: "1" });
+    await client.connect(new StdioClientTransport({ command: invocation.file, args: invocation.args, env: cliEnvironment(reader.env) as Record<string, string> }));
+    try {
+      const read = await client.callTool({ name: "read_file", arguments: { peer: "studio", path: path.join(studio.dir, "note.txt") } });
+      assert.equal(read.isError, undefined, JSON.stringify(read.content));
+      assert.equal((read.structuredContent as { content: string }).content, "from reader");
+      const wrote = await client.callTool({ name: "write_file", arguments: { peer: "studio", path: path.join(studio.dir, "mcp.txt"), content: "via mcp" } });
+      assert.equal(wrote.isError, undefined, JSON.stringify(wrote.content));
+      assert.equal(await readFile(path.join(studio.dir, "mcp.txt"), "utf8"), "via mcp");
+      const ran = await client.callTool({ name: "run_command", arguments: { peer: "studio", command: "printf x" } });
+      assert.equal(ran.isError, true);
+    } finally { await client.close(); }
+  } finally {
+    assert.equal((await cli(reader, ["stop", "--state", reader.state])).code, 0);
+  }
 
   // --yes alone grants nothing; the invited device saves the other under the name the invite suggests.
   const guest = await device("guest");
