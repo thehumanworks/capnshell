@@ -120,12 +120,12 @@ export function createCli(): Command {
     .option("--state <path>", "Local daemon state file")
     .action(async (options) => { const { status } = await import("./commands/pairing-cli.js"); await status(options); });
   program.command("doctor")
-    .description("Check how this device reaches a paired device: each saved address, authentication and grants")
-    .argument("<name>", "A saved peer name")
+    .description("Check this device (identity, daemon, relay, addresses), or how it reaches a paired device: each saved address, authentication and grants")
+    .argument("[name]", "A saved peer name; without one, check this device")
     .option("--json", "Print the report as JSON")
     .option("--state <path>", "Local daemon state file")
-    .addHelpText("after", "\nExit 0 when an address answered as the paired device, 3 when it answered as another device or refused the pairing, 5 when none answered or none is saved.")
-    .action(async (name: string, options) => { const { doctor } = await import("./commands/pairing-cli.js"); await doctor(name, options); });
+    .addHelpText("after", "\nWith NAME: exit 0 when an address answered as the paired device, 3 when it answered as another device or refused the pairing, 5 when none answered or none is saved.\nWithout: exit 0 when paired devices can reach this device (warnings, such as only private addresses, do not change it), 3 when the daemon runs as another identity, 5 when there is no identity, no paired daemon or no address.")
+    .action(async (name: string | undefined, options) => { const { doctor } = await import("./commands/pairing-cli.js"); await doctor(name, options); });
   program.command("identity")
     .description("Show this device's identity for pairing, creating it on first use")
     .option("--json", "Print { publicKey, fingerprint, createdAt, path } as JSON")

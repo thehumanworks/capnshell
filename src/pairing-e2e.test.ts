@@ -117,6 +117,17 @@ test("two devices pair, run commands within their grants, and refuse everyone el
   assert.match(doctor.stdout, new RegExp(`^studio: paired device ${studioIdentity.fingerprint}\n  This device may use its:  shell, files, sessions\n  It may use this device's: shell\n  Daemon link: no daemon running here \\(cns up\\)\n  ws://127\\.0\\.0\\.1:${port}: ok \\(`));
   const doctorJson = JSON.parse((await cli(laptop, ["doctor", "studio", "--json", "--state", laptop.state])).stdout);
   assert.equal(doctorJson.attempts[0].result, "ok");
+  // Without a name, doctor checks this device: studio is ready on loopback only, laptop has no daemon.
+  const self = await cli(studio, ["doctor", "--state", studio.state]);
+  assert.equal(self.code, 0, self.stderr);
+  assert.match(self.stdout, new RegExp(`^Identity: +${studioIdentity.fingerprint} `));
+  assert.match(self.stdout, new RegExp(`\n  ws://127\\.0\\.0\\.1:${port}: private, this network only\n`));
+  assert.match(self.stdout, /Warning: Every address here is private/);
+  const selfJson = JSON.parse((await cli(studio, ["doctor", "--json", "--state", studio.state])).stdout);
+  assert.deepEqual([selfJson.daemon.matchesIdentity, selfJson.reachableBeyondNetwork, selfJson.problems], [true, false, []]);
+  const noDaemon = await cli(laptop, ["doctor", "--state", laptop.state]);
+  assert.equal(noDaemon.code, 5);
+  assert.match(noDaemon.stdout, /Daemon: +not running\n[\s\S]*Problem: No daemon runs here/);
 
   // Grants change after pairing, and apply to the next connection.
   const revoked = await cli(studio, ["peer", "revoke", "laptop", "shell", "--state", studio.state]);

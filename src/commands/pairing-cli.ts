@@ -12,6 +12,7 @@ import { peerFileExists, peerNamePattern, removeAlias, validatePeerUrl } from ".
 import { describeGrants, expandGrants, findPairedPeer, getPeer, listPeers, savePairedPeer, updatePairedPeer, PERMISSIONS, type Permission } from "../peers.js";
 import { checkRelayUrl, configuredRelay } from "../settings.js";
 import { plain } from "../terminal.js";
+import { selfCheck, type SelfFacts } from "../self-check.js";
 import type { ShellApi } from "../shell.js";
 import { RefusingShell } from "../refusing-shell.js";
 import { connectControl, localRelay, removeStaleState, startDaemon, type ControlConnection } from "./daemon.js";
@@ -314,8 +315,40 @@ export async function status(options: StatusOptions): Promise<void> {
   console.log(links.length ? `Links:       ${links.map((link) => `${link.name} (${link.address}, ${link.hostname})`).join(", ")}` : "Links:       none");
 }
 
-/** `cns doctor NAME`: how, and whether, this device reaches a paired device right now. */
-export async function doctor(name: string, options: DoctorOptions): Promise<void> {
+/** `cns doctor` with no name: whether paired devices can reach this device, and from where. */
+async function doctorSelf(options: DoctorOptions): Promise<void> {
+  let identity: SelfFacts["identity"];
+  try {
+    const loaded = loadIdentity();
+    identity = loaded ? { fingerprint: loaded.fingerprint, publicKey: loaded.publicKey } : { missing: true };
+  } catch (error) { identity = { error: printable(errorMessage(error)) }; }
+  let daemon: SelfFacts["daemon"] = { running: false };
+  let control: ControlConnection | undefined;
+  try { control = await connectControl(options.state); }
+  catch (error) {
+    const missing = error instanceof Error && "code" in error && error.code === "ENOENT";
+    if (!missing) daemon = { running: false, error: `its state file is there but it does not answer: ${printable(errorMessage(error))}` };
+  }
+  if (control) {
+    try {
+      const info = await control.remote.status();
+      daemon = { running: true, pid: info.pid, url: info.url, paired: !!info.paired, addresses: info.addresses ?? [], ...info.identity ? { identity: info.identity } : {}, ...info.relay ? { relay: info.relay } : {}, ...info.relayRegistered !== undefined ? { relayRegistered: info.relayRegistered } : {} };
+    } catch (error) {
+      daemon = { running: false, error: `it does not answer: ${printable(errorMessage(error))}` };
+    } finally { control.close(); }
+  }
+  let relay: SelfFacts["configuredRelay"];
+  let settingsError: string | undefined;
+  try { relay = configuredRelay(); } catch (error) { settingsError = printable(errorMessage(error)); }
+  const { report, lines, exitCode } = selfCheck({ identity, identityPath: identityPath(), daemon, paired: listPeers().filter((peer) => peer.kind === "paired").length, ...relay ? { configuredRelay: relay } : {}, ...settingsError ? { settingsError } : {} });
+  if (options.json) console.log(JSON.stringify(report, null, 2));
+  else console.log(lines.join("\n"));
+  if (exitCode) process.exitCode = exitCode;
+}
+
+/** `cns doctor [NAME]`: with a name, how, and whether, this device reaches a paired device right now; without, a check of this device. */
+export async function doctor(name: string | undefined, options: DoctorOptions): Promise<void> {
+  if (name === undefined) return doctorSelf(options);
   const entry = getPeer(name);
   if (!entry) throw new Error(`Unknown peer: ${name}. cns peers lists the saved ones.`);
   const report: Record<string, unknown> = { name, kind: entry.kind };
