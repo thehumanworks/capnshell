@@ -5,7 +5,7 @@ import { relayEndpoint } from "./relay-hub.js";
  * paired devices there after their direct addresses, so devices on different networks
  * reach each other with nothing to set up. See docs/adr/0001-built-in-relay.md.
  */
-export const DEFAULT_RELAY = "wss://cns-relay.rodat-human-ada.workers.dev";
+export const DEFAULT_RELAY = "wss://cns.nothuman.work/relay";
 
 /**
  * The relay this device uses. CNS_RELAY replaces it for development and tests only: a

@@ -3,8 +3,8 @@
 Paired devices that cannot reach each other directly (behind NAT, on different
 networks) meet at a relay. This Worker is the relay built into cns: every `cns up`
 registers there and every device dials paired devices there after their direct
-addresses, with no URL or token to set up. Its address is `DEFAULT_RELAY` in
-`src/relay-config.ts`. [ADR 0001](../docs/adr/0001-built-in-relay.md) records the decision.
+addresses, with no URL or token to set up. Its address is `wss://cns.nothuman.work/relay`
+(`DEFAULT_RELAY` in `src/relay-config.ts`). [ADR 0001](../docs/adr/0001-built-in-relay.md) records the decision.
 
 The relay forwards encrypted links without being able to read them; the devices still
 authenticate each other end to end, so a relay can deny service but cannot impersonate a
@@ -36,7 +36,10 @@ cd relay
 npx wrangler@4.151.3 deploy
 ```
 
-It needs no secrets. Deploy before releasing a cns that depends on a change here. If the
+It needs no secrets. `wrangler.toml` routes `cns.nothuman.work/relay*` to the Worker, so the
+`nothuman.work` zone must be on the same Cloudflare account, with a proxied DNS record for
+`cns` (any target, such as `AAAA 100::`, since the Worker answers). The relay strips the
+`/relay` prefix itself and also answers at the root of its workers.dev address. Deploy before releasing a cns that depends on a change here. If the
 Worker's address changes, update `DEFAULT_RELAY` and release cns.
 
 ## Test locally
