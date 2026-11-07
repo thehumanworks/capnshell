@@ -36,10 +36,9 @@ cd relay
 npx wrangler@4.151.3 deploy
 ```
 
-It needs no secrets. `wrangler.toml` routes `cns.nothuman.work/relay*` to the Worker, so the
-`nothuman.work` zone must be on the same Cloudflare account, with a proxied DNS record for
-`cns` (any target, such as `AAAA 100::`, since the Worker answers). The relay strips the
-`/relay` prefix itself and also answers at the root of its workers.dev address. Deploy before releasing a cns that depends on a change here. If the
+It needs no secrets. `wrangler.toml` gives the Worker the custom domain `cns.nothuman.work`,
+so Cloudflare manages its DNS record and certificate. The relay serves its paths under
+`/relay` there, and also at the root, as on its workers.dev address. Deploy before releasing a cns that depends on a change here. If the
 Worker's address changes, update `DEFAULT_RELAY` and release cns.
 
 ## Test locally

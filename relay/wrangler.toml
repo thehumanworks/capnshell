@@ -5,10 +5,10 @@ name = "cns-relay"
 main = "worker.ts"
 compatibility_date = "2026-10-01"
 
-# The built-in relay's address, wss://cns.nothuman.work/relay (src/relay-config.ts). The zone
-# nothuman.work must be on this Cloudflare account, with a proxied DNS record for cns.
-# The Worker also answers at its workers.dev address, at the root.
-routes = [{ pattern = "cns.nothuman.work/relay*", zone_name = "nothuman.work" }]
+# The built-in relay's address is wss://cns.nothuman.work/relay (src/relay-config.ts): the
+# Worker owns the custom domain cns.nothuman.work and serves the relay under /relay (and at
+# the root, as on its workers.dev address).
+routes = [{ pattern = "cns.nothuman.work", custom_domain = true }]
 
 [[durable_objects.bindings]]
 name = "RELAY_KEYS"
