@@ -2,6 +2,16 @@
 
 Shells, terminals and files on your own devices, on Linux, macOS and Windows. Run one executable on each machine, pair two devices once, and reach each by name: directly, or through the relay built into cns when they are on different networks. Every link is authenticated and encrypted end to end, and each device gets only what the other's owner granted.
 
+## Install
+
+Each [GitHub release](https://github.com/thehumanworks/capnshell/releases) has the executable for Linux (x64, arm64), macOS (Apple Silicon, Intel) and Windows (x64), which [mise](https://mise.jdx.dev) installs:
+
+```sh
+mise use -g github:thehumanworks/capnshell
+```
+
+Or download `cns-VERSION-OS-ARCH.tar.gz` (`.zip` on Windows) from the release yourself: it holds just `cns`, and `SHA256SUMS` lists every archive's checksum. With Nix, see [Nix](#nix). To build it, see [Build and distribute](#build-and-distribute).
+
 ## Usage
 
 ```sh
@@ -389,7 +399,32 @@ nix develop
 nix flake check
 ```
 
+To install it from GitHub without a checkout:
+
+```sh
+nix profile install github:thehumanworks/capnshell
+nix run github:thehumanworks/capnshell -- up
+```
+
+In a flake configuration, add `inputs.capnshell.url = "github:thehumanworks/capnshell";` and use the package (`capnshell.packages.${system}.default`, or `pkgs.cns` with `capnshell.overlays.default`), or a module that also runs the daemon as a service:
+
+```nix
+# Home Manager: a systemd user service on Linux, a launchd agent on macOS
+imports = [ inputs.capnshell.homeModules.default ];
+services.cns.enable = true;
+
+# NixOS: a system service, started at boot, running as one user
+imports = [ inputs.capnshell.nixosModules.default ];
+services.cns = { enable = true; user = "alice"; };
+```
+
+Both modules install `cns` and take `bind`, `port`, `stateFile` and `environment` like `cns up --install`; the NixOS one also takes `openFirewall` and `path`. They create the device's identity on first start; pair as usual with `cns pair`. Commands paired devices run get the service's `PATH`, which lists the user's Nix profiles and the system's packages, not a login shell's. Set a relay with `cns config relay`, which the service reads when it starts, rather than in `environment`, which ends up readable in the Nix store. The Home Manager service has the name and state file `cns up --install` uses, so `cns up` starts it after `cns stop`, and Home Manager keeps it at the current package's path across upgrades; don't also run `cns up --install`. The NixOS service is managed with `systemctl` (`systemctl restart cns`, `journalctl -u cns`): `cns stop` stops it until it restarts, and `cns up` would then start a second daemon outside it.
+
 The default package/app is also available as `cns` (and the legacy flake attribute `capnweb-shell`). The package contains the executable with an absolute Nix-provided Bash path; it does not require or install a source checkout. Distribute Nix builds through Nix because their runtime libraries may reference the Nix store.
+
+### Releases
+
+Pushing a tag `vX.Y.Z` that matches `package.json`'s version runs `.github/workflows/release.yml`: it builds `cns` on each platform it ships for, runs it there, and publishes the release with one archive per platform and `SHA256SUMS`. Run the workflow from the Actions tab with an existing tag to rebuild that release's assets.
 
 `flake.lock` pins nixpkgs; `bun.lock` pins JavaScript dependencies. Nix fetches production dependencies in a fixed-output derivation and builds/tests offline. When production dependencies change, update the hash in `nix/package.nix` using `lib.fakeHash` and the hash reported by Nix; then rerun `nix flake check`.
 

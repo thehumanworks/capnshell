@@ -1,0 +1,113 @@
+# Pushing a tag vX.Y.Z (matching package.json's version) builds cns for each
+# platform and publishes a GitHub release with one archive per platform, which
+# `mise use -g github:thehumanworks/capnshell` installs. Each archive holds the
+# executable at its root, and SHA256SUMS lists them all. Every executable is
+# built on its own platform and run there before the release is published.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to (re)build the release for, such as v1.0.0
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+  GH_TOKEN: ${{ github.token }}
+  GH_REPO: ${{ github.repository }}
+
+jobs:
+  draft:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ env.TAG }}
+      - name: Check the tag against package.json
+        run: |
+          version="$(jq -r .version package.json)"
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::Tag $TAG does not match package.json version $version (expected v$version)."
+            exit 1
+          fi
+      - name: Create a draft release
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists; its assets are replaced."
+          else
+            gh release create "$TAG" --draft --verify-tag --generate-notes --title "$TAG"
+          fi
+
+  build:
+    needs: draft
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { runner: ubuntu-latest, target: bun-linux-x64-baseline, asset: linux-x64 }
+          - { runner: ubuntu-24.04-arm, target: bun-linux-arm64, asset: linux-arm64 }
+          - { runner: macos-latest, target: bun-darwin-arm64, asset: darwin-arm64 }
+          - { runner: macos-15-intel, target: bun-darwin-x64, asset: darwin-x64 }
+          - { runner: windows-latest, target: bun-windows-x64-baseline, asset: windows-x64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ env.TAG }}
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - name: Build
+        run: |
+          exe=cns
+          [ "${{ matrix.asset }}" = windows-x64 ] && exe=cns.exe
+          mkdir -p out
+          bun run build --target=${{ matrix.target }} --outfile="out/$exe"
+          echo "EXE=$exe" >> "$GITHUB_ENV"
+      - name: Run it outside the checkout
+        run: |
+          cp "out/$EXE" "$RUNNER_TEMP/$EXE"
+          cd "$RUNNER_TEMP"
+          "./$EXE" --help
+      - name: Archive and upload
+        run: |
+          name="cns-$TAG-${{ matrix.asset }}"
+          cd out
+          if [ "${{ matrix.asset }}" = windows-x64 ]; then
+            7z a -tzip "../$name.zip" "$EXE"
+            file="$name.zip"
+          else
+            tar -czf "../$name.tar.gz" "$EXE"
+            file="$name.tar.gz"
+          fi
+          cd ..
+          gh release upload "$TAG" "$file" --clobber
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Add SHA256SUMS and publish
+        run: |
+          mkdir assets && cd assets
+          gh release download "$TAG" --pattern 'cns-*'
+          sha256sum cns-* > SHA256SUMS
+          cat SHA256SUMS
+          gh release upload "$TAG" SHA256SUMS --clobber
+          gh release edit "$TAG" --draft=false --latest
