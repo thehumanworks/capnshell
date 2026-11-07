@@ -60,7 +60,9 @@ test("an attached session survives losing the connection and reports what it mis
   await writeFile(file, JSON.stringify({ ...record, addresses: [`ws://127.0.0.1:${proxyPort}`] }), { mode: 0o600 });
   const cut = () => { for (const socket of pairs.splice(0)) socket.destroy(); };
 
-  const program = "printf 'READY\\n'; while :; do if IFS= read -r -t 0.2 line; then printf 'got:%s\\n' \"$line\"; fi; printf .; done";
+  // macOS ships bash 3.2, whose `read -t` takes whole seconds only, so a ticker in the
+  // background keeps output flowing while the foreground loop blocks on input.
+  const program = "printf 'READY\\n'; while :; do printf .; sleep 0.2; done & while IFS= read -r line; do printf 'got:%s\\n' \"$line\"; done";
   assert.equal((await cli(laptop, ["tty", "studio", "--name", "work", "--", program])).code, 0);
   const attached = launchCli(t, ["tty", "studio", "--attach", "work"], { env: laptop.env });
   await attached.waitFor("READY");
