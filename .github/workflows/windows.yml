@@ -1,8 +1,12 @@
-# Windows peers are otherwise untested. Manual only, because this repository's
-# Actions minutes are limited: run it from the Actions tab or `gh workflow run`.
+# Windows peers, and the PTY path there in particular, are otherwise untested.
+# It runs once a week rather than on every push because this repository's
+# Actions minutes are limited; run it on demand from the Actions tab or
+# `gh workflow run windows.yml`.
 name: Windows
 
 on:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays 06:17 UTC
   workflow_dispatch:
 
 jobs:
