@@ -19,6 +19,13 @@ const readOptionsSchema = z.strictObject({
   offset: z.int().min(0).max(Number.MAX_SAFE_INTEGER).default(0),
   length: z.int().min(1).max(MAX_FILE_CHUNK_BYTES).default(MAX_FILE_CHUNK_BYTES),
 });
+const writeAtOptionsSchema = z.strictObject({
+  offset: z.int().min(0).max(Number.MAX_SAFE_INTEGER).default(0),
+  /** Empty the file before writing, as the first part of a new copy does. */
+  truncate: z.boolean().default(false),
+  /** Permission bits for a file this call creates, less the umask; an existing file keeps its own. */
+  mode: z.int().min(0).max(0o777).optional(),
+});
 const accessOptionsSchema = z.strictObject({ write: z.boolean().default(false) });
 const globOptionsSchema = z.strictObject({
   /** Glob patterns, relative to cwd, whose matches are left out. */
@@ -32,6 +39,7 @@ const dataSchema = z.instanceof(Uint8Array, { message: "data must be a Uint8Arra
   .refine((data) => data.byteLength <= MAX_WRITE_BYTES, `writeFile accepts at most ${MAX_WRITE_BYTES} bytes.`);
 
 export type ReadFileOptions = z.input<typeof readOptionsSchema>;
+export type WriteAtOptions = z.input<typeof writeAtOptionsSchema>;
 export type AccessOptions = z.input<typeof accessOptionsSchema>;
 export type GlobOptions = z.input<typeof globOptionsSchema>;
 export type FileKind = "file" | "directory" | "symlink" | "other";
@@ -162,4 +170,26 @@ export async function readFileChunk(file: string, options: ReadFileOptions = {})
  */
 export async function writeWholeFile(file: string, data: Uint8Array): Promise<void> {
   await writeFile(pathSchema.parse(file), dataSchema.parse(data));
+}
+
+/**
+ * Write up to MAX_WRITE_BYTES into a file at `offset`, creating it when it is missing,
+ * so a larger file can be sent in several calls: the first with `truncate`, the rest
+ * at increasing offsets. Links are followed and an existing file keeps its inode,
+ * owner and permissions. Unlike writeWholeFile, a broken connection between calls
+ * leaves the file partly written.
+ */
+export async function writeFileAt(file: string, data: Uint8Array, options: WriteAtOptions = {}): Promise<void> {
+  const target = pathSchema.parse(file);
+  const bytes = dataSchema.parse(data);
+  const { offset, truncate, mode } = writeAtOptionsSchema.parse(options);
+  const handle = await open(target, constants.O_WRONLY | constants.O_CREAT | (truncate ? constants.O_TRUNC : 0), mode ?? 0o666);
+  try {
+    for (let written = 0; written < bytes.byteLength;) {
+      const { bytesWritten } = await handle.write(bytes, written, bytes.byteLength - written, offset + written);
+      written += bytesWritten;
+    }
+  } finally {
+    await handle.close();
+  }
 }

@@ -271,3 +271,13 @@ export function relayEndpoint(base: string, kind: "accept" | "dial" | "answer", 
 export function isRelayAddress(address: string): boolean {
   try { return /\/v1\/dial\/[A-Za-z0-9_-]{43}\/?$/.test(new URL(address).pathname); } catch { return false; }
 }
+
+/**
+ * The addresses to dial a paired device at: its saved ones and, when none of them is a
+ * relay but this device has one, that relay too. Devices that share a relay reach each
+ * other there even when the record was saved before the other device had the relay.
+ */
+export function dialAddresses(peer: { publicKey: string; addresses: readonly string[] }, relay: string | undefined): string[] {
+  if (!relay || peer.addresses.some(isRelayAddress)) return [...peer.addresses];
+  return [...peer.addresses, relayEndpoint(relay, "dial", peer.publicKey)];
+}

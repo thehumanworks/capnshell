@@ -113,6 +113,7 @@ test("one-way WebSocket refuses valid reverse operations without blocking forwar
     () => reverse.exec(sink, "printf touched > marker", { cwd: directory }),
     () => reverse.readFile(secret),
     () => reverse.writeFile(secret, new TextEncoder().encode("changed")),
+    () => reverse.writeFileAt(secret, new TextEncoder().encode("changed")),
     () => reverse.fork(),
     () => reverse.openPty(sink, { command: "printf touched > marker", cwd: directory }),
     () => reverse.startPtySession("work", { command: "printf touched > marker", cwd: directory }),

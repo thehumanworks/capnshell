@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isLoopback, parseMcpOptions, parseOptions as parsePeerOptions } from "./options.js";
+import { isLoopback, parseMcpOptions, parseOptions as parsePeerOptions, splitRemote } from "./options.js";
 
 // Exercise Commander's real environment handling without inheriting user defaults
 // or leaking an individual test's environment to other tests.
@@ -27,7 +27,7 @@ const parseMcp = (argv: string[], env: NodeJS.ProcessEnv = {}) => withEnvironmen
 test("one-way is opt-in for all peer commands", () => {
   const cases = [
     ["listen"], ["connect", "ws://localhost:47381"], ["run", "--", "pwd"], ["tty"], ["sessions"],
-    ["keys", "build", "Enter"], ["screen", "build"], ["kill", "build"],
+    ["keys", "build", "Enter"], ["screen", "build"], ["kill", "build"], ["cp", "a", ":/b"],
   ];
   for (const args of cases) {
     assert.equal(parseOptions(args).oneWay, false, args.join(" "));
@@ -280,4 +280,29 @@ test("named session commands take an optional URL, a session name and their own 
     ["screen"], ["screen", "a", "b"], ["screen", "a", "--timeout", "5"], ["screen", "a", "--until", ""], ["screen", "a", "--history", "1001"],
     ["kill"], ["kill", "a", "b"], ["sessions", "a", "b"], ["sessions", "--literal"],
   ]) assert.throws(() => parseOptions(args), `Expected rejection: ${args.join(" ")}`);
+});
+
+test("run forwards stdin unless --no-stdin says otherwise", () => {
+  assert.equal(parseOptions(["run", "--", "cat"]).stdin, true);
+  assert.equal(parseOptions(["run", "--no-stdin", "--", "cat"]).stdin, false);
+  assert.equal(parseOptions(["run", "-n", "--", "cat"]).stdin, false);
+  assert.equal(parseOptions(["tty"]).stdin, undefined);
+});
+
+test("cp takes one local and one remote path, scp style", () => {
+  assert.deepEqual(parseOptions(["cp", "./a.txt", ":/tmp/"]).copy, { direction: "upload", local: "./a.txt", remote: "/tmp/" });
+  assert.deepEqual(parseOptions(["cp", ":notes.txt", "."]).copy, { direction: "download", local: ".", remote: "notes.txt" });
+  const peer = parseOptions(["cp", "--peer", "ws://box:47381", "report.pdf", ":"]);
+  assert.equal(peer.url, "ws://box:47381/");
+  assert.deepEqual(peer.copy, { direction: "upload", local: "report.pdf", remote: "" });
+  assert.equal(parseOptions(["cp", "--port", "47999", "a", ":/b"]).url, "ws://127.0.0.1:47999");
+  for (const argv of [["cp", "a", "b"], ["cp", ":a", ":b"], ["cp", "a"], ["cp", "", ":b"], ["cp", "missing:/x", "."], ["cp", "ws://box:47381/x", "."]]) {
+    assert.throws(() => parseOptions(argv), argv.join(" "));
+  }
+  assert.deepEqual(splitRemote("studio:/srv/app"), { target: "studio", path: "/srv/app" });
+  assert.deepEqual(splitRemote(":~/x"), { path: "~/x" });
+  assert.equal(splitRemote("./a:b"), undefined);
+  assert.equal(splitRemote("dir/a:b"), undefined);
+  assert.equal(splitRemote("C:\\Users\\me", "win32"), undefined);
+  assert.deepEqual(splitRemote("C:/Users", "linux"), { target: "C", path: "/Users" });
 });

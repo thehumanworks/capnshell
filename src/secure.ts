@@ -372,11 +372,17 @@ export function attachClientSocket(socket: WebSocket, channel: SecureChannel): v
 export async function connectSecure(url: string, identity: Identity, options: InitiatorOptions & { signal?: AbortSignal; timing?: Timing } = {}): Promise<{ channel: SecureChannel; peer: PublicKey }> {
   await secureReady();
   const signal = options.signal ?? new AbortController().signal;
-  const socket = await openSocket(url, signal);
+  return secureOver(await openSocket(url, signal), identity, { ...options, signal });
+}
+
+/** Authenticate over a socket that is already open; the socket is closed when this fails. */
+async function secureOver(socket: WebSocket, identity: Identity, options: InitiatorOptions & { signal: AbortSignal; timing?: Timing }): Promise<{ channel: SecureChannel; peer: PublicKey }> {
+  const { signal } = options;
   const channel = SecureChannel.initiator(clientWire(socket), identity, options);
   attachClientSocket(socket, channel);
   const abort = () => channel.close("Cancelled");
-  signal.addEventListener("abort", abort, { once: true });
+  if (signal.aborted) abort();
+  else signal.addEventListener("abort", abort, { once: true });
   try {
     const { peer } = await channel.ready;
     return { channel, peer };
@@ -395,35 +401,98 @@ function weight(error: unknown): number {
   return 0;
 }
 
+/** How long direct addresses get to answer before a relay is dialed too. */
+export const RELAY_HEAD_START_MS = 300;
+
 /**
  * Open a channel to a paired device at the first of its addresses that answers as that
- * device, trying them in order: direct addresses first, a relay last. Every address but
- * the last gets `perAddressMs` to answer. When none works, the most telling failure is
- * thrown: another device at an address, then a refusal, then unreachable.
+ * device. Direct addresses are dialed together; relays are dialed `relayDelayMs` later,
+ * or as soon as every direct address has failed, so a reachable direct path wins and a
+ * dead one costs only the head start. Every address but the last gets `perAddressMs`
+ * to answer.
+ *
+ * Only socket opening is raced. Sockets authenticate one at a time, in the order they
+ * opened, and the others are dropped unauthenticated once one succeeds, so the device
+ * never sees two links (or two uses of an invite) from one call. When none works, the
+ * most telling failure is thrown: another device at an address, then a refusal, then
+ * unreachable.
  */
-export async function connectFirst(addresses: readonly string[], identity: Identity, options: InitiatorOptions & { signal?: AbortSignal; perAddressMs?: number; timing?: Timing } = {}): Promise<{ channel: SecureChannel; peer: PublicKey; url: string }> {
+export async function connectFirst(addresses: readonly string[], identity: Identity, options: InitiatorOptions & { signal?: AbortSignal; perAddressMs?: number; relayDelayMs?: number; timing?: Timing } = {}): Promise<{ channel: SecureChannel; peer: PublicKey; url: string }> {
   if (!addresses.length) throw new Error("No saved address. Add one with cns peer address NAME ws://HOST:PORT.");
+  const outer = options.signal;
+  outer?.throwIfAborted();
+  await secureReady();
+  outer?.throwIfAborted();
+  const { perAddressMs = 3000, relayDelayMs = RELAY_HEAD_START_MS, ...channelOptions } = options;
   // Direct addresses first, in their saved order; relays last, however they were saved.
-  const ordered = [...addresses.filter((url) => !isRelayAddress(url)), ...addresses.filter(isRelayAddress)];
+  const direct = addresses.filter((url) => !isRelayAddress(url));
+  const relays = addresses.filter(isRelayAddress);
+  const lastUrl = relays.length ? relays.at(-1) : direct.at(-1);
+  const attempts = new Set<AbortController>();
+  let won = false;
   let failure: unknown;
-  for (const [index, url] of ordered.entries()) {
-    options.signal?.throwIfAborted();
-    const attempt = new AbortController();
-    const outer = options.signal;
-    const relay = () => attempt.abort(outer!.reason);
-    outer?.addEventListener("abort", relay, { once: true });
-    const last = index === ordered.length - 1;
-    const timer = last ? undefined : setTimeout(() => attempt.abort(new Error(`Timed out connecting to ${url}.`)), options.perAddressMs ?? 3000);
-    try {
-      const opened = await connectSecure(url, identity, { ...options, signal: attempt.signal });
-      return { ...opened, url };
-    } catch (error) {
-      if (outer?.aborted) throw error;
-      if (weight(error) >= weight(failure)) failure = error;
-    } finally {
-      clearTimeout(timer);
-      outer?.removeEventListener("abort", relay);
-    }
-  }
-  throw failure instanceof Error ? failure : new Error(String(failure));
+  // Opened sockets wait here for their turn to authenticate.
+  let turn = Promise.resolve();
+
+  return new Promise((resolve, reject) => {
+    let remaining = addresses.length;
+    let directLeft = direct.length;
+    let relayTimer: ReturnType<typeof setTimeout> | undefined;
+    const stop = (reason: unknown) => {
+      clearTimeout(relayTimer);
+      outer?.removeEventListener("abort", cancel);
+      for (const attempt of attempts) attempt.abort(reason);
+    };
+    const cancel = () => { if (won) return; won = true; stop(outer!.reason); reject(outer!.reason); };
+    outer?.addEventListener("abort", cancel, { once: true });
+
+    const dial = async (url: string, last: boolean) => {
+      const attempt = new AbortController();
+      attempts.add(attempt);
+      const timer = last ? undefined : setTimeout(() => attempt.abort(new Error(`Timed out connecting to ${url}.`)), perAddressMs);
+      try {
+        const socket = await openSocket(url, attempt.signal);
+        const previous = turn;
+        let release!: () => void;
+        turn = new Promise((done) => { release = done; });
+        try {
+          await previous;
+          if (won || attempt.signal.aborted) {
+            closeSocket(socket, "Connected elsewhere");
+            attempt.signal.throwIfAborted();
+            return;
+          }
+          const opened = await secureOver(socket, identity, { ...channelOptions, signal: attempt.signal });
+          if (won) { opened.channel.close("Connected elsewhere"); return; }
+          won = true;
+          attempts.delete(attempt);
+          stop(new Error("Connected at another address."));
+          resolve({ ...opened, url });
+        } finally {
+          release();
+        }
+      } catch (error) {
+        if (!won && weight(error) >= weight(failure)) failure = error;
+      } finally {
+        clearTimeout(timer);
+        attempts.delete(attempt);
+        if (!isRelayAddress(url) && --directLeft === 0) startRelays();
+        if (--remaining === 0 && !won) {
+          won = true;
+          stop(failure);
+          reject(failure instanceof Error ? failure : new Error(String(failure)));
+        }
+      }
+    };
+    let relaysStarted = false;
+    const startRelays = () => {
+      if (relaysStarted || won) return;
+      relaysStarted = true;
+      clearTimeout(relayTimer);
+      for (const url of relays) void dial(url, url === lastUrl);
+    };
+    for (const url of direct) void dial(url, url === lastUrl);
+    if (!direct.length) startRelays();
+    else if (relays.length) relayTimer = setTimeout(startRelays, relayDelayMs);
+  });
 }

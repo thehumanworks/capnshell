@@ -1,12 +1,14 @@
 import { AuthError } from "../auth.js";
 import { errorMessage, printable } from "../errors.js";
 import { ensureIdentity } from "../identity.js";
+import { explainDenial } from "../peers.js";
 import type { PeerConfig } from "../options.js";
 import { RefusingShell } from "../refusing-shell.js";
-import { isRelayAddress } from "../relay-hub.js";
+import { dialAddresses, isRelayAddress } from "../relay-hub.js";
 import { connectFirst, rpcSession, secureReady } from "../secure.js";
 import type { PtySessionInfo, ShellApi } from "../shell.js";
 import { attachTerminal, ConnectionLost, DETACH_KEY, plain, type RemoteNamedPty } from "../terminal.js";
+import { localRelay } from "./daemon.js";
 import { commandExitCode, describeExit } from "./one-shot.js";
 
 /** The session `cns tty DEVICE` uses on a paired device when no other is named. */
@@ -33,7 +35,8 @@ function classify(error: unknown, device: string, name: string, first: boolean):
     return new Final(`${device} ${first ? "does not accept" : "no longer accepts"} this device (${message}).`, 3);
   }
   if (/^Permission denied/.test(message)) {
-    return new Final(first ? `${device} does not let this device use that session: ${message}` : `access to ${device}'s sessions was revoked: ${message}`, 4);
+    const explained = explainDenial(message, device);
+    return new Final(first ? `${device} does not let this device use that session: ${explained}` : `access to ${device}'s sessions was revoked: ${explained}`, 4);
   }
   if (/No PTY session named/.test(message)) {
     return new Final(first ? `there is no session ${name} on ${device}; cns sessions ${device} lists them.` : `the session ${name} no longer exists on ${device}: it was killed, its time limit passed, or ${device}'s daemon restarted.`, 1);
@@ -62,6 +65,8 @@ export async function attachPaired(config: PeerConfig): Promise<number | typeof 
   const name = config.name ?? DEFAULT_SESSION;
   const create = !config.attach;
   const { identity } = ensureIdentity();
+  // Saved addresses, and this device's relay when the record has none: devices that share a relay meet there.
+  const addresses = dialAddresses(expect, await localRelay(config.state));
   await secureReady();
   const interrupted = new AbortController();
   let exitOnSignal = 130;
@@ -145,7 +150,7 @@ export async function attachPaired(config: PeerConfig): Promise<number | typeof 
           ...(sized ? { cols: options.cols, rows: options.rows } : {}), answers: !options.respond,
         }), { cols: config.cols, rows: config.rows }, {
           signal: interrupted.signal, detachKey: DETACH_KEY, alternateScreen: true, onOutput: report,
-          onInputRefused: (reason) => say(`${expect.name} lets this device watch ${name} but not type into it (${printable(reason)})`),
+          onInputRefused: (reason) => say(`${expect.name} lets this device watch ${name} but not type into it (${explainDenial(printable(reason), expect.name)})`),
         });
         if (result.exit) {
           if (process.stdout.isTTY) say(`${name} ${describeExit(result.exit)}`);
@@ -175,7 +180,7 @@ export async function attachPaired(config: PeerConfig): Promise<number | typeof 
   }
 
   async function open(session: string, startIfMissing: boolean) {
-    const { channel, url } = await connectFirst(expect.addresses, identity, { expect: expect.publicKey, signal: interrupted.signal });
+    const { channel, url } = await connectFirst(addresses, identity, { expect: expect.publicKey, signal: interrupted.signal });
     const remote = rpcSession<ShellApi>(channel, new RefusingShell());
     const close = () => { remote[Symbol.dispose](); channel.close("Attachment ended"); };
     let startedNow = false;
