@@ -113,7 +113,9 @@ test("devices that cannot reach each other directly pair and link through the re
   assert.deepEqual([shared.code, shared.stdout], [0, "shared-relay"], shared.stderr);
   const doctorShared = await cli(laptop, ["doctor", "studio", "--state", laptop.state]);
   assert.equal(doctorShared.code, 0, doctorShared.stdout + doctorShared.stderr);
-  assert.match(doctorShared.stdout, /\/v1\/dial\/[A-Za-z0-9_-]{43} \[this device's relay\]: ok \(.*encrypted\)/);
+  // Once the standing link is up, laptop may already have learned studio's relay address from it
+  // and saved it, so doctor shows it as a saved relay rather than this device's.
+  assert.match(doctorShared.stdout, /\/v1\/dial\/[A-Za-z0-9_-]{43} \[(?:this device's )?relay\]: ok \(.*encrypted\)/);
   const viaOf = async (dev: typeof laptop) => {
     const control = await connectControl(dev.state);
     try { return (await control.controller.peers()).filter((peer) => peer.peer?.daemon).map((peer) => peer.peer!.via); } finally { control.close(); }
@@ -141,7 +143,11 @@ test("devices that cannot reach each other directly pair and link through the re
     const saved = JSON.parse(await readFile(file, "utf8")).addresses as string[];
     return saved[0] === `ws://127.0.0.1:${port}` && !saved.includes("ws://127.0.0.1:1") && isRelayAddress(saved.at(-1)!);
   }, "laptop saves studio's advertised addresses");
-  await eventually(async () => JSON.parse(await readFile(path.join(studio.dir, "peers", "laptop"), "utf8")).addresses.length === 1, "studio saves laptop's address");
+  // Laptop's daemon registers at the relay saved with cns config relay, so it advertises that relay as well.
+  await eventually(async () => {
+    const saved = JSON.parse(await readFile(path.join(studio.dir, "peers", "laptop"), "utf8")).addresses as string[];
+    return saved.length === 2 && !isRelayAddress(saved[0]!) && isRelayAddress(saved[1]!);
+  }, "studio saves laptop's addresses");
 
   if (!relay) return;
   // The relay restarts: studio registers again and the daemons link again.
