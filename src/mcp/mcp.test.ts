@@ -1,16 +1,19 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
-import { Client, StreamableHTTPClientTransport, type CallToolResult } from "@modelcontextprotocol/client";
+import { Client, InMemoryTransport, StreamableHTTPClientTransport, type CallToolResult } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { connectControl } from "../commands/daemon.js";
+import { GrantedShell } from "../granted-shell.js";
+import type { Permission } from "../peers.js";
+import { ShellApi, type FileChunk } from "../shell.js";
 import { LOOPBACK, LOOPBACK_HOST, cliEnvironment, cliInvocation, launchCli, unusedPort } from "../test-support.js";
 import { LegacySessions, MAX_SESSIONS } from "./legacy-sessions.js";
-import { clip, createMcpServer, MAX_RESULT_CHARS } from "./server.js";
-import type { McpTarget, ToolController } from "./target.js";
+import { clip, createMcpServer, MAX_RESULT_CHARS, readLines } from "./server.js";
+import type { McpTarget, PeerFiles, ToolController } from "./target.js";
 
 const posix = process.platform !== "win32";
 const print = (marker: string) => posix ? `printf '${marker}'` : `[Console]::Write('${marker}')`;
@@ -226,7 +229,7 @@ test("stdio MCP server runs commands on a listener and reports failures as tool 
   assert.match(client.getInstructions() ?? "", /run_command/);
   const { tools } = await client.listTools();
   assert.deepEqual(tools.map((tool) => tool.name).sort(),
-    ["kill_session", "list_peers", "list_sessions", "read_screen", "run_command", "send_keys", "start_session"]);
+    ["glob", "kill_session", "list_directory", "list_peers", "list_sessions", "read_file", "read_screen", "run_command", "send_keys", "start_session", "write_file"]);
   const run = tools.find((tool) => tool.name === "run_command")!;
   assert.equal(run.annotations?.destructiveHint, true);
   assert.equal(run.annotations?.readOnlyHint, false);
@@ -474,6 +477,10 @@ test("the daemon target chooses among connected peers and kills cancelled comman
   const only = succeeded(await client.callTool({ name: "run_command", arguments: { command: `printf "$CNS_TEST_PEER"` } }));
   assert.equal(only.stdout, "FIRST");
   assert.equal(only.peer, "p1");
+  const noteFile = path.join(directory, "via-daemon", "note.txt");
+  assert.equal(succeeded(await client.callTool({ name: "write_file", arguments: { path: noteFile, content: "via daemon" } })).created, true);
+  assert.equal(succeeded(await client.callTool({ name: "read_file", arguments: { path: noteFile } })).content, "via daemon");
+  assert.deepEqual(succeeded(await client.callTool({ name: "glob", arguments: { pattern: "**/*.txt", path: directory } })).paths, [noteFile]);
 
   const second = launchCli(t, ["connect", `ws://127.0.0.1:${port}`], { env: { CNS_TEST_PEER: "SECOND" } });
   await second.waitFor("Connected to");
@@ -504,4 +511,151 @@ test("the daemon target chooses among connected peers and kills cancelled comman
   console.close();
   await new Promise((resolve) => setTimeout(resolve, 500));
   assert.ok(alive(keptPid), "a detached console's command keeps running");
+});
+
+/** Files whose reads come back in pieces of `piece` bytes, to cross chunk boundaries. */
+function chunkedFiles(content: Uint8Array, piece: number): PeerFiles {
+  return {
+    async readFile(_file: string, options: { offset?: number } = {}): Promise<FileChunk> {
+      const offset = options.offset ?? 0;
+      const data = content.slice(offset, offset + piece);
+      return { data, size: content.byteLength, eof: offset + data.byteLength >= content.byteLength };
+    },
+  } as unknown as PeerFiles;
+}
+
+test("readLines returns line ranges across chunks and stops before results grow too long", async () => {
+  const lines = Array.from({ length: 50 }, (_, index) => `line ${index + 1} é😀`);
+  const bytes = new TextEncoder().encode(`${lines.join("\n")}\n`);
+  // Seven-byte pieces split the multi-byte characters.
+  const files = chunkedFiles(bytes, 7);
+  const all = await readLines(files, "/f", 1, 1000);
+  assert.equal(all.content, lines.join("\n"));
+  assert.deepEqual([all.endLine, all.totalLines, all.nextOffset, all.size], [50, 50, null, bytes.byteLength]);
+  const middle = await readLines(files, "/f", 10, 3);
+  assert.equal(middle.content, lines.slice(9, 12).join("\n"));
+  assert.deepEqual([middle.endLine, middle.nextOffset], [12, 13]);
+  const beyond = await readLines(files, "/f", 60, 5);
+  assert.deepEqual([beyond.content, beyond.endLine, beyond.totalLines, beyond.nextOffset], ["", 59, 50, null]);
+  const unterminated = await readLines(chunkedFiles(new TextEncoder().encode("a\nb"), 1), "/f", 1, 10);
+  assert.deepEqual([unterminated.content, unterminated.totalLines], ["a\nb", 2]);
+  const empty = await readLines(chunkedFiles(new Uint8Array(), 1), "/f", 1, 10);
+  assert.deepEqual([empty.content, empty.endLine, empty.totalLines], ["", 0, 0]);
+
+  const wide = "x".repeat(MAX_RESULT_CHARS / 3);
+  const many = await readLines(chunkedFiles(new TextEncoder().encode(Array(5).fill(wide).join("\n")), 4096), "/f", 1, 1000);
+  assert.deepEqual([many.endLine, many.nextOffset, many.totalLines], [2, 3, null]);
+  const long = await readLines(chunkedFiles(new TextEncoder().encode(`${"y".repeat(MAX_RESULT_CHARS * 3)}\nnext`), 65536), "/f", 1, 1000);
+  assert.ok(long.content.length <= MAX_RESULT_CHARS);
+  assert.match(long.content, /line shortened/);
+  assert.deepEqual([long.endLine, long.nextOffset], [1, 2]);
+
+  await assert.rejects(readLines(chunkedFiles(new Uint8Array([0x7f, 0x45, 0x4c, 0x46, 0, 1]), 64), "/bin", 1, 10), /binary file/);
+});
+
+test("file tools read, write, list and find files on a listener", { timeout: 30000 }, async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "cns-mcp-files-"));
+  t.after(() => rm(directory, { force: true, recursive: true }));
+  await mkdir(path.join(directory, "src", "deep"), { recursive: true });
+  await mkdir(path.join(directory, "node_modules", "pkg"), { recursive: true });
+  await writeFile(path.join(directory, "src", "a.ts"), "one\ntwo\nthree\n");
+  await writeFile(path.join(directory, "src", "deep", "b.ts"), "b");
+  await writeFile(path.join(directory, "node_modules", "pkg", "c.ts"), "c");
+  await writeFile(path.join(directory, "blob.bin"), Buffer.from([1, 0, 2]));
+  const { url } = await listener(t);
+  const { client } = await stdioClient(t, [url, "--cwd", directory]);
+
+  const { tools } = await client.listTools();
+  assert.equal(tools.find((tool) => tool.name === "read_file")!.annotations?.readOnlyHint, true);
+  assert.equal(tools.find((tool) => tool.name === "write_file")!.annotations?.destructiveHint, true);
+
+  const read = succeeded(await client.callTool({ name: "read_file", arguments: { path: "src/a.ts" } }));
+  assert.equal(read.path, path.join(directory, "src", "a.ts"));
+  assert.equal(read.content, "one\ntwo\nthree");
+  assert.deepEqual([read.startLine, read.endLine, read.totalLines, read.truncated], [1, 3, 3, false]);
+  const part = await client.callTool({ name: "read_file", arguments: { path: path.join(directory, "src", "a.ts"), offset: 2, limit: 1 } });
+  assert.equal(structured(part).content, "two");
+  assert.equal(structured(part).nextOffset, 3);
+  assert.match(text(part), /lines 2-2 .*\ntwo\n.*pass offset 3/);
+
+  const missing = await client.callTool({ name: "read_file", arguments: { path: "absent.txt" } });
+  assert.equal(missing.isError, true);
+  assert.match(text(missing), /ENOENT/);
+  const binary = await client.callTool({ name: "read_file", arguments: { path: "blob.bin" } });
+  assert.equal(binary.isError, true);
+  assert.match(text(binary), /binary file/);
+
+  const created = succeeded(await client.callTool({ name: "write_file", arguments: { path: "new/dir/note.txt", content: "héllo\n" } }));
+  assert.deepEqual([created.created, created.bytes], [true, 7]);
+  assert.equal(await readFile(path.join(directory, "new", "dir", "note.txt"), "utf8"), "héllo\n");
+  const replaced = succeeded(await client.callTool({ name: "write_file", arguments: { path: "src/a.ts", content: "replaced" } }));
+  assert.equal(replaced.created, false);
+  assert.equal(await readFile(path.join(directory, "src", "a.ts"), "utf8"), "replaced");
+  const onDirectory = await client.callTool({ name: "write_file", arguments: { path: "src", content: "x" } });
+  assert.equal(onDirectory.isError, true);
+  assert.match(text(onDirectory), /is a directory/);
+
+  const listed = await client.callTool({ name: "list_directory", arguments: {} });
+  assert.deepEqual(structured(listed).entries, [
+    { name: "blob.bin", kind: "file" }, { name: "new", kind: "directory" },
+    { name: "node_modules", kind: "directory" }, { name: "src", kind: "directory" },
+  ]);
+  assert.match(text(listed), /\nsrc\//);
+  const limited = succeeded(await client.callTool({ name: "list_directory", arguments: { path: "src", limit: 1 } }));
+  assert.deepEqual([limited.entries.length, limited.truncated], [1, true]);
+
+  const found = succeeded(await client.callTool({ name: "glob", arguments: { pattern: "**/*.ts", ignore: ["**/node_modules/**"] } }));
+  assert.deepEqual(found.paths.sort(), [path.join(directory, "src", "a.ts"), path.join(directory, "src", "deep", "b.ts")]);
+  assert.equal(found.truncated, false);
+  const capped = succeeded(await client.callTool({ name: "glob", arguments: { pattern: "**/*.ts", limit: 1 } }));
+  assert.deepEqual([capped.paths.length, capped.truncated], [1, true]);
+  const relative = succeeded(await client.callTool({ name: "glob", arguments: { pattern: "*.ts", path: "src" } }));
+  assert.deepEqual(relative.paths, [path.join(directory, "src", "a.ts")]);
+});
+
+/** An in-process server whose one peer is this machine's shell, limited to `grants`. */
+async function grantedClient(t: TestContext, grants: Permission[]) {
+  const shell = new GrantedShell(new ShellApi(), grants, "studio");
+  const target: McpTarget = {
+    label: "studio",
+    async open() {
+      return {
+        controller: {
+          peers: async () => [{ id: "p1", info: shell.info() }],
+          files: async () => shell as unknown as PeerFiles,
+        } as unknown as ToolController,
+        peer: async () => "p1",
+        lost: false,
+        close() {},
+      };
+    },
+  };
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+  const server = createMcpServer(target);
+  await server.connect(serverSide);
+  const client = new Client({ name: "cns-tests", version: "1" });
+  await client.connect(clientSide);
+  t.after(async () => { await client.close(); await server.close(); });
+  return client;
+}
+
+test("file tools need the files grant on a paired device", { timeout: 30000 }, async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "cns-mcp-grants-"));
+  t.after(() => rm(directory, { force: true, recursive: true }));
+  const file = path.join(directory, "secret.txt");
+  await writeFile(file, "secret");
+
+  const denied = await grantedClient(t, ["shell"]);
+  for (const [name, args] of [
+    ["read_file", { path: file }], ["write_file", { path: file, content: "x" }],
+    ["list_directory", { path: directory }], ["glob", { pattern: "*", path: directory }],
+  ] as const) {
+    const result = await denied.callTool({ name, arguments: args });
+    assert.equal(result.isError, true, name);
+    assert.match(text(result), /Permission denied: files not granted to studio/, name);
+  }
+  assert.equal(await readFile(file, "utf8"), "secret");
+
+  const allowed = await grantedClient(t, ["files"]);
+  assert.equal(succeeded(await allowed.callTool({ name: "read_file", arguments: { path: file } })).content, "secret");
 });

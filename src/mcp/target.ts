@@ -8,8 +8,14 @@ import { RefusingShell } from "../refusing-shell.js";
 import type { ShellApi } from "../shell.js";
 import { plain, type RemoteNamedPty } from "../terminal.js";
 
+/** The file calls the file tools make, which the `files` grant covers on a paired device. */
+export type PeerFiles = Pick<ShellApi, "stat" | "readdir" | "mkdir" | "glob" | "readFile" | "writeFile">;
+
 /** The controller calls the tools make; terminals need a local TTY and are left out. */
-export type ToolController = Pick<PeerController, "peers" | "run" | "ptySessions" | "startPtySession" | "ptySession">;
+export type ToolController = Pick<PeerController, "peers" | "run" | "ptySessions" | "startPtySession" | "ptySession"> & {
+  /** The peer's files, for the length of one call: closing the link releases them. */
+  files(id: string): Promise<PeerFiles>;
+};
 
 /** One connection, opened for one tool call. Closing it ends the call's remote work. */
 export interface Link {
@@ -100,6 +106,7 @@ export function listenerTarget(url: string, cwd?: string, expect?: { name: strin
           return await plain(session.info());
         },
         async ptySession(_id, name) { return await remote.ptySession(name) as unknown as RemoteNamedPty; },
+        async files() { return remote as unknown as PeerFiles; },
       };
       return {
         controller,
@@ -147,9 +154,22 @@ export function daemonTarget(statePath?: string, cwd?: string): McpTarget {
       let lost = false;
       connection.remote.onRpcBroken(() => { if (!closed) lost = true; });
       const { remote } = connection;
+      const forks: { [Symbol.dispose](): void }[] = [];
       return {
         controller: {
           ...connection.controller,
+          async files(id) {
+            let shell;
+            try { shell = await connection.controller.shell(id); }
+            catch (error) {
+              if (error instanceof TypeError && error.message === "'shell' is not a function.") {
+                throw new Error("The local daemon is from an older cns without file access; restart it with cns stop and cns listen --daemon.", { cause: error });
+              }
+              throw error;
+            }
+            forks.push(shell);
+            return shell as unknown as PeerFiles;
+          },
           // Closing the connection, as cancelling the call does, kills the command.
           async run(id, command, options) {
             try {
@@ -178,6 +198,7 @@ export function daemonTarget(statePath?: string, cwd?: string): McpTarget {
         close() {
           if (closed) return;
           closed = true;
+          for (const fork of forks.splice(0)) fork[Symbol.dispose]();
           connection.close();
         },
       };
