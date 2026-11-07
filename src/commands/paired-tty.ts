@@ -1,6 +1,7 @@
 import { AuthError } from "../auth.js";
 import { errorMessage, printable } from "../errors.js";
 import { ensureIdentity } from "../identity.js";
+import { explainDenial } from "../peers.js";
 import type { PeerConfig } from "../options.js";
 import { RefusingShell } from "../refusing-shell.js";
 import { isRelayAddress } from "../relay-hub.js";
@@ -33,7 +34,8 @@ function classify(error: unknown, device: string, name: string, first: boolean):
     return new Final(`${device} ${first ? "does not accept" : "no longer accepts"} this device (${message}).`, 3);
   }
   if (/^Permission denied/.test(message)) {
-    return new Final(first ? `${device} does not let this device use that session: ${message}` : `access to ${device}'s sessions was revoked: ${message}`, 4);
+    const explained = explainDenial(message, device);
+    return new Final(first ? `${device} does not let this device use that session: ${explained}` : `access to ${device}'s sessions was revoked: ${explained}`, 4);
   }
   if (/No PTY session named/.test(message)) {
     return new Final(first ? `there is no session ${name} on ${device}; cns sessions ${device} lists them.` : `the session ${name} no longer exists on ${device}: it was killed, its time limit passed, or ${device}'s daemon restarted.`, 1);
@@ -145,7 +147,7 @@ export async function attachPaired(config: PeerConfig): Promise<number | typeof 
           ...(sized ? { cols: options.cols, rows: options.rows } : {}), answers: !options.respond,
         }), { cols: config.cols, rows: config.rows }, {
           signal: interrupted.signal, detachKey: DETACH_KEY, alternateScreen: true, onOutput: report,
-          onInputRefused: (reason) => say(`${expect.name} lets this device watch ${name} but not type into it (${printable(reason)})`),
+          onInputRefused: (reason) => say(`${expect.name} lets this device watch ${name} but not type into it (${explainDenial(printable(reason), expect.name)})`),
         });
         if (result.exit) {
           if (process.stdout.isTTY) say(`${name} ${describeExit(result.exit)}`);

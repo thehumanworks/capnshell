@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { addAlias, listAliases, resolveAlias } from "./aliases.js";
 import { generateIdentity } from "./identity.js";
-import { describeGrants, expandGrants, findPairedPeer, getPeer, listPeers, PRESETS, resolvePeer, savePairedPeer, updatePairedPeer } from "./peers.js";
+import { describeGrants, expandGrants, explainDenial, grantWords, findPairedPeer, getPeer, listPeers, PRESETS, resolvePeer, savePairedPeer, updatePairedPeer } from "./peers.js";
 import { peerNames } from "./aliases.js";
 
 let dir: string;
@@ -20,6 +20,21 @@ test("grants expand from presets into a canonical list and read back as presets"
   expect(describeGrants(expandGrants(["files", "sessions"]))).toBe("files, sessions");
   expect(describeGrants(["sessions:list", "shell"])).toBe("shell, sessions:list");
   expect(describeGrants([])).toBe("none");
+  expect(expandGrants(["none"])).toEqual([]);
+  expect(grantWords(expandGrants(["shell", "sessions"]))).toBe("shell,sessions");
+});
+
+test("a refusal says which grant is missing and the command that adds it on the other device", () => {
+  expect(explainDenial("Permission denied: shell not granted to reader.", "studio"))
+    .toBe("Permission denied: shell not granted to reader. To allow it, run on studio: cns peer grant reader shell");
+  expect(explainDenial("Permission denied: sessions:view, sessions:control not granted to laptop-2."))
+    .toBe("Permission denied: sessions:view, sessions:control not granted to laptop-2. To allow it, run on the other device: cns peer grant laptop-2 sessions:view,sessions:control");
+  // Explaining twice, other refusals and unknown permissions leave the message as it was.
+  const explained = explainDenial("Permission denied: files not granted to a.", "b");
+  expect(explainDenial(explained, "b")).toBe(explained);
+  expect(explainDenial("Permission denied: kill is not available to peers.")).toBe("Permission denied: kill is not available to peers.");
+  expect(explainDenial("Permission denied: root not granted to a.")).toBe("Permission denied: root not granted to a.");
+  expect(explainDenial("Permission denied: shell not granted to $(rm -rf ~).")).toBe("Permission denied: shell not granted to $(rm -rf ~).");
 });
 
 test.skipIf(process.platform === "win32")("paired devices live beside address aliases and are keyed by identity", () => {

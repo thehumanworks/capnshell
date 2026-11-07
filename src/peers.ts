@@ -22,10 +22,11 @@ export const PRESETS: Record<"shell" | "files" | "sessions" | "all", readonly Pe
 const permissionSchema = z.enum(PERMISSIONS);
 export const grantsSchema = z.array(permissionSchema).max(PERMISSIONS.length);
 
-/** Expand presets and permissions, such as ["shell", "sessions"], into a canonical permission list. */
+/** Expand presets and permissions, such as ["shell", "sessions"], into a canonical permission list; "none" adds nothing. */
 export function expandGrants(words: readonly string[]): Permission[] {
   const set = new Set<Permission>();
   for (const word of words) {
+    if (word === "none") continue;
     if (word in PRESETS) for (const permission of PRESETS[word as keyof typeof PRESETS]) set.add(permission);
     else set.add(permissionSchema.parse(word));
   }
@@ -44,6 +45,28 @@ export function describeGrants(grants: readonly Permission[]): string {
     }
   }
   return [...words, ...PERMISSIONS.filter((permission) => rest.has(permission))].join(", ");
+}
+
+/** The words `cns peer grant` takes for these permissions, comma-separated: presets where a whole group is present. */
+export function grantWords(grants: readonly Permission[]): string {
+  return describeGrants(grants).replaceAll(", ", ",");
+}
+
+const DENIAL = /^Permission denied: ((?:[a-z:]+)(?:, [a-z:]+)*) not granted to ([A-Za-z0-9][A-Za-z0-9_-]{0,63})\.$/;
+
+/**
+ * A refusal from a paired device, with what to do about it: the grant that is missing and
+ * the command to run on that device, where it calls this one by the alias the refusal names.
+ * `device` is this device's name for the other one; other messages come back unchanged.
+ */
+export function explainDenial(message: string, device?: string): string {
+  const match = DENIAL.exec(message);
+  if (!match) return message;
+  let missing: Permission[];
+  try { missing = expandGrants(match[1]!.split(", ")); } catch { return message; }
+  if (!missing.length) return message;
+  const where = device ? `on ${device}` : "on the other device";
+  return `${message} To allow it, run ${where}: cns peer grant ${match[2]} ${grantWords(missing)}`;
 }
 
 const base64url = /^[A-Za-z0-9_-]+$/;

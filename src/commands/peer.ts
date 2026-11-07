@@ -15,7 +15,7 @@ import { AuthError, type Refusal } from "../auth.js";
 import { ensureIdentity, fingerprint, type Identity, type PublicKey } from "../identity.js";
 import { GrantedShell, type GrantHolder } from "../granted-shell.js";
 import { createInvite, decisionSchema, PairingApi, suggestedName, type Decision, type Proposal } from "../pairing.js";
-import { findPairedPeer, getPeer, listPeers, savePairedPeer } from "../peers.js";
+import { explainDenial, findPairedPeer, getPeer, listPeers, savePairedPeer } from "../peers.js";
 import { listeningAddresses } from "../addresses.js";
 import { serveControl, type PairingController } from "./daemon-server.js";
 import { runOneShot } from "./one-shot.js";
@@ -254,7 +254,7 @@ export async function startPeer(config: PeerConfig): Promise<void> {
         } else void input?.refresh();
       } catch (error) {
         if (!stopping && sessions.has(id)) {
-          console.error(errorMessage(error));
+          console.error(explainDenial(errorMessage(error), session.peer?.name));
           disconnected(session, authExitCode(error));
         }
       }

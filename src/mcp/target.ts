@@ -25,6 +25,8 @@ export interface Link {
 export interface McpTarget {
   /** For messages, such as the listener's URL. */
   readonly label: string;
+  /** This device's name for the paired device the tools reach, when there is one. */
+  readonly device?: string;
   /** The working directory for commands and sessions that do not name one. */
   readonly cwd?: string;
   open(signal: AbortSignal): Promise<Link>;
@@ -71,6 +73,7 @@ function limitCalls(open: (signal: AbortSignal) => Promise<Link>): (signal: Abor
 export function listenerTarget(url: string, cwd?: string, expect?: { name: string; publicKey: string; addresses: string[] }): McpTarget {
   return {
     label: expect ? expect.name : url,
+    ...expect ? { device: expect.name } : {},
     cwd,
     open: limitCalls(async (signal) => {
       // A paired device: prove this device's identity and require the saved one on the other end.
