@@ -90,6 +90,8 @@ test("two devices pair, run commands within their grants, and refuse everyone el
   // Commands name the paired device and run within its grants.
   const run = await cli(laptop, ["run", "studio", "--", "printf ok; printf err >&2; exit 3"]);
   assert.deepEqual([run.code, run.stdout, run.stderr], [3, "ok", "err"]);
+  const piped = await cli(laptop, ["run", "studio", "--", "tr a-z A-Z"], "piped input");
+  assert.deepEqual([piped.code, piped.stdout], [0, "PIPED INPUT"]);
   const sessions = await cli(laptop, ["sessions", "studio", "--json"]);
   assert.deepEqual([sessions.code, JSON.parse(sessions.stdout)], [0, []]);
   const started = await cli(laptop, ["tty", "studio", "--name", "work", "--", "printf READY; sleep 30"]);
@@ -144,6 +146,14 @@ test("two devices pair, run commands within their grants, and refuse everyone el
   assert.equal(denied.code, 4, denied.stderr);
   assert.match(denied.stderr, /Permission denied: shell not granted to reader/);
   assert.equal((await cli(reader, ["sessions", "studio"])).code, 4);
+  // The files grant alone is enough to copy files both ways; paths starting with ~ are in the remote home.
+  await writeFile(path.join(reader.dir, "note.txt"), "from reader");
+  const sent = await cli(reader, ["cp", path.join(reader.dir, "note.txt"), "studio:~/note.txt"]);
+  assert.equal(sent.code, 0, sent.stderr);
+  assert.equal(await readFile(path.join(studio.dir, "note.txt"), "utf8"), "from reader");
+  const fetched = await cli(reader, ["cp", "studio:note.txt", path.join(reader.dir, "back.txt")]);
+  assert.equal(fetched.code, 0, fetched.stderr);
+  assert.equal(await readFile(path.join(reader.dir, "back.txt"), "utf8"), "from reader");
 
   // --yes alone grants nothing; the invited device saves the other under the name the invite suggests.
   const guest = await device("guest");
@@ -153,6 +163,9 @@ test("two devices pair, run commands within their grants, and refuse everyone el
   assert.match(third.accepting.stdout, new RegExp(`^Paired with ${inviterName} \\([a-z2-7-]+\\)\\. This device may use its: none\\. It may use this device's: none\\.$`, "m"));
   assert.match(third.inviting.stdout, /Paired with guest \([a-z2-7-]+\)\. It may use this machine's: none\. This machine may use its: none\./);
   assert.equal((await cli(guest, ["run", inviterName, "--", "printf x"])).code, 4);
+  const refusedCopy = await cli(guest, ["cp", `${inviterName}:note.txt`, path.join(guest.dir, "note.txt")]);
+  assert.equal(refusedCopy.code, 4, refusedCopy.stderr);
+  assert.match(refusedCopy.stderr, /Permission denied: files not granted to guest/);
 
   // A device studio never paired with is refused before anything is exported, as is a legacy cns.
   process.env.CNS_CONFIG_DIR = stranger.dir;

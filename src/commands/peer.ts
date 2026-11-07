@@ -5,7 +5,7 @@ import { challengeBytes, isRelayAddress, redactRelay, relayEndpoint } from "../r
 import { serve, type Server, type ServerWebSocket } from "bun";
 import { z } from "zod";
 import { PtyRegistry, ShellApi, type ShellInfo } from "../shell.js";
-import { openConsole, type PeerController } from "../console.js";
+import { openConsole, type ConnectionController } from "../console.js";
 import { errorMessage, printable } from "../errors.js";
 import type { PeerConfig } from "../options.js";
 import { RefusingShell } from "../refusing-shell.js";
@@ -182,7 +182,7 @@ export async function startPeer(config: PeerConfig): Promise<void> {
     if (!session?.info) throw new Error(`Peer ${id} is not connected. Use :peers and :use ID.`);
     return session;
   }
-  const controller: PeerController = {
+  const controller: ConnectionController = {
     async peers() {
       return [...sessions.values()].flatMap(({ id, info, peer, pairing }) => info && !pairing
         ? [{ id, info: { ...info }, ...peer ? { peer: { name: peer.name, fingerprint: fingerprint(peer.publicKey), daemon: peer.daemon, via: sessions.get(id)!.via } } : {} }] : []);
@@ -207,9 +207,14 @@ export async function startPeer(config: PeerConfig): Promise<void> {
         release();
       }
     },
+    async exec(id, sink, command, options, input) {
+      const { remote } = requireSession(id);
+      return await plain(input ? remote.exec(sink, command, options, input) : remote.exec(sink, command, options));
+    },
     async openPty(id, sink, options) {
       return await requireSession(id).remote.openPty(sink, options);
     },
+    files(id) { return requireSession(id).remote; },
     async ptySessions(id) { return await plain(requireSession(id).remote.ptySessions()); },
     async startPtySession(id, name, options) {
       using session = await requireSession(id).remote.startPtySession(name, options);

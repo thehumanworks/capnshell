@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { remotePath } from "./commands/copy.js";
+import { MAX_WRITE_BYTES } from "./shell.js";
 import { LOOPBACK, LOOPBACK_HOST, launchCli, unusedPort } from "./test-support.js";
 
 const print = (marker: string) => process.platform === "win32"
@@ -101,6 +103,83 @@ test("run preserves exact output, quoting and remote exit status against a headl
     assert.match(identity!, new RegExp(`${LOOPBACK_HOST.replace(/[.[\]]/g, "\\$&")}:\\d+\\)$`));
   }
   assert.doesNotMatch(listener.stdout, /\bp\d+\b/);
+});
+
+test("run forwards piped stdin, streams output past 1 MiB and stops when its reader does", { timeout: 30000, skip: process.platform === "win32" }, async (t) => {
+  const port = await unusedPort();
+  const url = `ws://${LOOPBACK_HOST}:${port}`;
+  const listener = launchCli(t, ["listen", "--bind", LOOPBACK, "--port", port, "--no-repl"]);
+  await listener.waitFor("listening at");
+  const input = Buffer.alloc(3 * 1024 * 1024 + 7, "z");
+  const piped = launchCli(t, ["run", url, "--", "wc -c | tr -d ' '; printf done >&2"]);
+  piped.child.stdin.end(input);
+  assert.equal(await piped.exited, 0, piped.output);
+  assert.equal(piped.stdout.trim(), String(input.length));
+  assert.equal(piped.stderr, "done");
+  // An open stdin that never ends does not hold a command that does not read it.
+  const unread = launchCli(t, ["run", url, "--", "printf ok"]);
+  assert.equal(await unread.exited, 0);
+  assert.equal(unread.stdout, "ok");
+  const closed = launchCli(t, ["run", url, "--no-stdin", "--", "cat; printf closed"]);
+  assert.equal(await closed.exited, 0);
+  assert.equal(closed.stdout, "closed");
+  const large = launchCli(t, ["run", url, "--no-stdin", "--", "head -c 2000000 /dev/zero | tr '\\0' x"]);
+  assert.equal(await large.exited, 0);
+  assert.equal(large.stdout.length, 2000000);
+  // A local reader that goes away ends the remote command, as SIGPIPE would.
+  const endless = launchCli(t, ["run", url, "--no-stdin", "--", "yes"]);
+  endless.child.stdout.destroy();
+  assert.equal(await endless.exited, 141);
+});
+
+test("cp copies files both ways in parts, into directories, keeping permission bits", { timeout: 30000, skip: process.platform === "win32" }, async (t) => {
+  const directory = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns cp ")));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const port = await unusedPort();
+  const url = `ws://${LOOPBACK_HOST}:${port}`;
+  const listener = launchCli(t, ["listen", "--bind", LOOPBACK, "--port", port, "--no-repl"]);
+  await listener.waitFor("listening at");
+  const cp = async (...args: string[]) => {
+    const run = launchCli(t, ["cp", "--peer", url, ...args], { cwd: directory });
+    return { code: await run.exited, stderr: run.stderr };
+  };
+  // Larger than one write, and not a multiple of the read or write size.
+  const big = Buffer.alloc(MAX_WRITE_BYTES * 2 + 12345);
+  for (let index = 0; index < big.length; index++) big[index] = (index * 7919) % 251;
+  await writeFile(path.join(directory, "big.bin"), big);
+  await mkdir(path.join(directory, "remote"));
+  assert.deepEqual(await cp("big.bin", `:${directory}/remote/`), { code: 0, stderr: "" });
+  assert.ok(big.equals(await readFile(path.join(directory, "remote", "big.bin"))));
+  await mkdir(path.join(directory, "back"));
+  assert.deepEqual(await cp(`:${directory}/remote/big.bin`, "back"), { code: 0, stderr: "" });
+  assert.ok(big.equals(await readFile(path.join(directory, "back", "big.bin"))));
+  // A shorter copy replaces a longer file entirely.
+  await writeFile(path.join(directory, "small.sh"), "#!/bin/sh\necho hi\n");
+  await chmod(path.join(directory, "small.sh"), 0o750);
+  assert.equal((await cp("small.sh", `:${directory}/remote/big.bin`)).code, 0);
+  assert.equal(await readFile(path.join(directory, "remote", "big.bin"), "utf8"), "#!/bin/sh\necho hi\n");
+  assert.equal((await cp("small.sh", `:${directory}/remote/run.sh`)).code, 0);
+  assert.equal((await stat(path.join(directory, "remote", "run.sh"))).mode & 0o777, 0o750 & ~process.umask());
+  await writeFile(path.join(directory, "empty"), "");
+  assert.equal((await cp(`${directory}/empty`, `:${directory}/remote/empty`)).code, 0);
+  assert.equal(await readFile(path.join(directory, "remote", "empty"), "utf8"), "");
+  const missing = await cp(`:${directory}/nope`, ".");
+  assert.equal(missing.code, 1);
+  assert.match(missing.stderr, /ENOENT/);
+  assert.match((await cp(`:${directory}/remote`, ".")).stderr, /is a directory/);
+});
+
+test("cp resolves remote paths against the peer's home in its own path style", () => {
+  const posix = { platform: "linux" as const, cwd: "/home/me" };
+  assert.equal(remotePath(posix, "/srv/x"), "/srv/x");
+  assert.equal(remotePath(posix, "notes.txt"), "/home/me/notes.txt");
+  assert.equal(remotePath(posix, "~/a/b"), "/home/me/a/b");
+  assert.equal(remotePath(posix, "~"), "/home/me");
+  assert.equal(remotePath(posix, ""), "/home/me");
+  const windows = { platform: "win32" as const, cwd: "C:\\Users\\me" };
+  assert.equal(remotePath(windows, "D:\\x"), "D:\\x");
+  assert.equal(remotePath(windows, "~\\a.txt"), "C:\\Users\\me\\a.txt");
+  assert.equal(remotePath(windows, "a/b.txt"), "C:\\Users\\me\\a\\b.txt");
 });
 
 test("run uses environment defaults and honors explicit endpoint and cwd overrides", { timeout: 30000 }, async (t) => {

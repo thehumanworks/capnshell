@@ -46,6 +46,7 @@ export class GrantedShell extends RpcTarget {
   glob(...args: Parameters<ShellApi["glob"]>) { this.#require("files"); return this.#shell.glob(...args); }
   readFile(...args: Parameters<ShellApi["readFile"]>) { this.#require("files"); return this.#shell.readFile(...args); }
   writeFile(...args: Parameters<ShellApi["writeFile"]>) { this.#require("files"); return this.#shell.writeFile(...args); }
+  writeFileAt(...args: Parameters<ShellApi["writeFileAt"]>) { this.#require("files"); return this.#shell.writeFileAt(...args); }
   ptySessions() { this.#require("sessions:list"); return this.#shell.ptySessions(); }
   /** Starting a session needs `sessions:create`; the peer then owns it and may view, type into and kill it. */
   startPtySession(...args: Parameters<ShellApi["startPtySession"]>) {

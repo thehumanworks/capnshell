@@ -3,8 +3,8 @@ import os from "node:os";
 import { RpcTarget } from "capnweb";
 import treeKill from "tree-kill";
 import {
-  accessPath, globFiles, makeDirectory, readDirectory, readFileChunk, statPath, writeWholeFile,
-  type AccessOptions, type GlobOptions, type ReadFileOptions,
+  accessPath, globFiles, makeDirectory, readDirectory, readFileChunk, statPath, writeFileAt, writeWholeFile,
+  type AccessOptions, type GlobOptions, type ReadFileOptions, type WriteAtOptions,
 } from "./files.js";
 import { bash, commandSchema, optionsSchema, powershell, powershellArgs, type RunOptions } from "./platform.js";
 import {
@@ -15,7 +15,7 @@ import {
 export { MAX_TIMEOUT_MS, type RunOptions } from "./platform.js";
 export {
   MAX_DIRECTORY_ENTRIES, MAX_FILE_CHUNK_BYTES, MAX_GLOB_RESULTS, MAX_WRITE_BYTES,
-  type AccessOptions, type DirectoryEntry, type FileChunk, type FileKind, type FileStat, type GlobOptions, type ReadFileOptions,
+  type AccessOptions, type DirectoryEntry, type FileChunk, type FileKind, type FileStat, type GlobOptions, type ReadFileOptions, type WriteAtOptions,
 } from "./files.js";
 export {
   MAX_NAMED_PTYS, MAX_PTY_BACKLOG_BYTES, MAX_PTY_INPUT_BYTES, MAX_SCREEN_HISTORY, sessionNameSchema,
@@ -58,6 +58,15 @@ export type ExecResult = Omit<RunResult, "stdout" | "stderr" | "truncated">;
 /** Receives a command's output as it is produced. Each call is awaited before the next: acknowledging is the flow control. */
 export interface ExecSink {
   output(stream: "stdout" | "stderr", data: Uint8Array): void | Promise<void>;
+}
+/**
+ * Supplies a command's standard input when the command's side asks for it. `read`
+ * resolves with the next chunk of up to MAX_EXEC_CHUNK_BYTES, or null at the end of
+ * the input. Each read is awaited, and the command's pipe drained, before the next:
+ * asking is the flow control.
+ */
+export interface ExecInput {
+  read(): Uint8Array | null | undefined | Promise<Uint8Array | null | undefined>;
 }
 
 function killTree(child: ChildProcess): void {
@@ -116,7 +125,7 @@ export class ShellApi extends RpcTarget {
   info(): ShellInfo { return localShellInfo(); }
 
   /** Start a command in a fresh noninteractive shell and resolve with how it ended once it has closed. */
-  #start(command: string, options: RunOptions) {
+  #start(command: string, options: RunOptions, stdin = false) {
     if (this.#closed) throw new Error("This shell session is closed.");
     // RPC callers are not necessarily TypeScript: validate at the trust boundary.
     // Stay below Windows' command-line limit after UTF-16/base64 encoding.
@@ -130,7 +139,7 @@ export class ShellApi extends RpcTarget {
     const started = Date.now();
     const child = spawn(executable, args, {
       cwd,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [stdin ? "pipe" : "ignore", "pipe", "pipe"],
       windowsHide: true,
       detached: !windows,
     });
@@ -177,8 +186,8 @@ export class ShellApi extends RpcTarget {
       remaining -= length;
       if (length < data.length) truncated = true;
     };
-    child.stdout.on("data", (data) => capture(stdout, data));
-    child.stderr.on("data", (data) => capture(stderr, data));
+    child.stdout!.on("data", (data) => capture(stdout, data));
+    child.stderr!.on("data", (data) => capture(stderr, data));
     const result = await ended;
     return { ...result, stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8"), truncated };
   }
@@ -188,38 +197,79 @@ export class ShellApi extends RpcTarget {
    * in chunks of up to MAX_EXEC_CHUNK_BYTES, without an output cap. Each `output`
    * call is awaited before more is read, so a slow caller slows the command rather
    * than growing this process's memory. A sink that fails kills the command.
+   * With `input`, the command's standard input is a pipe fed from `input.read()`
+   * until it returns null; without it, standard input is closed, as for `run`. An
+   * input that fails, or sends something other than a chunk, kills the command too.
    * Releasing the shell kills the command and settles the call even while the
    * sink has not acknowledged output.
    */
-  async exec(sink: ExecSink, command: string, options: RunOptions = {}): Promise<ExecResult> {
+  async exec(sink: ExecSink, command: string, options: RunOptions = {}, input?: ExecInput): Promise<ExecResult> {
     if (!sink || (typeof sink !== "object" && typeof sink !== "function")) throw new Error("An exec sink is required.");
-    const { child, ended } = this.#start(command, options);
+    if (input !== undefined && input !== null && typeof input !== "object" && typeof input !== "function") throw new Error("An exec input must be an object with a read method.");
+    const { child, ended } = this.#start(command, options, !!input);
+    const stdout = child.stdout!;
+    const stderr = child.stderr!;
     let pending = Promise.resolve();
     let waiting = 0;
     let failure: unknown;
+    let exited = false;
+    const fail = (error: unknown, fallback: string) => {
+      if (failure !== undefined) return;
+      failure = error ?? new Error(fallback);
+      killTree(child);
+    };
     const forward = (stream: "stdout" | "stderr", data: Buffer) => {
       if (failure !== undefined) return;
       waiting++;
-      child.stdout.pause();
-      child.stderr.pause();
+      stdout.pause();
+      stderr.pause();
       pending = pending.then(async () => {
         for (let offset = 0; offset < data.length && failure === undefined; offset += MAX_EXEC_CHUNK_BYTES) {
           await sink.output(stream, new Uint8Array(data.buffer, data.byteOffset + offset, Math.min(MAX_EXEC_CHUNK_BYTES, data.length - offset)));
         }
-      }).catch((error: unknown) => {
-        if (failure !== undefined) return;
-        failure = error ?? new Error("The exec sink failed.");
-        killTree(child);
-      }).finally(() => {
+      }).catch((error: unknown) => fail(error, "The exec sink failed.")).finally(() => {
         if (--waiting === 0 && failure === undefined) {
-          child.stdout.resume();
-          child.stderr.resume();
+          stdout.resume();
+          stderr.resume();
         }
       });
     };
-    child.stdout.on("data", (data: Buffer) => forward("stdout", data));
-    child.stderr.on("data", (data: Buffer) => forward("stderr", data));
-    const result = await ended;
+    stdout.on("data", (data: Buffer) => forward("stdout", data));
+    stderr.on("data", (data: Buffer) => forward("stderr", data));
+    if (input && child.stdin) {
+      const stdin = child.stdin;
+      // A command that exits, or closes its input, before reading all of it is not an error.
+      stdin.on("error", () => {});
+      void (async () => {
+        try {
+          while (!exited && failure === undefined && stdin.writable) {
+            const chunk = await input.read();
+            if (exited || failure !== undefined || !stdin.writable) return;
+            if (chunk === null || chunk === undefined) { stdin.end(); return; }
+            if (!(chunk instanceof Uint8Array) || chunk.byteLength > MAX_EXEC_CHUNK_BYTES) {
+              throw new Error(`exec input chunks must be Uint8Arrays of at most ${MAX_EXEC_CHUNK_BYTES} bytes.`);
+            }
+            if (!stdin.write(chunk)) {
+              await new Promise<void>((resolve) => {
+                const done = () => { stdin.off("drain", done); stdin.off("close", done); resolve(); };
+                stdin.once("drain", done);
+                stdin.once("close", done);
+              });
+            }
+          }
+        } catch (error) {
+          // Once the command has ended, its input no longer matters.
+          if (!exited) fail(error, "The exec input failed.");
+        }
+      })();
+    }
+    let result: ExecResult;
+    try {
+      result = await ended;
+    } finally {
+      exited = true;
+      child.stdin?.destroy();
+    }
     // A released shell's caller is gone: do not wait on its sink.
     await Promise.race([pending, this.#released.promise]);
     if (failure !== undefined) throw failure;
@@ -265,6 +315,12 @@ export class ShellApi extends RpcTarget {
   async writeFile(path: string, data: Uint8Array) {
     if (this.#closed) throw new Error("This shell session is closed.");
     return writeWholeFile(path, data);
+  }
+
+  /** Write up to MAX_WRITE_BYTES into a file at an offset, creating it if needed; send a larger file in several calls. */
+  async writeFileAt(path: string, data: Uint8Array, options: WriteAtOptions = {}) {
+    if (this.#closed) throw new Error("This shell session is closed.");
+    return writeFileAt(path, data, options);
   }
 
   /**

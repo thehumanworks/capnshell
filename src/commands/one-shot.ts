@@ -1,6 +1,7 @@
-import type { PeerController } from "../console.js";
+import { RpcTarget } from "capnweb";
+import type { ConnectionController } from "../console.js";
 import type { PeerConfig } from "../options.js";
-import type { PtyExit, PtyScreen, PtySessionInfo, RunResult } from "../shell.js";
+import { MAX_EXEC_CHUNK_BYTES, type ExecInput, type ExecSink, type PtyExit, type PtyScreen, type PtySessionInfo, type RunResult } from "../shell.js";
 import { attachSession, attachTerminal, plain } from "../terminal.js";
 
 /** Wait this long for --until text unless --timeout says otherwise. */
@@ -32,11 +33,86 @@ export function formatSessions(sessions: PtySessionInfo[]): string {
   return rows.map((row) => row.map((cell, index) => index === row.length - 1 ? cell : cell.padEnd(widths[index]!)).join("  ")).join("\n");
 }
 
+/** Writes a command's output to this process's stdout and stderr; each chunk is acknowledged once written. */
+class StdioSink extends RpcTarget implements ExecSink {
+  /** A local stream closed, as stdout does under `| head`: the peer then ends the command, as SIGPIPE would. */
+  broken = false;
+  constructor() {
+    super();
+    // Streams report a closed pipe as an error event too; without a listener it would end this process.
+    for (const target of [process.stdout, process.stderr]) target.on("error", () => { this.broken = true; });
+  }
+  output(stream: "stdout" | "stderr", data: Uint8Array): Promise<void> {
+    if (this.broken) return Promise.reject(new Error("The local output closed."));
+    const target = stream === "stdout" ? process.stdout : process.stderr;
+    return new Promise((resolve, reject) => {
+      try {
+        target.write(data, (error) => {
+          if (!error) return resolve();
+          this.broken = true;
+          reject(error);
+        });
+      } catch (error) {
+        this.broken = true;
+        reject(error);
+      }
+    });
+  }
+}
+
+/** This process's stdin, read when the peer asks for more, in chunks it accepts. */
+export class StdinSource extends RpcTarget implements ExecInput {
+  #input: NodeJS.ReadableStream;
+  #chunks: AsyncIterator<Buffer | string>;
+  #rest = Buffer.alloc(0);
+  #ended = false;
+  constructor(input: NodeJS.ReadableStream = process.stdin) {
+    super();
+    this.#input = input;
+    this.#chunks = input[Symbol.asyncIterator]() as AsyncIterator<Buffer | string>;
+  }
+  async read(): Promise<Uint8Array | null> {
+    while (!this.#rest.length) {
+      if (this.#ended) return null;
+      const next = await this.#chunks.next();
+      if (next.done) { this.#ended = true; return null; }
+      this.#rest = Buffer.from(next.value as Uint8Array | string);
+    }
+    const chunk = this.#rest.subarray(0, MAX_EXEC_CHUNK_BYTES);
+    this.#rest = this.#rest.subarray(chunk.length);
+    return new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.length);
+  }
+  /** Stop reading, so an open pipe that never ends does not keep this process alive. */
+  close() {
+    this.#ended = true;
+    void this.#chunks.return?.();
+    (this.#input as { destroy?(): void }).destroy?.();
+  }
+}
+
+/** The peer's cns predates exec. */
+const lacksExec = (error: unknown) => error instanceof TypeError && error.message === "'exec' is not a function.";
+
 /** Run a connect-mode command against peer `id` and return the CLI exit status. */
-export async function runOneShot(config: PeerConfig, controller: PeerController, id: string, signal: AbortSignal): Promise<number> {
+export async function runOneShot(config: PeerConfig, controller: ConnectionController, id: string, signal: AbortSignal): Promise<number> {
   const { command, cwd, timeoutMs, cols, rows, term, name } = config;
   switch (config.role) {
     case "run": {
+      // Like ssh: piped or redirected input reaches the command, a terminal's does not; --no-stdin closes it.
+      const input = config.stdin !== false && !process.stdin.isTTY ? new StdinSource() : undefined;
+      const sink = new StdioSink();
+      try {
+        const result = await controller.exec(id, sink, command!, { cwd, timeoutMs }, input);
+        if (result.timedOut) console.error("cns: command timed out");
+        return commandExitCode(result);
+      } catch (error) {
+        // The status a local command gets when its reader goes away: 128 + SIGPIPE.
+        if (sink.broken) return 141;
+        if (!lacksExec(error)) throw error;
+      } finally {
+        input?.close();
+      }
+      if (input) console.error("cns: the peer's cns cannot take input; its command reads none");
       const result = await controller.run(id, command!, { cwd, timeoutMs });
       process.stdout.write(result.stdout);
       process.stderr.write(result.stderr);
@@ -71,6 +147,11 @@ export async function runOneShot(config: PeerConfig, controller: PeerController,
       if (exit.error) console.error(`cns: ${exit.error}`);
       if (exit.timedOut) console.error("cns: command timed out");
       return commandExitCode(exit);
+    }
+    case "cp": {
+      const { copy } = await import("./copy.js");
+      await copy(controller.files(id), await controller.info(id), config.copy!);
+      return 0;
     }
     case "sessions": {
       const sessions = await controller.ptySessions(id);
