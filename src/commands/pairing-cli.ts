@@ -2,7 +2,7 @@ import os from "node:os";
 import readline from "node:readline";
 import { AuthError } from "../auth.js";
 import { connectFirst, connectSecure, rpcSession, type SecureChannel } from "../secure.js";
-import { isRelayAddress, redactRelay, relayEndpoint } from "../relay-hub.js";
+import { dialAddresses, isRelayAddress, redactRelay } from "../relay-hub.js";
 import { errorMessage } from "../errors.js";
 import { ensureIdentity, fingerprint as fingerprintOf, identityPath, loadIdentity } from "../identity.js";
 import { allPrivate } from "../addresses.js";
@@ -10,10 +10,11 @@ import { endpointUrl, isLoopback } from "../options.js";
 import { decisionSchema, decodeInvite, DEFAULT_INVITE_MS, MAX_INVITE_MS, suggestedName, type Decision, type Invite, type PairingApi, type Proposal } from "../pairing.js";
 import { peerFileExists, peerNamePattern, removeAlias, validatePeerUrl } from "../aliases.js";
 import { describeGrants, expandGrants, findPairedPeer, getPeer, listPeers, savePairedPeer, updatePairedPeer, PERMISSIONS, type Permission } from "../peers.js";
+import { checkRelayUrl, configuredRelay } from "../settings.js";
 import { plain } from "../terminal.js";
 import type { ShellApi } from "../shell.js";
 import { RefusingShell } from "../refusing-shell.js";
-import { connectControl, removeStaleState, startDaemon, type ControlConnection } from "./daemon.js";
+import { connectControl, localRelay, removeStaleState, startDaemon, type ControlConnection } from "./daemon.js";
 
 /** How long the invited device waits for the inviting person to decide. */
 const PROPOSAL_WAIT_MS = 10 * 60 * 1000;
@@ -99,8 +100,8 @@ async function pairedDaemon(options: { bind?: string; port?: string; relay?: str
     try {
       const status = await running.remote.status();
       if (!status.paired) throw new Error("A daemon that is not for paired devices is running. Stop it with cns stop, then run cns up.");
-      const relay = options.relay ?? process.env.CNS_RELAY;
-      if (relay && relay !== status.relay) console.error(`The running daemon ${status.relay ? `uses the relay ${redactRelay(status.relay)}` : "uses no relay"}; run cns stop, then cns up --relay URL, to change it.`);
+      const relay = configuredRelay(options.relay)?.url;
+      if (relay && relay !== status.relay) console.error(`The running daemon ${status.relay ? `uses the relay ${redactRelay(status.relay)}` : "uses no relay"}; run cns stop, then cns up, to use ${redactRelay(relay)}.`);
       return { control: running, started: false };
     } catch (error) {
       running.close();
@@ -110,9 +111,10 @@ async function pairedDaemon(options: { bind?: string; port?: string; relay?: str
   const bind = options.bind ?? process.env.CNS_BIND ?? "0.0.0.0";
   const port = Number(options.port ?? process.env.CNS_PORT ?? 47381);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("--port requires an integer from 1 to 65535.");
-  const relay = options.relay ?? process.env.CNS_RELAY;
+  // --relay, else CNS_RELAY, else the relay saved with cns config relay URL.
+  const relay = configuredRelay(options.relay)?.url;
   if (relay) {
-    relayEndpoint(relay, "accept", "A".repeat(43)); // Refuse a malformed relay URL before starting anything.
+    checkRelayUrl(relay); // Refuse a malformed relay URL before starting anything.
     if (new URL(relay).protocol === "ws:" && !isLoopback(new URL(relay).hostname)) console.error("The relay URL is ws://, so the relay token and registration travel unencrypted; links themselves stay encrypted. Use wss:// for a relay beyond this machine.");
   }
   const daemon = await startDaemon({ bind, port, url: endpointUrl(bind, port), remote: !isLoopback(bind), state: options.state, paired: true, ...relay ? { relay } : {} });
@@ -337,8 +339,10 @@ export async function doctor(name: string, options: DoctorOptions): Promise<void
     } else lines.push("  Daemon link: no daemon running here (cns up)");
     report.link = control ? (linked ? "online" : "offline") : "no-daemon";
     const attempts: Array<{ address: string; result: string; detail?: string }> = [];
-    if (!entry.addresses.length) lines.push("  No saved address: cns peer address NAME ws://HOST:PORT adds one.");
-    for (const address of entry.addresses) {
+    // The saved addresses and, when none is a relay, this device's own relay, as commands dial them.
+    const addresses = dialAddresses(entry, await localRelay(options.state));
+    if (!addresses.length) lines.push("  No saved address: cns peer address NAME ws://HOST:PORT adds one.");
+    for (const address of addresses) {
       const cancelled = new AbortController();
       // The deadline covers the whole attempt: connecting, authenticating and the first call.
       const timer = setTimeout(() => cancelled.abort(new Error("Timed out after 10 s.")), 10_000);
@@ -362,7 +366,7 @@ export async function doctor(name: string, options: DoctorOptions): Promise<void
       } finally { clearTimeout(timer); }
     }
     report.attempts = attempts;
-    for (const attempt of attempts) lines.push(`  ${attempt.address}${isRelayAddress(attempt.address) ? " [relay]" : ""}: ${attempt.result}${attempt.detail ? ` (${attempt.detail})` : ""}`);
+    for (const attempt of attempts) lines.push(`  ${attempt.address}${isRelayAddress(attempt.address) ? (entry.addresses.includes(attempt.address) ? " [relay]" : " [this device's relay]") : ""}: ${attempt.result}${attempt.detail ? ` (${attempt.detail})` : ""}`);
     if (attempts.some((attempt) => attempt.result === "identity-changed")) process.exitCode = 3;
     else if (attempts.some((attempt) => attempt.result === "not-paired")) process.exitCode = 3;
     else if (!attempts.some((attempt) => attempt.result === "ok")) process.exitCode = 5;
