@@ -6,7 +6,7 @@ import test, { type TestContext } from "node:test";
 import { Terminal as Screen } from "@xterm/headless";
 import {
   MAX_EXEC_CHUNK_BYTES, MAX_FILE_CHUNK_BYTES, MAX_FORKS, MAX_NAMED_PTYS, MAX_OUTPUT_BYTES, MAX_PTY_BACKLOG_BYTES, MAX_PTY_INPUT_BYTES, MAX_SCREEN_HISTORY,
-  MAX_TIMEOUT_MS, MAX_WRITE_BYTES, HANDLES_REVOKED, PtyRegistry, ShellApi, type ExecSink, type PtyExit,
+  MAX_TIMEOUT_MS, MAX_WRITE_BYTES, HANDLES_REVOKED, PtyRegistry, ShellApi, type ExecInput, type ExecSink, type PtyExit,
 } from "./shell.js";
 
 async function temporaryDirectory(t: TestContext): Promise<string> {
@@ -215,6 +215,52 @@ test("exec kills the command when the sink fails, and times out like run", { ski
   await assert.rejects(api.exec(sink, ""), /Command/);
 });
 
+/** Hands exec its input in the given chunks, then ends it; records how many reads were asked for. */
+class ScriptedInput implements ExecInput {
+  reads = 0;
+  constructor(private chunks: (Uint8Array | string | null | (() => never))[]) {}
+  async read(): Promise<Uint8Array | null> {
+    this.reads++;
+    const next = this.chunks.shift();
+    if (typeof next === "function") return next();
+    if (typeof next === "string") return new TextEncoder().encode(next);
+    return next ?? null;
+  }
+}
+
+test("exec feeds standard input from its input, then ends it; without one, input is closed", { skip: windows }, async (t) => {
+  const api = apiFor(t);
+  const sink = new RecordingSink();
+  const result = await api.exec(sink, "tr a-z A-Z; printf ' [%s]' \"$(cat)\"", {}, new ScriptedInput(["hello ", "world"]));
+  assert.equal(result.exitCode, 0);
+  assert.equal(sink.text(), "HELLO WORLD []");
+  const closed = new RecordingSink();
+  assert.equal((await api.exec(closed, "cat; printf done")).exitCode, 0);
+  assert.equal(closed.text(), "done");
+  // Large input arrives whole, in order, through the pipe's flow control.
+  const big = Buffer.alloc(MAX_EXEC_CHUNK_BYTES * 8 + 3, "y");
+  const parts = Array.from({ length: Math.ceil(big.length / MAX_EXEC_CHUNK_BYTES) }, (_, index) => big.subarray(index * MAX_EXEC_CHUNK_BYTES, (index + 1) * MAX_EXEC_CHUNK_BYTES));
+  const counted = new RecordingSink();
+  await api.exec(counted, "wc -c | tr -d ' '", {}, new ScriptedInput(parts.map((part) => new Uint8Array(part))));
+  assert.equal(counted.text().trim(), String(big.length));
+});
+
+test("exec ends without the rest of its input, and an input that fails or misbehaves kills the command", { skip: windows }, async (t) => {
+  const api = apiFor(t);
+  // The command exits without reading; an input that never answers does not hold the call.
+  const stalled: ExecInput = { read: () => new Promise<null>(() => {}) };
+  const started = Date.now();
+  assert.equal((await api.exec(new RecordingSink(), "exit 3", {}, stalled)).exitCode, 3);
+  assert.ok(Date.now() - started < 5000);
+  const early = new RecordingSink();
+  assert.equal((await api.exec(early, "head -c 3", {}, new ScriptedInput(["abcdef", "more", "and more"]))).exitCode, 0);
+  assert.equal(early.text(), "abc");
+  await assert.rejects(api.exec(new RecordingSink(), "cat; sleep 10", {}, new ScriptedInput(["x", () => { throw new Error("input gave up"); }])), /input gave up/);
+  await assert.rejects(api.exec(new RecordingSink(), "cat; sleep 10", {}, new ScriptedInput([new Uint8Array(MAX_EXEC_CHUNK_BYTES + 1)])), /at most/);
+  await assert.rejects(api.exec(new RecordingSink(), "cat; sleep 10", {}, { read: async () => "text" as never }), /Uint8Array/);
+  await assert.rejects(async () => { await api.exec(new RecordingSink(), "true", {}, 5 as never); }, /input must be/);
+});
+
 test("releasing a shell settles exec while its sink has not answered", { skip: windows }, async () => {
   const api = new ShellApi();
   const stalled: ExecSink = { output: () => new Promise<void>(() => {}) };
@@ -314,9 +360,35 @@ test("file operations describe, list, create, glob, read and replace files with 
   await assert.rejects(api.writeFile(target, "text" as never), /Uint8Array|instance/i);
   await assert.rejects(api.glob("", dir), /pattern|too_small|>=1|at least/i);
   assert.equal(await readFile(target, "utf8"), "replaced");
+  await assert.rejects(api.writeFileAt("relative", new Uint8Array()), /absolute/);
+  await assert.rejects(api.writeFileAt(target, new Uint8Array(MAX_WRITE_BYTES + 1)), /at most/);
+  await assert.rejects(api.writeFileAt(target, new Uint8Array(), { offset: -1 }), /offset/);
+  await assert.rejects(api.writeFileAt(target, new Uint8Array(), { mode: 0o4755 }), /mode|<=/);
+  await assert.rejects(api.writeFileAt(target, new Uint8Array(), { append: true } as never), /append/);
   api[Symbol.dispose]();
   await assert.rejects(api.stat(dir), /closed/);
+  await assert.rejects(api.writeFileAt(target, new Uint8Array()), /closed/);
   await assert.rejects(api.exec(new RecordingSink(), "true"), /closed/);
+});
+
+test("writeFileAt builds a file in parts, creating it with a mode and keeping an existing file's", async (t) => {
+  const api = apiFor(t);
+  const dir = await temporaryDirectory(t);
+  const target = path.join(dir, "parts.bin");
+  const encode = (text: string) => new TextEncoder().encode(text);
+  await api.writeFileAt(target, encode("hello"), { truncate: true, mode: 0o750 });
+  await api.writeFileAt(target, encode(" world"), { offset: 5 });
+  assert.equal(await readFile(target, "utf8"), "hello world");
+  if (!windows) assert.equal((await stat(target)).mode & 0o777, 0o750 & ~process.umask());
+  // Starting over empties the file; an existing file keeps its permissions.
+  await api.writeFileAt(target, encode("new"), { truncate: true, mode: 0o777 });
+  assert.equal(await readFile(target, "utf8"), "new");
+  if (!windows) assert.equal((await stat(target)).mode & 0o777, 0o750 & ~process.umask());
+  // Without truncate, a write lands in place.
+  await api.writeFileAt(target, encode("N"));
+  assert.equal(await readFile(target, "utf8"), "New");
+  await assert.rejects(api.writeFileAt(dir, new Uint8Array(1)), { code: "EISDIR" });
+  await assert.rejects(api.writeFileAt(path.join(dir, "nowhere", "x"), new Uint8Array(1)), { code: "ENOENT" });
 });
 
 test("reports signal numbers from the executing operating system", { skip: windows }, async (t) => {

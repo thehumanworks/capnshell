@@ -34,7 +34,8 @@ Use an address reachable from the other machine. This does not configure routing
 | `connect <url>` | Open a bidirectional connection and interactive console. |
 | `connect <url> --no-repl` | Connect and expose local execution without a console. |
 | `--one-way` on peer commands | Use the peer's shell without offering this machine's shell or files in return. |
-| `run [url] -- '<command>'` | Execute one shell command and exit with its status. |
+| `run [url] -- '<command>'` | Execute one shell command and exit with its status; piped stdin is forwarded. |
+| `cp SOURCE DEST` | Copy one file to or from a peer, with the remote side written `TARGET:PATH`. |
 | `tty [url] [-- '<command>']` | Open an interactive terminal (PTY) running a login shell or one command. |
 | `tty [url] --name NAME [-- '<command>']` | Start a named PTY session in the background. |
 | `tty [url] --attach NAME` | Attach to a named session; Ctrl-] detaches. |
@@ -88,6 +89,7 @@ laptop $ cns pair 'cns1:...'          # shows studio's fingerprint and asks befo
 # studio's cns pair shows laptop's fingerprint and asks what laptop may use there
 
 laptop $ cns run studio -- 'git status'
+laptop $ cns cp ./notes.md studio:~/      # needs only the files grant
 laptop $ cns tty studio                 # the session main: a login shell that survives disconnects
 laptop $ cns screen studio main --until '❯'
 laptop $ cns peers
@@ -176,13 +178,38 @@ Without a URL, `run` and `tty` connect to `ws://<bind>:<port>` using these defau
 
 ### Output and execution behavior
 
-`run` writes remote stdout and stderr to the corresponding local streams without prompts or added newlines and propagates the exit status. A timeout exits with status 124. The connection remains bidirectional while the command runs, so the listener can execute commands on the connecting machine too.
+`run` streams remote stdout and stderr to the corresponding local streams as they are produced, byte for byte, without prompts or added newlines, and propagates the exit status. A timeout exits with status 124. When the local reader goes away, as with `| head`, the remote command is killed and `run` exits with 141, as a local command ends on SIGPIPE. The connection remains bidirectional while the command runs, so the listener can execute commands on the connecting machine too.
 
-Every command starts a fresh noninteractive shell. Shell variables and standalone `cd` commands do not persist; use `:cwd` or combine operations in one command. Remote stdin is closed; piping input to `cns run` does not forward it. For interactive programs, editors and TUIs, use [`tty`](#interactive-terminals-pty).
+Every command starts a fresh noninteractive shell. Shell variables and standalone `cd` commands do not persist; use `:cwd` or combine operations in one command. For interactive programs, editors and TUIs, use [`tty`](#interactive-terminals-pty).
 
-Output is buffered until completion, with a combined 1 MiB capture limit. Excess output is drained and discarded. Truncation and timeouts add a diagnostic to stderr. Commands have no deadline by default; the maximum optional timeout is 2147483647 ms. Stopping a peer or disconnecting its session attempts to kill that session's process trees; deliberately detached processes can escape cleanup.
+Piped or redirected stdin is forwarded to the command, as `ssh` does, and the command sees its end when local input ends. A terminal's stdin is not forwarded, so a command run from an interactive shell still sees closed input. `-n`/`--no-stdin` closes it explicitly, for example inside a `while read` loop whose input belongs to the loop:
+
+```sh
+tar czf - src | cns run studio -- 'tar xzf - -C /srv/app'
+cns run studio -- 'sha256sum' < build.tar.gz
+cns run studio -- 'cat /var/log/app.log' | grep ERROR
+```
+
+A command that never reads its input still ends normally. With an open stdin that never ends, a command that waits for input waits too; pass `-n`. A peer running an older `cns` closes the command's input instead.
+
+`run` keeps no output in memory, so it has no output limit. The interactive console's commands still buffer until completion, with a combined 1 MiB capture limit; excess output is drained and discarded, and truncation adds a diagnostic. Commands have no deadline by default; the maximum optional timeout is 2147483647 ms. Stopping a peer or disconnecting its session attempts to kill that session's process trees; deliberately detached processes can escape cleanup.
 
 The listener allows up to 32 connections and four concurrent commands per connection. Incomplete RPC handshakes expire after five seconds.
+
+## Copying files
+
+`cp` copies one file between this device and a peer, over the peer's `readFile` and `writeFileAt` methods in parts of up to 1 MiB and 4 MiB, so files of any size work. Exactly one path is remote, written `TARGET:PATH` as with `scp`, where `TARGET` is a paired device's name or a saved alias:
+
+```sh
+cns cp ./build.tar.gz studio:/tmp/          # into a remote directory, under the same name
+cns cp studio:~/notes.txt .                 # into the local working directory
+cns cp studio:logs/app.log ./app.log        # a relative remote path starts at the remote home
+cns cp --peer ws://box:47381 report.pdf :reports/
+```
+
+`:PATH` uses the `--peer` target, or else `--bind`/`--port`, `CNS_BIND`/`CNS_PORT` or `127.0.0.1:47381`. A remote path that is relative or starts with `~/` is resolved against the remote user's home. A destination that is an existing directory, or ends with `/`, receives the file under its own name. An existing destination is overwritten in place and keeps its permissions; a new one gets the source's permission bits, less the umask. A copy that fails partway leaves a partial destination, as `scp` does. Directories are not copied; use `tar` through `cns run` instead, as above. On a paired device, `cp` needs only the `files` grant. A peer running an older `cns` accepts files of up to 4 MiB.
+
+A local path with a colon before any slash would read as remote: write it as `./name:with:colons`. On Windows, a drive letter such as `C:\` is local.
 
 ## Interactive terminals (PTY)
 
@@ -271,7 +298,7 @@ The caller passes `sink`, an `RpcTarget` with `output(bytes)` and `exit(result)`
 
 ### Streaming commands and files
 
-`ShellApi.exec(sink, command, options)` runs a command as `run` does, with the same options and limits, but streams its output to `sink.output(stream, bytes)` (`stream` is `"stdout"` or `"stderr"`) in chunks of up to 64 KiB, without an output cap. It waits for each acknowledgement before reading more, so a slow caller slows the command instead of growing the peer's memory; a sink that throws kills the command. It resolves with `exitCode`, `signal`, `signalNumber`, `timedOut` and `elapsedMs`.
+`ShellApi.exec(sink, command, options, input?)` runs a command as `run` does, with the same options and limits, but streams its output to `sink.output(stream, bytes)` (`stream` is `"stdout"` or `"stderr"`) in chunks of up to 64 KiB, without an output cap. It waits for each acknowledgement before reading more, so a slow caller slows the command instead of growing the peer's memory; a sink that throws kills the command. With `input`, an `RpcTarget` passed by reference, the command's stdin is a pipe that the peer fills by calling `input.read()`, which resolves with the next chunk of up to 64 KiB as a `Uint8Array`, or `null` at the end. The peer asks for the next chunk only once the pipe has taken the last, so input is flow-controlled the same way. An input that throws, or answers with anything else, kills the command; a command that exits without reading all of it is not an error. Without `input`, stdin is closed. It resolves with `exitCode`, `signal`, `signalNumber`, `timedOut` and `elapsedMs`.
 
 File methods take absolute paths on the executing peer and reject with its system errors, such as `ENOENT`:
 
@@ -284,6 +311,7 @@ File methods take absolute paths on the executing peer and reject with its syste
 | `glob(pattern, cwd, { ignore, limit, directories })` | Up to 10,000 absolute paths of files and links under `cwd` whose relative path matches a glob, hidden ones included, links not followed; with `directories: true`, matching directories too, ending in a separator. Directories matched by an ignore pattern ending in `/**` are not entered. |
 | `readFile(path, { offset, length })` | `{ data, size, eof }`: up to 1 MiB from `offset`; read larger files in several calls. |
 | `writeFile(path, data)` | Replaces a file's contents with up to 4 MiB in place, as a local write does: links are followed and the file keeps its inode, owner and permissions. The data arrives whole before anything is written. Parent directories are not created. |
+| `writeFileAt(path, data, { offset, truncate, mode })` | Writes up to 4 MiB at `offset`, creating the file if needed, so a larger file is sent in several calls: the first with `truncate: true`, the rest at increasing offsets. `mode` sets the permission bits of a file the call creates, less the umask. Links are followed and an existing file keeps its inode, owner and permissions. A broken connection between calls leaves the file partly written. |
 
 `ShellApi.fork()` returns another `ShellApi` on the same peer, with its own limit of four commands and the same named sessions. Releasing the fork kills its commands and revokes the named-session handles it issued, so a caller can cancel a `run` without closing its connection; the named sessions themselves keep running. Each shell has up to 32 unreleased forks; closing a shell closes them. Daemon control's `runWhileConnected(id, command, options)` uses a fork so the command ends with the control connection, as `cns mcp` needs. Its `run` leaves commands running after an attached console detaches. Peers running a `cns` without `fork` fall back to `run`. Daemon control's `shell(id)` returns a fork of a connected peer's whole `ShellApi`, proxied by the daemon, and `status()` reports the daemon's listener (`url`, `bind`, `port`, `remote`, `oneWay`), `pid`, `startedAt` and its number of peers.
 

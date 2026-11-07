@@ -15,6 +15,7 @@ test("a granted shell allows exactly what was granted and refuses the rest witho
   assert.equal(granted.info().pid, process.pid);
   assert.equal(granted.grants, "files, sessions:list");
   assert.equal((await granted.stat("/")).kind, "directory");
+  await assert.rejects(async () => { await granted.writeFileAt("relative", new Uint8Array()); }, /absolute/);
   assert.deepEqual(granted.ptySessions(), []);
   await assert.rejects(async () => { await granted.run("printf x"); }, /Permission denied: shell not granted to laptop/);
   assert.throws(() => granted.fork(), /shell not granted/);
@@ -49,6 +50,17 @@ test("grants are enforced over RPC, and closing the view closes the shell behind
   await assert.rejects(async () => { await remote.ptySessions(); }, /sessions:list/);
   const pty = await remote.openPty(new Sink(), { command: "sleep 30" });
   pty[Symbol.dispose]();
+  await assert.rejects(async () => { await remote.writeFileAt("/tmp/never", new Uint8Array(1)); }, /files not granted/);
+  // Exec input is a stub the executing side reads from until it ends.
+  class Collect extends RpcTarget { text = ""; output(_stream: string, data: Uint8Array) { this.text += new TextDecoder().decode(data); } }
+  class Input extends RpcTarget {
+    #chunks = ["over ", "rpc"];
+    read() { const next = this.#chunks.shift(); return next === undefined ? null : new TextEncoder().encode(next); }
+  }
+  const collect = new Collect();
+  const result = await remote.exec(collect, "cat", {}, new Input());
+  assert.equal(result.exitCode, 0);
+  assert.equal(collect.text, "over rpc");
 });
 
 test("session handles check viewing, typing and killing separately, and owners keep their own sessions", { skip: windows }, async (t) => {
