@@ -3,6 +3,7 @@ import { z } from "zod";
 import manifest from "../../package.json" with { type: "json" };
 import { DEFAULT_UNTIL_MS, describeExit, formatSessions } from "../commands/one-shot.js";
 import { errorMessage } from "../errors.js";
+import { explainDenial } from "../peers.js";
 import { MAX_KEYS } from "../keys.js";
 import { commandSchema } from "../platform.js";
 import { MAX_SCREEN_HISTORY, MAX_TIMEOUT_MS, sessionNameSchema, type PtyExit, type PtyScreen, type PtySessionInfo } from "../shell.js";
@@ -223,7 +224,7 @@ async function invoke(target: McpTarget, ctx: ServerContext, activity: string | 
   } catch (error) {
     // The SDK sends nothing for a cancelled request.
     if (signal.aborted) throw error;
-    const message = link?.lost ? `Lost the connection to ${target.label}: ${errorMessage(error)}` : errorMessage(error);
+    const message = link?.lost ? `Lost the connection to ${target.label}: ${errorMessage(error)}` : explainDenial(errorMessage(error), target.device);
     return { content: [{ type: "text", text: message }], isError: true };
   } finally {
     stopProgress();

@@ -79,7 +79,7 @@ export function createCli(): Command {
     .argument("[invite]", "The cns1:... invite the other device printed")
     .option("--name <name>", "Save the other device under this name")
     .option("--request <grants>", "With an invite: what to ask for on the other device: shell, files, sessions, all, or permissions (default: all)")
-    .option("--grant <grants>", "What the other device may do here: shell, files, sessions, all, or permissions (default: none). The inviting device grants at most what was requested; without --grant it asks, and --yes alone grants nothing")
+    .option("--grant <grants>", "What the other device may do here: none, shell, files, sessions, all, or permissions. Without --grant either side asks, and --yes alone grants nothing; the inviting device grants at most what was requested")
     .option("--expires <minutes>", "How long a printed invite stays valid (default: 5)")
     .option("--yes", "Pair without asking; for scripts, after comparing fingerprints yourself")
     .option("--state <path>", "Local daemon state file")

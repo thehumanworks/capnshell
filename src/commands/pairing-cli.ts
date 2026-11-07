@@ -14,6 +14,7 @@ import { checkRelayUrl, configuredRelay } from "../settings.js";
 import { plain } from "../terminal.js";
 import { selfCheck, type SelfFacts } from "../self-check.js";
 import type { ShellApi } from "../shell.js";
+import type { RpcStub } from "capnweb";
 import { RefusingShell } from "../refusing-shell.js";
 import { connectControl, localRelay, removeStaleState, startDaemon, type ControlConnection } from "./daemon.js";
 
@@ -55,6 +56,15 @@ function parseGrants(value: string | undefined, fallback: readonly string[]): Pe
   const words = value === undefined ? fallback : value.split(",").map((word) => word.trim()).filter(Boolean);
   if (value !== undefined && !words.length) return [];
   return expandGrants(words);
+}
+
+/** Ask what a newly paired device may use here, until the answer is one `--grant` would take. */
+async function chooseGrants(prompt: Prompt, name: string): Promise<Permission[]> {
+  for (;;) {
+    const answer = await prompt.ask(`What may ${name} use on this device? none, shell, files, sessions, all, or a comma-separated list`, "none");
+    try { return parseGrants(answer, []); }
+    catch { console.error(`Answer none, shell, files, sessions, all, or a comma-separated list of those or of ${PERMISSIONS.join(", ")}.`); }
+  }
 }
 
 /** Refuse a name that is not a valid alias or that a saved peer, of any kind, already uses. */
@@ -204,7 +214,7 @@ async function acceptInvite(text: string, options: PairOptions): Promise<void> {
   try { invite = decodeInvite(text); }
   catch (error) { process.exitCode = 3; throw error; }
   const requests = parseGrants(options.request, ["all"]);
-  const offers = parseGrants(options.grant, []);
+  let offers = parseGrants(options.grant, []);
   let prompt: Prompt | undefined;
   let control: ControlConnection | undefined;
   let channel: SecureChannel | undefined;
@@ -217,14 +227,17 @@ async function acceptInvite(text: string, options: PairOptions): Promise<void> {
     if (existing) throw new Error(`This device is already paired with it as ${existing.name}. To pair again, remove it first with cns peer remove ${existing.name}.`);
     if (options.name !== undefined) checkFreeName(options.name);
     const peerFingerprint = fingerprintOf(invite.key);
+    // --grant, or --yes alone, decides without asking; --yes never grants what --grant does not name.
+    const askGrants = options.grant === undefined && !prompt.yes;
     console.error([
       `The invite is from ${invite.name ?? "a device"} with fingerprint ${peerFingerprint}, reachable at ${invite.addresses.join(", ")}.`,
       `  This device will ask to use its: ${describeGrants(requests)}`,
-      `  and let it use this device's:   ${describeGrants(offers)}`,
+      ...askGrants ? [] : [`  and let it use this device's:   ${describeGrants(offers)}`],
       `  This device is ${identity.fingerprint}; the other side will see that.`,
     ].join("\n"));
     if (!(await prompt.confirm("Pair with it?", true))) { console.log("Not paired."); process.exitCode = 3; return; }
     const name = await chooseName(prompt, "Save it as", options.name, invite.name ?? "peer");
+    if (askGrants) offers = await chooseGrants(prompt, name);
     // Our own daemon's addresses, if it runs, so the other device can dial back.
     let addresses: string[] | undefined;
     let pairedDaemonRuns = false;
@@ -362,6 +375,7 @@ export async function doctor(name: string | undefined, options: DoctorOptions): 
     report.access = entry.grants.outgoing;
     report.grants = entry.grants.incoming;
     lines.push(`${name}: paired device ${entry.fingerprint}`, `  This device may use its:  ${describeGrants(entry.grants.outgoing)}`, `  It may use this device's: ${describeGrants(entry.grants.incoming)}`);
+    const accessLine = lines.length - 2;
     const control = await daemonIfRunning(options.state);
     let linked = false;
     if (control) {
@@ -372,6 +386,8 @@ export async function doctor(name: string | undefined, options: DoctorOptions): 
     } else lines.push("  Daemon link: no daemon running here (cns up)");
     report.link = control ? (linked ? "online" : "offline") : "no-daemon";
     const attempts: Array<{ address: string; result: string; detail?: string }> = [];
+    /** What the device says this one may use there now, from the first address that answers. */
+    let live: Permission[] | undefined;
     // The saved addresses and, when none is a relay, this device's own relay, as commands dial them.
     const addresses = dialAddresses(entry, await localRelay(options.state));
     if (!addresses.length) lines.push("  No saved address: cns peer address NAME ws://HOST:PORT adds one.");
@@ -388,6 +404,7 @@ export async function doctor(name: string | undefined, options: DoctorOptions): 
           try {
             const info = await plain(remote.info());
             attempts.push({ address, result: "ok", detail: printable(`${info.hostname}, ${info.platform}/${info.shell}, encrypted`) });
+            live ??= await liveAccess(remote);
           } finally { remote[Symbol.dispose](); }
         } finally {
           cancelled.signal.removeEventListener("abort", hangUp);
@@ -400,12 +417,30 @@ export async function doctor(name: string | undefined, options: DoctorOptions): 
     }
     report.attempts = attempts;
     for (const attempt of attempts) lines.push(`  ${attempt.address}${isRelayAddress(attempt.address) ? (entry.addresses.includes(attempt.address) ? " [relay]" : " [this device's relay]") : ""}: ${attempt.result}${attempt.detail ? ` (${attempt.detail})` : ""}`);
+    if (live) {
+      report.access = live;
+      const saved = entry.grants.outgoing;
+      if (live.length !== saved.length || live.some((permission) => !saved.includes(permission))) {
+        // Kept for display only, since the other device enforces it: record what it says now.
+        updatePairedPeer(name, (peer) => ({ ...peer, grants: { ...peer.grants, outgoing: live! } }));
+        lines[accessLine] = `  This device may use its:  ${describeGrants(live)} (changed since it was saved as ${describeGrants(saved)}; saved now)`;
+      }
+      if (!live.length) lines.push(`  ${noAccessHint([name]).split("\n").slice(0, 2).join("\n  ")}`);
+    }
     if (attempts.some((attempt) => attempt.result === "identity-changed")) process.exitCode = 3;
     else if (attempts.some((attempt) => attempt.result === "not-paired")) process.exitCode = 3;
     else if (!attempts.some((attempt) => attempt.result === "ok")) process.exitCode = 5;
   }
   if (options.json) console.log(JSON.stringify(report, null, 2));
   else console.log(lines.join("\n"));
+}
+
+/** What a paired device says this one may use on it, or undefined if it does not say in a form this cns reads. */
+async function liveAccess(remote: RpcStub<ShellApi>): Promise<Permission[] | undefined> {
+  try {
+    const text: unknown = await (remote as unknown as { grants: Promise<unknown> }).grants;
+    return typeof text === "string" && text.length <= 256 ? parseGrants(text.replaceAll(" ", ""), []) : undefined;
+  } catch { return undefined; }
 }
 
 /** Tell the running daemon that a device's record changed, if there is one. */
@@ -478,4 +513,18 @@ export async function peers(options: PeersOptions): Promise<void> {
   ])];
   const widths = table.reduce((max, row) => row.map((cell, index) => Math.max(cell.length, max[index] ?? 0)), [] as number[]);
   console.log(table.map((row) => row.map((cell, index) => index === row.length - 1 ? cell : cell.padEnd(widths[index]!)).join("  ")).join("\n"));
+  const blocked = rows.flatMap((row) => row.kind === "paired" && !row.access.length ? [row.name] : []);
+  if (blocked.length) console.error(`\n${noAccessHint(blocked)}`);
+}
+
+/** What to do about paired devices that grant this one nothing, which the other device alone can change. */
+function noAccessHint(names: readonly string[]): string {
+  const fingerprint = loadIdentity()?.fingerprint;
+  const which = names.length === 1 ? names[0]! : names.join(", ");
+  const where = names.length === 1 ? `on ${names[0]}` : "on each of them";
+  return [
+    `${which} ${names.length === 1 ? "grants" : "grant"} this device no access. To change that, run ${where}: cns peer grant NAME shell (or files, sessions, all),`,
+    `where NAME is what it calls this device; cns peers there lists it${fingerprint ? ` with fingerprint ${fingerprint}` : ""}.`,
+    `ACCESS is what was granted when you paired; cns doctor ${names.length === 1 ? names[0] : "NAME"} checks it again.`,
+  ].join("\n");
 }
