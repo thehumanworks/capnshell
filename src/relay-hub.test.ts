@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { startRelay } from "./commands/relay.js";
 import { generateIdentity } from "./identity.js";
-import { challengeBytes, isRelayAddress, MAX_DIALS_PER_ADDRESS, redactRelay, relayEndpoint, route } from "./relay-hub.js";
+import { challengeBytes, dialAddresses, isRelayAddress, MAX_DIALS_PER_ADDRESS, redactRelay, relayEndpoint, route } from "./relay-hub.js";
 import { LOOPBACK } from "./test-support.js";
 
 /** A test socket that records messages and can wait for one. */
@@ -58,6 +58,16 @@ test("relay URLs and routes", () => {
   assert.equal(route(new URL("wss://x/v1/accept/short")), undefined);
   assert.equal(route(new URL(`wss://x/v1/answer/${key}/bad`)), undefined);
   assert.deepEqual(route(new URL("https://x/")), { kind: "health" });
+});
+
+test("dialAddresses adds this device's relay only when the record has no relay address", () => {
+  const key = generateIdentity().publicKey;
+  const direct = ["ws://192.168.1.68:47381", "ws://100.107.74.1:47381"];
+  assert.deepEqual(dialAddresses({ publicKey: key, addresses: direct }, undefined), direct);
+  assert.deepEqual(dialAddresses({ publicKey: key, addresses: direct }, "wss://relay.example/?token=t"), [...direct, `wss://relay.example/v1/dial/${key}`]);
+  assert.deepEqual(dialAddresses({ publicKey: key, addresses: [] }, "wss://relay.example"), [`wss://relay.example/v1/dial/${key}`]);
+  const saved = [...direct, "wss://other.example/v1/dial/" + key];
+  assert.deepEqual(dialAddresses({ publicKey: key, addresses: saved }, "wss://relay.example"), saved);
 });
 
 test("a daemon registers by proving its key, and the relay forwards dialers to it", async (t) => {

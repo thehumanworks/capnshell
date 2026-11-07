@@ -27,7 +27,8 @@ test("devices that cannot reach each other directly pair and link through the re
   const device = async (name: string) => {
     const dir = path.join(root, name);
     await mkdir(dir, { mode: 0o700 });
-    return { env: { CNS_CONFIG_DIR: dir, HOME: dir }, state: path.join(dir, "daemon.json"), dir };
+    // The default state path under HOME, so commands without --state, such as run, find the daemon.
+    return { env: { CNS_CONFIG_DIR: dir, HOME: dir }, state: path.join(dir, ".cns", "daemon.json"), dir };
   };
   const studio = await device("studio");
   const laptop = await device("laptop");
@@ -40,7 +41,10 @@ test("devices that cannot reach each other directly pair and link through the re
   const logs = async () => {
     const { readdir } = await import("node:fs/promises");
     const out: string[] = [];
-    for (const dev of [studio, laptop]) for (const name of (await readdir(dev.dir)).filter((file) => file.endsWith(".log"))) out.push(`--- ${path.basename(dev.dir)}/${name}\n${await readFile(path.join(dev.dir, name), "utf8")}`);
+    for (const dev of [studio, laptop]) {
+      const logs = path.dirname(dev.state);
+      for (const name of (await readdir(logs).catch(() => [] as string[])).filter((file) => file.endsWith(".log"))) out.push(`--- ${path.basename(dev.dir)}/${name}\n${await readFile(path.join(logs, name), "utf8")}`);
+    }
     return out.join("\n");
   };
   const eventually = async (check: () => Promise<boolean>, label: string, ms = 20000) => {
@@ -60,7 +64,7 @@ test("devices that cannot reach each other directly pair and link through the re
     const shown = [up.stdout, up.stderr, (await cli(studio, ["status", "--state", studio.state])).stdout, (await cli(studio, ["status", "--json", "--state", studio.state])).stdout];
     assert.ok(!shown.some((text) => text.includes(token)), "the token is redacted");
     const pid = JSON.parse((await cli(studio, ["status", "--json", "--state", studio.state])).stdout).daemon.pid;
-    assert.ok(!(await readFile(`/proc/${pid}/cmdline`, "utf8")).includes(token), "the token is not in the daemon's arguments");
+    if (process.platform === "linux") assert.ok(!(await readFile(`/proc/${pid}/cmdline`, "utf8")).includes(token), "the token is not in the daemon's arguments");
   }
 
   // The invite lists the direct address, then the relay. Laptop gets only the relay part, as if
@@ -88,10 +92,28 @@ test("devices that cannot reach each other directly pair and link through the re
   assert.match(doctor.stdout, /ws:\/\/127\.0\.0\.1:1\/?: unreachable/);
   assert.match(doctor.stdout, /\/v1\/dial\/[A-Za-z0-9_-]{43} \[relay\]: ok \(.*encrypted\)/);
 
-  // Laptop's daemon keeps a standing link to studio through the relay; studio has no address for laptop.
+  // Laptop saves the relay in its settings; the token never shows.
+  const saved = await cli(laptop, ["config", "relay", relayBase]);
+  assert.equal(saved.code, 0, saved.stderr);
+  const shownRelay = await cli(laptop, ["config", "relay", "--json"]);
+  if (!external) assert.ok(!(saved.stdout + saved.stderr + shownRelay.stdout).includes(token), "the saved token is redacted");
+  assert.equal(JSON.parse(shownRelay.stdout).source, "config");
+  // A record saved before studio had a relay names only direct addresses. Laptop shares studio's
+  // relay, so its commands, doctor and daemon try studio there without anyone adding the address,
+  // and with the relay saved, commands find it while laptop's daemon is not running.
+  await writeFile(file, JSON.stringify({ ...record, addresses: ["ws://127.0.0.1:1"] }), { mode: 0o600 });
+  const noDaemon = await cli(laptop, ["run", "studio", "--", "printf saved-relay"]);
+  assert.deepEqual([noDaemon.code, noDaemon.stdout], [0, "saved-relay"], noDaemon.stderr);
+  // Laptop's daemon keeps a standing link to studio through the saved relay; studio has no address for laptop.
   const laptopUp = await cli(laptop, ["up", "--bind", "127.0.0.1", "--port", await unusedPort("127.0.0.1"), "--state", laptop.state]);
   assert.equal(laptopUp.code, 0, laptopUp.stderr);
   cleanups.push(() => cli(laptop, ["stop", "--state", laptop.state]));
+  assert.match(laptopUp.stdout, /Relay: /, "cns up registers at the saved relay without --relay");
+  const shared = await cli(laptop, ["run", "studio", "--", "printf shared-relay"]);
+  assert.deepEqual([shared.code, shared.stdout], [0, "shared-relay"], shared.stderr);
+  const doctorShared = await cli(laptop, ["doctor", "studio", "--state", laptop.state]);
+  assert.equal(doctorShared.code, 0, doctorShared.stdout + doctorShared.stderr);
+  assert.match(doctorShared.stdout, /\/v1\/dial\/[A-Za-z0-9_-]{43} \[this device's relay\]: ok \(.*encrypted\)/);
   const viaOf = async (dev: typeof laptop) => {
     const control = await connectControl(dev.state);
     try { return (await control.controller.peers()).filter((peer) => peer.peer?.daemon).map((peer) => peer.peer!.via); } finally { control.close(); }

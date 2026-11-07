@@ -1,7 +1,7 @@
 import os from "node:os";
 import { newBunWebSocketRpcSession, newWebSocketRpcSession, type BunWebSocketTransport, type RpcStub } from "capnweb";
 import { attachClientSocket, clientWire, connectFirst, rpcSession, secureReady, SecureChannel, serverWire, type Established } from "../secure.js";
-import { challengeBytes, isRelayAddress, redactRelay, relayEndpoint } from "../relay-hub.js";
+import { challengeBytes, dialAddresses, isRelayAddress, redactRelay, relayEndpoint } from "../relay-hub.js";
 import { serve, type Server, type ServerWebSocket } from "bun";
 import { z } from "zod";
 import { PtyRegistry, ShellApi, type ShellInfo } from "../shell.js";
@@ -18,6 +18,7 @@ import { createInvite, decisionSchema, PairingApi, suggestedName, type Decision,
 import { advertisedSchema, describeGrants, findPairedPeer, getPeer, grantsSchema, learnAddresses, listPeers, savePairedPeer, updatePairedPeer } from "../peers.js";
 import { listeningAddresses } from "../addresses.js";
 import { serveControl, type PairingController } from "./daemon-server.js";
+import { localRelay } from "./daemon.js";
 import { runOneShot } from "./one-shot.js";
 
 /** CLI exit statuses for failures, as docs/paired-peers.md lists them: 3 unpaired or changed device, 4 permission denied, else 1. */
@@ -416,11 +417,11 @@ export async function startPeer(config: PeerConfig): Promise<void> {
     },
   } : undefined;
 
-  /** Keep a link to a paired device, redialing its saved addresses with backoff while this daemon runs. */
+  /** Keep a link to a paired device, redialing its saved addresses, and this daemon's relay, with backoff while this daemon runs. */
   function dial(name: string) {
     if (!identity || links.has(name) || stopping) return;
     const entry = getPeer(name);
-    if (entry?.kind !== "paired" || !entry.addresses.length) return;
+    if (entry?.kind !== "paired" || !dialAddresses(entry, config.relay).length) return;
     const expectedKey = entry.publicKey;
     let attempt = 0;
     let stopped = false;
@@ -444,13 +445,14 @@ export async function startPeer(config: PeerConfig): Promise<void> {
     }
     async function attempt_() {
       const current = getPeer(name);
-      if (current?.kind !== "paired" || current.publicKey !== expectedKey || !current.addresses.length) return stop();
+      const addresses = current?.kind === "paired" ? dialAddresses(current, config.relay) : [];
+      if (current?.kind !== "paired" || current.publicKey !== expectedKey || !addresses.length) return stop();
       // Skip while an inbound link from the same device is already up.
       if (linkTo(current.publicKey)) return schedule();
       let channel: SecureChannel;
       let url: string;
       try {
-        ({ channel, url } = await connectFirst(current.addresses, identity!, { expect: current.publicKey, mode: "daemon", signal: cancelled.signal }));
+        ({ channel, url } = await connectFirst(addresses, identity!, { expect: current.publicKey, mode: "daemon", signal: cancelled.signal }));
       } catch (error) {
         if (error instanceof AuthError && (error.code === "identity-changed" || error.code === "not-paired")) {
           announce(`${name}: ${error.message}`);
@@ -678,11 +680,11 @@ export async function startPeer(config: PeerConfig): Promise<void> {
       if (identity && config.relay) registerAtRelay(config.relay);
       if (identity) for (const entry of listPeers()) if (entry.kind === "paired") dial(entry.name);
     } else if (config.expect) {
-      // One encrypted connection to a paired device, at the first of its addresses that answers as it.
+      // One encrypted connection to a paired device, at the first of its addresses, or this device's relay, that answers as it.
       let channel: SecureChannel;
       let url: string;
       try {
-        ({ channel, url } = await connectFirst(config.expect.addresses, identity!, { expect: config.expect.publicKey, signal: cancelled.signal }));
+        ({ channel, url } = await connectFirst(dialAddresses(config.expect, await localRelay(config.state)), identity!, { expect: config.expect.publicKey, signal: cancelled.signal }));
       } catch (error) {
         if (error instanceof AuthError) throw error;
         throw new Error(`Cannot connect to ${config.expect.name}: ${errorMessage(error)}`, { cause: error });
