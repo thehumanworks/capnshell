@@ -60,8 +60,47 @@
         }
       );
 
-      checks = forAllSystems (system: {
-        package = self.packages.${system}.default;
-      });
+      # `pkgs.cns` for a nixpkgs that imports this overlay.
+      overlays.default = final: _prev: {
+        cns = self.packages.${final.stdenv.hostPlatform.system}.default;
+      };
+
+      # services.cns: the paired daemon as a service. See README.md's Nix section.
+      nixosModules.default = import ./nix/modules/nixos.nix self;
+      nixosModules.cns = self.nixosModules.default;
+      homeModules.default = import ./nix/modules/home-manager.nix self;
+      homeModules.cns = self.homeModules.default;
+      # The older name some Home Manager configurations use.
+      homeManagerModules = self.homeModules;
+
+      checks = forAllSystems (
+        system:
+        {
+          package = self.packages.${system}.default;
+        }
+        // nixpkgs.lib.optionalAttrs (nixpkgs.lib.hasSuffix "-linux" system) {
+          # Evaluates the NixOS module and builds its systemd unit, without a VM.
+          nixos-module =
+            (nixpkgs.lib.nixosSystem {
+              modules = [
+                self.nixosModules.default
+                {
+                  nixpkgs.hostPlatform = system;
+                  boot.isContainer = true;
+                  system.stateVersion = "25.11";
+                  users.users.alice = {
+                    isNormalUser = true;
+                    home = "/home/alice";
+                  };
+                  services.cns = {
+                    enable = true;
+                    user = "alice";
+                    openFirewall = true;
+                  };
+                }
+              ];
+            }).config.systemd.units."cns.service".unit;
+        }
+      );
     };
 }
