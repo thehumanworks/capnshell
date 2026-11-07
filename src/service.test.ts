@@ -8,7 +8,7 @@ import { launchCli, unusedPort } from "./test-support.js";
 
 const spec: ServiceSpec = {
   program: { file: "/opt/cns & co/bin/cns", args: ["listen", "--service", "--state", "/home/a b/.cns/daemon.json", "--relay-ish", "100%", "$HOME", "say \"hi\"\\"] },
-  env: { PATH: "/usr/bin:/bin", CNS_DAEMON_RELAY: "wss://relay.example/?token=a%20b&c=$X" },
+  env: { PATH: "/usr/bin:/bin", LANG: "en_US.UTF-8 a%20b&c=$X" },
   log: "/home/a b/.cns/service.log",
 };
 
@@ -17,7 +17,7 @@ test("the launchd agent runs the daemon in the foreground, escaped, and restarts
   assert.match(plist, /<key>Label<\/key>\n\t<string>com\.thehumanworks\.cns<\/string>/);
   assert.ok(plist.includes("<string>/opt/cns &amp; co/bin/cns</string>"));
   assert.ok(plist.includes("<string>say &quot;hi&quot;\\</string>"));
-  assert.ok(plist.includes("<string>wss://relay.example/?token=a%20b&amp;c=$X</string>"));
+  assert.ok(plist.includes("<string>en_US.UTF-8 a%20b&amp;c=$X</string>"));
   assert.match(plist, /<key>KeepAlive<\/key>\n\t<dict>\n\t\t<key>SuccessfulExit<\/key>\n\t\t<false\/>/);
   assert.match(plist, /<key>RunAtLoad<\/key>\n\t<true\/>/);
   assert.ok(plist.includes("<key>StandardErrorPath</key>\n\t<string>/home/a b/.cns/service.log</string>"));
@@ -27,7 +27,7 @@ test("the systemd unit quotes every word so specifiers and variables stay litera
   const unit = systemdUnit(spec);
   const exec = /^ExecStart=(.*)$/m.exec(unit)![1]!;
   assert.equal(exec, `"/opt/cns & co/bin/cns" "listen" "--service" "--state" "/home/a b/.cns/daemon.json" "--relay-ish" "100%%" "$$HOME" "say \\"hi\\"\\\\"`);
-  assert.ok(unit.includes(`Environment="CNS_DAEMON_RELAY=wss://relay.example/?token=a%%20b&c=$X"`));
+  assert.ok(unit.includes(`Environment="LANG=en_US.UTF-8 a%%20b&c=$X"`));
   assert.match(unit, /^Restart=on-failure$/m);
   assert.match(unit, /^WantedBy=default\.target$/m);
 });
@@ -63,7 +63,7 @@ test("installing writes a private file and starts the service; uninstalling stop
     calls.length = 0;
     const file = serviceFile(kind, spec, home, {});
     await installService(file, runner);
-    assert.equal((await stat(file.path)).mode & 0o777, 0o600, "the file may hold the relay token");
+    assert.equal((await stat(file.path)).mode & 0o777, 0o600, "the service file is private");
     assert.equal(await readFile(file.path, "utf8"), file.contents);
     assert.deepEqual(calls, kind === "systemd"
       ? ["systemctl --user daemon-reload", "systemctl --user enable cns.service", "systemctl --user restart cns.service"]
@@ -115,7 +115,7 @@ test("cns up --install runs the daemon from the unit; cns up starts it again aft
   await chmod(systemctl, 0o755);
   const log = path.join(root, "systemctl.log");
   await writeFile(log, "");
-  const env = { HOME: home, CNS_CONFIG_DIR: path.join(home, ".cns"), XDG_CONFIG_HOME: path.join(home, ".config"), PATH: `${bin}:${process.env.PATH}`, FAKE_LOG: log, CNS_RELAY: "" };
+  const env = { HOME: home, CNS_CONFIG_DIR: path.join(home, ".cns"), XDG_CONFIG_HOME: path.join(home, ".config"), PATH: `${bin}:${process.env.PATH}`, FAKE_LOG: log };
   const state = path.join(home, ".cns", "daemon.json");
   const cli = async (args: string[]) => {
     const child = launchCli(t, args, { env });

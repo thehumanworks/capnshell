@@ -1,6 +1,5 @@
 import { isIP } from "node:net";
 import { connectControl, daemonStatePath, startDaemon, type ControlConnection, type DaemonStatus } from "../src/commands/daemon.js";
-import { errorMessage } from "../src/errors.js";
 import { endpointUrl, isLoopback } from "../src/options.js";
 import { plain } from "../src/terminal.js";
 import type { Invocation } from "./program.js";
@@ -48,9 +47,6 @@ async function daemonStatus(control: ControlConnection): Promise<DaemonStatus> {
     return await plain(control.remote.status());
   } catch (error) {
     control.close();
-    if (/is not a function/.test(errorMessage(error))) {
-      throw new Error("The running cns daemon is too old for Pi. Stop it with /cns stop, then run /cns listen again.");
-    }
     throw error;
   }
 }

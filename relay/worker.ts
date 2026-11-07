@@ -3,11 +3,12 @@
  * Durable Object, which holds that key's registered daemon and the dialers connected
  * to it. Sockets use the WebSocket hibernation API, so a registered daemon that is not
  * in use costs nothing while it waits, and relay pings are answered without waking the
- * object. Deploy with `wrangler deploy` from this directory; see relay/README.md.
+ * object. Only cns may use it: every request must carry a valid Cns-Client header.
+ * Deploy with `wrangler deploy` from this directory; see relay/README.md.
  */
 import {
-  ANSWER_MS, authorized, CHALLENGE_MS, MAX_DIALS_PER_ADDRESS, MAX_HELD_BYTES, MAX_HELD_MESSAGES, MAX_PIPES_PER_KEY, MAX_RELAY_MESSAGE_BYTES,
-  randomId, route, size, verifyProof, type RelayData,
+  ACCEPTED_CLIENT_KEYS, ANSWER_MS, CHALLENGE_MS, CLIENT_HEADER, MAX_DIALS_PER_ADDRESS, MAX_HELD_BYTES, MAX_HELD_MESSAGES, MAX_PIPES_PER_KEY, MAX_RELAY_MESSAGE_BYTES,
+  randomId, route, size, verifyClient, verifyProof, type RelayData,
 } from "../src/relay-hub.js";
 
 // The few Workers runtime types this file uses, so it typechecks without @cloudflare/workers-types.
@@ -26,7 +27,7 @@ interface DurableObjectNamespace {
   idFromName(name: string): unknown;
   get(id: unknown): { fetch(request: Request): Promise<Response> };
 }
-interface Env { RELAY_KEYS: DurableObjectNamespace; RELAY_TOKEN?: string }
+interface Env { RELAY_KEYS: DurableObjectNamespace }
 
 type Attachment =
   | { role: "listener"; key: string; nonce: string; host: string; proved: boolean; since: number }
@@ -45,9 +46,9 @@ export default {
     const target = route(url);
     if (!target) return new Response("Not found", { status: 404 });
     if (target.kind === "health") return new Response("cns relay\n");
-    // Only registering needs the token; dialers reach registered devices, which authenticate them.
-    if (target.kind === "accept" && !authorized(url, env.RELAY_TOKEN)) return new Response("Registering at this relay needs its token: ?token=TOKEN", { status: 401 });
     if (request.headers.has("Origin")) return new Response("Browser origins are not allowed", { status: 401 });
+    // Only cns: anything without a valid client header is refused before it reaches a Durable Object, so it costs nothing.
+    if (!(await verifyClient(request.headers.get(CLIENT_HEADER), url.host, url.pathname, ACCEPTED_CLIENT_KEYS))) return new Response("Only cns may use this relay", { status: 401 });
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") return new Response("WebSocket upgrade required", { status: 426 });
     return env.RELAY_KEYS.get(env.RELAY_KEYS.idFromName(target.key)).fetch(request);
   },

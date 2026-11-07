@@ -1,13 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { startRelay } from "./commands/relay.js";
+import { startRelay } from "./relay-server.js";
 import { generateIdentity } from "./identity.js";
-import { challengeBytes, dialAddresses, isRelayAddress, MAX_DIALS_PER_ADDRESS, redactRelay, relayEndpoint, route } from "./relay-hub.js";
+import { challengeBytes, CLIENT_HEADER, CLIENT_KEY, CLIENT_SKEW_MS, clientProof, dialAddresses, isRelayAddress, isRelayRequest, MAX_DIALS_PER_ADDRESS, relayEndpoint, route, verifyClient } from "./relay-hub.js";
 import { LOOPBACK } from "./test-support.js";
 
-/** A test socket that records messages and can wait for one. */
-async function open(url: string) {
-  const socket = new WebSocket(url);
+/** The client header cns sends, made for `url`, or for `host` in its place, as a relay behind a proxy sees it. */
+async function client(url: string, host?: string): Promise<Record<string, string>> {
+  const signed = new URL(url);
+  if (host) { signed.port = ""; signed.host = host; }
+  return { [CLIENT_HEADER]: await clientProof(signed.href) };
+}
+
+/** A test socket that records messages and can wait for one. It sends the cns client header unless `headers` replaces it. */
+async function open(url: string, headers?: Record<string, string>) {
+  const socket = new WebSocket(url, { headers: headers ?? await client(url) });
   socket.binaryType = "arraybuffer";
   const messages: Array<string | ArrayBuffer> = [];
   let notify = () => {};
@@ -31,11 +38,11 @@ async function open(url: string) {
 /** An external relay to test instead of a local one, such as the Worker under wrangler dev. */
 const external = process.env.CNS_TEST_RELAY_URL;
 /** What a dialer would get, without opening a socket. */
-const dialStatus = async (url: string) => (await fetch(url.replace(/^ws/, "http"), { headers: { Upgrade: "websocket", Connection: "Upgrade", "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Version": "13" } })).status;
+const dialStatus = async (url: string, headers?: Record<string, string>) => (await fetch(url.replace(/^ws/, "http"), { headers: { Upgrade: "websocket", Connection: "Upgrade", "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Version": "13", ...headers ?? await client(url) } })).status;
 
-async function register(base: string, identity: ReturnType<typeof generateIdentity>, sign = identity, host?: string) {
+async function register(base: string, identity: ReturnType<typeof generateIdentity>, sign = identity, host?: string, clientHost = host) {
   const url = relayEndpoint(base, "accept", identity.publicKey);
-  const listener = await open(url);
+  const listener = await open(url, await client(url, clientHost));
   const challenge = await listener.json();
   assert.equal(challenge.t, "challenge");
   const sig = Buffer.from(sign.sign(await challengeBytes(host ?? new URL(url).host, identity.publicKey, challenge.nonce))).toString("base64url");
@@ -45,26 +52,29 @@ async function register(base: string, identity: ReturnType<typeof generateIdenti
 
 test("relay URLs and routes", () => {
   const key = generateIdentity().publicKey;
-  assert.equal(relayEndpoint("https://relay.example/base/?token=t", "accept", key), `wss://relay.example/base/v1/accept/${key}?token=t`);
-  // Only registering carries the token; dial addresses are shared with paired devices.
-  assert.equal(relayEndpoint("https://relay.example/base/?token=t", "dial", key), `wss://relay.example/base/v1/dial/${key}`);
-  assert.equal(redactRelay("wss://relay.example/?token=s3cret&x=1"), "wss://relay.example/?token=…&x=1");
+  assert.equal(relayEndpoint("https://relay.example/base/", "accept", key), `wss://relay.example/base/v1/accept/${key}`);
+  assert.equal(relayEndpoint("https://relay.example/base", "dial", key), `wss://relay.example/base/v1/dial/${key}`);
+  // Relays take no token or other query: a URL with one is a mistake.
+  assert.throws(() => relayEndpoint("wss://relay.example/?token=t", "accept", key));
   assert.equal(relayEndpoint("ws://127.0.0.1:47380", "answer", key, "A".repeat(22)), `ws://127.0.0.1:47380/v1/answer/${key}/${"A".repeat(22)}`);
   assert.throws(() => relayEndpoint("ftp://x", "dial", key));
   assert.throws(() => relayEndpoint("wss://user:pass@x", "dial", key));
   assert.ok(isRelayAddress(relayEndpoint("wss://relay.example", "dial", key)));
   assert.ok(!isRelayAddress("ws://192.168.1.10:47381/"));
+  assert.ok(isRelayRequest(relayEndpoint("wss://relay.example", "accept", key)));
+  assert.ok(isRelayRequest(relayEndpoint("wss://relay.example", "answer", key, "A".repeat(22))));
+  assert.ok(!isRelayRequest("ws://192.168.1.10:47381/"));
   assert.deepEqual(route(new URL(`wss://x/v1/accept/${key}`)), { kind: "accept", key });
   assert.equal(route(new URL("wss://x/v1/accept/short")), undefined);
   assert.equal(route(new URL(`wss://x/v1/answer/${key}/bad`)), undefined);
   assert.deepEqual(route(new URL("https://x/")), { kind: "health" });
 });
 
-test("dialAddresses adds this device's relay only when the record has no relay address", () => {
+test("dialAddresses adds the relay only when the record has no relay address", () => {
   const key = generateIdentity().publicKey;
   const direct = ["ws://192.168.1.68:47381", "ws://100.107.74.1:47381"];
   assert.deepEqual(dialAddresses({ publicKey: key, addresses: direct }, undefined), direct);
-  assert.deepEqual(dialAddresses({ publicKey: key, addresses: direct }, "wss://relay.example/?token=t"), [...direct, `wss://relay.example/v1/dial/${key}`]);
+  assert.deepEqual(dialAddresses({ publicKey: key, addresses: direct }, "wss://relay.example"), [...direct, `wss://relay.example/v1/dial/${key}`]);
   assert.deepEqual(dialAddresses({ publicKey: key, addresses: [] }, "wss://relay.example"), [`wss://relay.example/v1/dial/${key}`]);
   const saved = [...direct, "wss://other.example/v1/dial/" + key];
   assert.deepEqual(dialAddresses({ publicKey: key, addresses: saved }, "wss://relay.example"), saved);
@@ -137,20 +147,59 @@ test("a dial refused while a daemon proves its key does not lose the registratio
   listener.socket.close();
 });
 
-test("a relay's token gates registering, not dialing", { skip: !!external }, async (t) => {
-  const relay = startRelay({ bind: LOOPBACK, port: 0, token: "s3cret-token" });
-  t.after(() => relay.stop());
-  const studio = generateIdentity();
-  for (const base of [relay.url, `${relay.url}/?token=wrong`]) {
-    assert.equal(await open(relayEndpoint(base, "accept", studio.publicKey)).then(() => "open", () => "refused"), "refused");
+test("the client header shows a request comes from cns, for one host and path, for a while", async () => {
+  const key = generateIdentity().publicKey;
+  const url = relayEndpoint("wss://relay.example", "dial", key);
+  const header = await clientProof(url);
+  assert.match(header, /^cns-client-1 \d+ [A-Za-z0-9_-]{22} [A-Za-z0-9_-]{43}$/);
+  assert.ok(await verifyClient(header, "relay.example", `/v1/dial/${key}`));
+  // Another relay, another path, another key, a stale or future time, or anything malformed: refused.
+  assert.ok(!(await verifyClient(header, "other.example", `/v1/dial/${key}`)));
+  assert.ok(!(await verifyClient(header, "relay.example", `/v1/accept/${key}`)));
+  assert.ok(!(await verifyClient(header, "relay.example", `/v1/dial/${key}`, [Buffer.alloc(32, 7).toString("base64url")])));
+  assert.ok(!(await verifyClient(await clientProof(url, CLIENT_KEY, Date.now() - CLIENT_SKEW_MS - 5000), "relay.example", `/v1/dial/${key}`)));
+  assert.ok(!(await verifyClient(await clientProof(url, CLIENT_KEY, Date.now() + CLIENT_SKEW_MS + 5000), "relay.example", `/v1/dial/${key}`)));
+  assert.ok(await verifyClient(await clientProof(url, CLIENT_KEY, Date.now() - CLIENT_SKEW_MS + 5000), "relay.example", `/v1/dial/${key}`));
+  const [scheme, time, nonce, mac] = header.split(" ");
+  for (const bad of [null, "", "cns-client-1", `${scheme} ${time} ${nonce}`, `cns-client-2 ${time} ${nonce} ${mac}`, `${scheme} ${time} ${nonce} ${mac} extra`,
+    `${scheme} ${Number(time) + 1} ${nonce} ${mac}`, `${scheme} ${time} ${"B".repeat(22)} ${mac}`, `${scheme} ${time} ${nonce} ${"A".repeat(43)}`, `${scheme} ${time} ${nonce} !!!`]) {
+    assert.ok(!(await verifyClient(bad, "relay.example", `/v1/dial/${key}`)), String(bad));
   }
-  const listener = await register(`${relay.url}/?token=s3cret-token`, studio);
+  // The host is compared as a host is: without regard to case.
+  assert.ok(await verifyClient(header, "RELAY.example", `/v1/dial/${key}`));
+});
+
+test("the relay refuses every request that does not come from cns", async (t) => {
+  let base = external;
+  if (!base) {
+    const relay = startRelay({ bind: LOOPBACK, port: 0 });
+    t.after(() => relay.stop());
+    base = relay.url;
+  }
+  const studio = generateIdentity();
+  const listener = await register(base, studio);
   assert.deepEqual(await listener.json(), { t: "ready" });
-  // A dialer needs no token: it can only reach a registered device, which authenticates it.
-  const dialer = await open(relayEndpoint(`${relay.url}/?token=s3cret-token`, "dial", studio.publicKey));
-  assert.equal((await listener.json()).t, "incoming");
+  const accept = relayEndpoint(base, "accept", generateIdentity().publicKey);
+  const dial = relayEndpoint(base, "dial", studio.publicKey);
+  const answer = relayEndpoint(base, "answer", studio.publicKey, "A".repeat(22));
+  const forged = { [CLIENT_HEADER]: await clientProof(dial, Buffer.alloc(32, 7).toString("base64url")) };
+  // Without the header, with one made under another key, or one made for another request.
+  for (const [url, headers] of [[accept, {}], [dial, {}], [answer, {}], [dial, forged], [dial, await client(accept)]] as const) {
+    assert.equal(await dialStatus(url, headers), 401, url);
+    assert.equal(await open(url, headers).then(() => "open", () => "refused"), "refused");
+  }
+  // Nothing reached the registered daemon.
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  const dialer = await open(dial);
+  assert.equal((await listener.json()).t, "incoming", "the first message is cns's own dialer");
   dialer.socket.close();
   listener.socket.close();
+  // A relay that accepts other keys refuses this build's.
+  if (!external) {
+    const other = startRelay({ bind: LOOPBACK, port: 0, clientKeys: [Buffer.alloc(32, 7).toString("base64url")] });
+    t.after(() => other.stop());
+    assert.equal(await dialStatus(relayEndpoint(other.url, "dial", studio.publicKey)), 401);
+  }
 });
 
 test("one address cannot fill a device's relay connections, and a departing daemon frees its dialers", { skip: !!external }, async (t) => {
@@ -174,11 +223,28 @@ test("with a public host, only proofs for that host register", { skip: !!externa
   t.after(() => relay.stop());
   const studio = generateIdentity();
   // Signed for the address dialed, or for another relay: refused, whatever Host header was sent.
+  // The client header is made for the public host, as cns dialing wss://relay.example.com makes it.
   for (const host of [undefined, "other-relay.example"]) {
-    const wrong = await register(relay.url, studio, studio, host);
+    const wrong = await register(relay.url, studio, studio, host, "relay.example.com");
     assert.equal((await wrong.closed).code, 4003);
   }
   const right = await register(relay.url, studio, studio, "relay.example.com");
   assert.deepEqual(await right.json(), { t: "ready" });
   right.socket.close();
+});
+
+test("the built-in relay needs no setting; CNS_RELAY replaces it only for development", async () => {
+  const { builtInRelay, DEFAULT_RELAY } = await import("./relay-config.js");
+  const saved = process.env.CNS_RELAY;
+  try {
+    delete process.env.CNS_RELAY;
+    assert.equal(builtInRelay(), DEFAULT_RELAY);
+    assert.match(DEFAULT_RELAY, /^wss:\/\/[^/?#]+$/);
+    process.env.CNS_RELAY = "off";
+    assert.equal(builtInRelay(), undefined);
+    process.env.CNS_RELAY = "ws://127.0.0.1:8787";
+    assert.equal(builtInRelay(), "ws://127.0.0.1:8787");
+    process.env.CNS_RELAY = "wss://relay.example/?token=t";
+    assert.throws(() => builtInRelay(), /CNS_RELAY must be a relay URL or off/);
+  } finally { process.env.CNS_RELAY = saved; }
 });

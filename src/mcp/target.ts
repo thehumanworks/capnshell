@@ -1,5 +1,6 @@
 import { newWebSocketRpcSession } from "capnweb";
-import { connectControl, localRelay } from "../commands/daemon.js";
+import { connectControl } from "../commands/daemon.js";
+import { builtInRelay } from "../relay-config.js";
 import { dialAddresses } from "../relay-hub.js";
 import { closeSocket, openSocket } from "../connect.js";
 import type { PeerController } from "../console.js";
@@ -77,9 +78,7 @@ function limitCalls(open: (signal: AbortSignal) => Promise<Link>): (signal: Abor
  * does. Closing a call's connection makes the listener kill its commands and
  * end its waits.
  */
-export function listenerTarget(url: string, cwd?: string, expect?: { name: string; publicKey: string; addresses: string[] }, state?: string): McpTarget {
-  // This device's relay, looked up once, for a paired device whose record names none.
-  let relay: Promise<string | undefined> | undefined;
+export function listenerTarget(url: string, cwd?: string, expect?: { name: string; publicKey: string; addresses: string[] }): McpTarget {
   return {
     label: expect ? expect.name : url,
     ...expect ? { device: expect.name } : {},
@@ -91,8 +90,8 @@ export function listenerTarget(url: string, cwd?: string, expect?: { name: strin
       let hangUp: (reason: string) => void;
       let remote: ReturnType<typeof newWebSocketRpcSession<ShellApi>>;
       if (expect) {
-        // An encrypted channel to the paired device, at the first saved address, or this device's relay, that answers as it.
-        const { channel } = await connectFirst(dialAddresses(expect, await (relay ??= localRelay(state))), identity!, { expect: expect.publicKey, signal });
+        // An encrypted channel to the paired device, at the first saved address, or the relay, that answers as it.
+        const { channel } = await connectFirst(dialAddresses(expect, builtInRelay()), identity!, { expect: expect.publicKey, signal });
         remote = rpcSession<ShellApi>(channel, new RefusingShell());
         hangUp = (reason) => channel.close(reason);
       } else {
@@ -166,34 +165,13 @@ export function daemonTarget(statePath?: string, cwd?: string): McpTarget {
           ...connection.controller,
           async files(id) {
             // The peer's own file calls, which a paired device allows with the files grant alone.
-            try {
-              const files = await remote.files(id);
-              forks.push(files);
-              return files as unknown as PeerFiles;
-            } catch (error) {
-              if (!(error instanceof TypeError && error.message === "'files' is not a function.")) throw error;
-            }
-            // An older daemon: a fork of the peer's shell, which a paired device allows only with the shell grant.
-            let shell;
-            try { shell = await connection.controller.shell(id); }
-            catch (error) {
-              if (error instanceof TypeError && error.message === "'shell' is not a function.") {
-                throw new Error("The local daemon is from an older cns without file access; restart it with cns stop, then start it again.", { cause: error });
-              }
-              throw error;
-            }
-            forks.push(shell);
-            return shell as unknown as PeerFiles;
+            const files = await remote.files(id);
+            forks.push(files);
+            return files as unknown as PeerFiles;
           },
           // Closing the connection, as cancelling the call does, kills the command.
           async run(id, command, options) {
-            try {
-              return await plain(remote.runWhileConnected(id, command, options));
-            } catch (error) {
-              // A daemon started by an older cns can only run commands until they end.
-              if (!(error instanceof TypeError && error.message === "'runWhileConnected' is not a function.")) throw error;
-              return await plain(remote.run(id, command, options));
-            }
+            return await plain(remote.runWhileConnected(id, command, options));
           },
         },
         get lost() { return lost; },
