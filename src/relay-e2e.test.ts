@@ -92,13 +92,23 @@ test("devices that cannot reach each other directly pair and link through the re
   assert.match(doctor.stdout, /ws:\/\/127\.0\.0\.1:1\/?: unreachable/);
   assert.match(doctor.stdout, /\/v1\/dial\/[A-Za-z0-9_-]{43} \[relay\]: ok \(.*encrypted\)/);
 
-  // Laptop's daemon keeps a standing link to studio through the relay; studio has no address for laptop.
-  const laptopUp = await cli(laptop, ["up", "--bind", "127.0.0.1", "--port", await unusedPort("127.0.0.1"), "--relay", relayBase, "--state", laptop.state]);
+  // Laptop saves the relay in its settings; the token never shows.
+  const saved = await cli(laptop, ["config", "relay", relayBase]);
+  assert.equal(saved.code, 0, saved.stderr);
+  const shownRelay = await cli(laptop, ["config", "relay", "--json"]);
+  if (!external) assert.ok(!(saved.stdout + saved.stderr + shownRelay.stdout).includes(token), "the saved token is redacted");
+  assert.equal(JSON.parse(shownRelay.stdout).source, "config");
+  // A record saved before studio had a relay names only direct addresses. Laptop shares studio's
+  // relay, so its commands, doctor and daemon try studio there without anyone adding the address,
+  // and with the relay saved, commands find it while laptop's daemon is not running.
+  await writeFile(file, JSON.stringify({ ...record, addresses: ["ws://127.0.0.1:1"] }), { mode: 0o600 });
+  const noDaemon = await cli(laptop, ["run", "studio", "--", "printf saved-relay"]);
+  assert.deepEqual([noDaemon.code, noDaemon.stdout], [0, "saved-relay"], noDaemon.stderr);
+  // Laptop's daemon keeps a standing link to studio through the saved relay; studio has no address for laptop.
+  const laptopUp = await cli(laptop, ["up", "--bind", "127.0.0.1", "--port", await unusedPort("127.0.0.1"), "--state", laptop.state]);
   assert.equal(laptopUp.code, 0, laptopUp.stderr);
   cleanups.push(() => cli(laptop, ["stop", "--state", laptop.state]));
-  // A record saved before studio had a relay names only direct addresses. Laptop shares studio's
-  // relay, so its commands, doctor and daemon try studio there without anyone adding the address.
-  await writeFile(file, JSON.stringify({ ...record, addresses: ["ws://127.0.0.1:1"] }), { mode: 0o600 });
+  assert.match(laptopUp.stdout, /Relay: /, "cns up registers at the saved relay without --relay");
   const shared = await cli(laptop, ["run", "studio", "--", "printf shared-relay"]);
   assert.deepEqual([shared.code, shared.stdout], [0, "shared-relay"], shared.stderr);
   const doctorShared = await cli(laptop, ["doctor", "studio", "--state", laptop.state]);

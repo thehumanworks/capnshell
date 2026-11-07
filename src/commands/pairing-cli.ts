@@ -2,7 +2,7 @@ import os from "node:os";
 import readline from "node:readline";
 import { AuthError } from "../auth.js";
 import { connectFirst, connectSecure, rpcSession, type SecureChannel } from "../secure.js";
-import { dialAddresses, isRelayAddress, redactRelay, relayEndpoint } from "../relay-hub.js";
+import { dialAddresses, isRelayAddress, redactRelay } from "../relay-hub.js";
 import { errorMessage } from "../errors.js";
 import { ensureIdentity, fingerprint as fingerprintOf, identityPath, loadIdentity } from "../identity.js";
 import { allPrivate } from "../addresses.js";
@@ -10,6 +10,7 @@ import { endpointUrl, isLoopback } from "../options.js";
 import { decisionSchema, decodeInvite, DEFAULT_INVITE_MS, MAX_INVITE_MS, suggestedName, type Decision, type Invite, type PairingApi, type Proposal } from "../pairing.js";
 import { peerFileExists, peerNamePattern, removeAlias, validatePeerUrl } from "../aliases.js";
 import { describeGrants, expandGrants, findPairedPeer, getPeer, listPeers, savePairedPeer, updatePairedPeer, PERMISSIONS, type Permission } from "../peers.js";
+import { checkRelayUrl, configuredRelay } from "../settings.js";
 import { plain } from "../terminal.js";
 import type { ShellApi } from "../shell.js";
 import { RefusingShell } from "../refusing-shell.js";
@@ -99,8 +100,8 @@ async function pairedDaemon(options: { bind?: string; port?: string; relay?: str
     try {
       const status = await running.remote.status();
       if (!status.paired) throw new Error("A daemon that is not for paired devices is running. Stop it with cns stop, then run cns up.");
-      const relay = options.relay ?? process.env.CNS_RELAY;
-      if (relay && relay !== status.relay) console.error(`The running daemon ${status.relay ? `uses the relay ${redactRelay(status.relay)}` : "uses no relay"}; run cns stop, then cns up --relay URL, to change it.`);
+      const relay = configuredRelay(options.relay)?.url;
+      if (relay && relay !== status.relay) console.error(`The running daemon ${status.relay ? `uses the relay ${redactRelay(status.relay)}` : "uses no relay"}; run cns stop, then cns up, to use ${redactRelay(relay)}.`);
       return { control: running, started: false };
     } catch (error) {
       running.close();
@@ -110,9 +111,10 @@ async function pairedDaemon(options: { bind?: string; port?: string; relay?: str
   const bind = options.bind ?? process.env.CNS_BIND ?? "0.0.0.0";
   const port = Number(options.port ?? process.env.CNS_PORT ?? 47381);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("--port requires an integer from 1 to 65535.");
-  const relay = options.relay ?? process.env.CNS_RELAY;
+  // --relay, else CNS_RELAY, else the relay saved with cns config relay URL.
+  const relay = configuredRelay(options.relay)?.url;
   if (relay) {
-    relayEndpoint(relay, "accept", "A".repeat(43)); // Refuse a malformed relay URL before starting anything.
+    checkRelayUrl(relay); // Refuse a malformed relay URL before starting anything.
     if (new URL(relay).protocol === "ws:" && !isLoopback(new URL(relay).hostname)) console.error("The relay URL is ws://, so the relay token and registration travel unencrypted; links themselves stay encrypted. Use wss:// for a relay beyond this machine.");
   }
   const daemon = await startDaemon({ bind, port, url: endpointUrl(bind, port), remote: !isLoopback(bind), state: options.state, paired: true, ...relay ? { relay } : {} });

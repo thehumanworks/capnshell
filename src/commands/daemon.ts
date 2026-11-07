@@ -10,6 +10,7 @@ import { closeSocket, terminateSocket } from "../connect.js";
 import { openConsole, type PeerController } from "../console.js";
 import type { PeerConfig } from "../options.js";
 import { selfInvocation } from "../runtime.js";
+import { configuredRelay } from "../settings.js";
 import type { ShellApi } from "../shell.js";
 import { plain, type RemoteNamedPty } from "../terminal.js";
 // The control server needs Bun's capnweb build; clients of the daemon, such as
@@ -286,9 +287,13 @@ export async function stopDaemon(statePath?: string): Promise<number> {
   return state.pid;
 }
 
-/** This device's relay, if it has one: CNS_RELAY, else the relay of the paired daemon running here. */
+/**
+ * This device's relay, if it has one: CNS_RELAY, else the one saved with `cns config relay`,
+ * else the relay of the paired daemon running here. The saved setting works with no daemon.
+ */
 export async function localRelay(state?: string): Promise<string | undefined> {
-  if (process.env.CNS_RELAY) return process.env.CNS_RELAY;
+  const configured = configuredRelay();
+  if (configured) return configured.url;
   let control: ControlConnection;
   try { control = await connectControl(state); } catch { return undefined; }
   try {
