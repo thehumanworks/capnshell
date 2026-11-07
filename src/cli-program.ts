@@ -62,10 +62,18 @@ export function createCli(): Command {
     .description("Run this device as a paired peer: start its daemon, or report the running one")
     .option("--bind <address>", "Interface to listen on (default: every interface; CNS_BIND)")
     .option("--port <port>", "TCP port (default: 47381; CNS_PORT)")
-    .option("--relay <url>", "Also register at this relay, for devices that cannot reach this one directly (CNS_RELAY)")
+    .option("--relay <url>", "Also register at this relay, for devices that cannot reach this one directly (CNS_RELAY; default: cns config relay)")
     .option("--state <path>", "Local daemon state file")
     .addHelpText("after", "\nOnly paired devices can connect, after authenticating; each gets what cns pair granted it.\nLinks are encrypted end to end, directly or through the relay. Pair with cns pair.\nA relay is wss://HOST (the Cloudflare Worker in relay/, or cns relay), with ?token=TOKEN if it needs one.")
     .action(async (options) => { const { up } = await import("./commands/pairing-cli.js"); await up(options); });
+  const config = program.command("config").description("Show or change this device's settings");
+  config.command("relay [url]")
+    .description("Show, save or remove the relay this device registers at and dials through")
+    .option("--unset", "Remove the saved relay")
+    .option("--json", "Print { relay, source, saved } as JSON, with the token hidden")
+    .option("--state <path>", "Local daemon state file")
+    .addHelpText("after", "\nThe saved relay is used by cns up and by every command that dials a paired device, whether or\nnot the daemon is running. --relay and CNS_RELAY take precedence. The URL may carry ?token=TOKEN,\nso the settings file is private and cns prints it with the token hidden.\nA running daemon keeps its relay until cns stop, then cns up.")
+    .action(async (url: string | undefined, options) => { const { configRelay } = await import("./commands/config.js"); await configRelay(url, options); });
   program.command("pair")
     .description("Pair this device with another: print an invite, or paste one from the other device")
     .argument("[invite]", "The cns1:... invite the other device printed")
@@ -112,12 +120,12 @@ export function createCli(): Command {
     .option("--state <path>", "Local daemon state file")
     .action(async (options) => { const { status } = await import("./commands/pairing-cli.js"); await status(options); });
   program.command("doctor")
-    .description("Check how this device reaches a paired device: each saved address, authentication and grants")
-    .argument("<name>", "A saved peer name")
+    .description("Check this device (identity, daemon, relay, addresses), or how it reaches a paired device: each saved address, authentication and grants")
+    .argument("[name]", "A saved peer name; without one, check this device")
     .option("--json", "Print the report as JSON")
     .option("--state <path>", "Local daemon state file")
-    .addHelpText("after", "\nExit 0 when an address answered as the paired device, 3 when it answered as another device or refused the pairing, 5 when none answered or none is saved.")
-    .action(async (name: string, options) => { const { doctor } = await import("./commands/pairing-cli.js"); await doctor(name, options); });
+    .addHelpText("after", "\nWith NAME: exit 0 when an address answered as the paired device, 3 when it answered as another device or refused the pairing, 5 when none answered or none is saved.\nWithout: exit 0 when paired devices can reach this device (warnings, such as only private addresses, do not change it), 3 when the daemon runs as another identity, 5 when there is no identity, no paired daemon or no address.")
+    .action(async (name: string | undefined, options) => { const { doctor } = await import("./commands/pairing-cli.js"); await doctor(name, options); });
   program.command("identity")
     .description("Show this device's identity for pairing, creating it on first use")
     .option("--json", "Print { publicKey, fingerprint, createdAt, path } as JSON")

@@ -4,10 +4,11 @@ import { ensureIdentity } from "../identity.js";
 import { explainDenial } from "../peers.js";
 import type { PeerConfig } from "../options.js";
 import { RefusingShell } from "../refusing-shell.js";
-import { isRelayAddress } from "../relay-hub.js";
+import { dialAddresses, isRelayAddress } from "../relay-hub.js";
 import { connectFirst, rpcSession, secureReady } from "../secure.js";
 import type { PtySessionInfo, ShellApi } from "../shell.js";
 import { attachTerminal, ConnectionLost, DETACH_KEY, plain, type RemoteNamedPty } from "../terminal.js";
+import { localRelay } from "./daemon.js";
 import { commandExitCode, describeExit } from "./one-shot.js";
 
 /** The session `cns tty DEVICE` uses on a paired device when no other is named. */
@@ -64,6 +65,8 @@ export async function attachPaired(config: PeerConfig): Promise<number | typeof 
   const name = config.name ?? DEFAULT_SESSION;
   const create = !config.attach;
   const { identity } = ensureIdentity();
+  // Saved addresses, and this device's relay when the record has none: devices that share a relay meet there.
+  const addresses = dialAddresses(expect, await localRelay(config.state));
   await secureReady();
   const interrupted = new AbortController();
   let exitOnSignal = 130;
@@ -177,7 +180,7 @@ export async function attachPaired(config: PeerConfig): Promise<number | typeof 
   }
 
   async function open(session: string, startIfMissing: boolean) {
-    const { channel, url } = await connectFirst(expect.addresses, identity, { expect: expect.publicKey, signal: interrupted.signal });
+    const { channel, url } = await connectFirst(addresses, identity, { expect: expect.publicKey, signal: interrupted.signal });
     const remote = rpcSession<ShellApi>(channel, new RefusingShell());
     const close = () => { remote[Symbol.dispose](); channel.close("Attachment ended"); };
     let startedNow = false;
