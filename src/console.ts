@@ -14,7 +14,7 @@ export interface PeerSummary {
   peer?: { name: string; fingerprint: string; daemon: boolean; via: "direct" | "relay" };
 }
 /** A peer's file operations, as cns cp uses them. */
-export type RemoteFiles = Pick<RpcStub<ShellApi>, "stat" | "readFile" | "writeFile" | "writeFileAt">;
+export type RemoteFiles = Pick<RpcStub<ShellApi>, "stat" | "readdir" | "mkdir" | "readFile" | "writeFile" | "writeFileAt">;
 
 export interface PeerController {
   peers(): Promise<PeerSummary[]>;

@@ -77,7 +77,7 @@ A grant lists the operations one device may perform on another. The granting dev
 | Permission | ShellApi operations it allows |
 | --- | --- |
 | `shell` | `run`, `exec`, `openPty`, `fork` (a fork inherits the grant) |
-| `files` | `stat`, `access`, `readdir`, `mkdir`, `glob`, `readFile`, `writeFile`, `writeFileAt` (what `cns cp` uses) |
+| `files` | `stat`, `access`, `readdir`, `mkdir`, `glob`, `readFile`, `writeFile`, `writeFileAt` (`cns cp` uses `stat`, `readdir`, `mkdir`, `readFile` and `writeFileAt`) |
 | `sessions:list` | `ptySessions` (names, commands, sizes and owners' fingerprints) |
 | `sessions:create` | `startPtySession`; the device owns what it starts and may view, control and kill it, so this alone amounts to running commands |
 | `sessions:view` | `info`, `capture` (with up to 1000 lines of scrollback), `wait`, `attach` as a viewer that cannot type |

@@ -128,9 +128,11 @@ The console automatically selects the initial sole peer. When several peers are 
 
 ## Command execution
 
-Pass exactly one shell string after `--`; quote it to preserve spaces, redirects and variables for the remote shell:
+Everything after the first `--` is the command, in the remote shell's syntax; options after it belong to the command. Several words are joined with spaces, as `ssh` does, so simple commands need no quotes. Your local shell still expands what is unquoted, such as `$HOME`, globs, `|`, `;` and `>`, before `cns` sees it: quote those to have the remote shell handle them. One quoted string reaches the remote shell unchanged. `tty` takes its command the same way.
 
 ```sh
+cns run studio -- git status
+cns run studio -- ls -la /tmp
 cns run studio -- 'printf "hello\n"; exit 7'
 cns run studio --cwd /tmp --timeout 10000 -- 'pwd; ls -la'
 ```
@@ -161,15 +163,21 @@ The daemon allows up to 32 connections and four concurrent commands per connecti
 
 ## Copying files
 
-`cp` copies one file between this device and a peer, over the peer's `readFile` and `writeFileAt` methods in parts of up to 1 MiB and 4 MiB, so files of any size work. Exactly one path is remote, written `DEVICE:PATH` as with `scp`, where `DEVICE` is a paired device's name:
+`cp` copies a file, or with `-r` a directory, between this device and a paired device, or between two paired devices. It uses the devices' `stat`, `readdir`, `mkdir`, `readFile` and `writeFileAt` methods, in parts of up to 1 MiB and 4 MiB, so files of any size work. A remote path is written `DEVICE:PATH` as with `scp`, where `DEVICE` is a paired device's name:
 
 ```sh
 cns cp ./build.tar.gz studio:/tmp/          # into a remote directory, under the same name
 cns cp studio:~/notes.txt .                 # into the local working directory
 cns cp studio:logs/app.log ./app.log        # a relative remote path starts at the remote home
+cns cp -r ./site studio:/srv/               # a directory and everything in it
+cns cp -r studio:~/photos nas:~/backup/     # from one paired device to another
 ```
 
-A remote path that is relative or starts with `~/` is resolved against the remote user's home. A destination that is an existing directory, or ends with `/`, receives the file under its own name. An existing destination is overwritten in place and keeps its permissions; a new one gets the source's permission bits, less the umask. A copy that fails partway leaves a partial destination, as `scp` does. Directories are not copied; use `tar` through `cns run` instead, as above. `cp` needs only the `files` grant on the device. A peer running an older `cns` accepts files of up to 4 MiB.
+A remote path that is relative or starts with `~/` is resolved against the remote user's home. A destination that is an existing directory, or ends with `/`, receives the source under its own name; otherwise the source is copied to that name, as `scp` does. An existing destination is overwritten in place and keeps its permissions; a new one gets the source's permission bits, less the umask. A copy that fails partway leaves a partial destination, as `scp` does. `cp` needs only the `files` grant on each paired device it uses. A peer running an older `cns` accepts files of up to 4 MiB.
+
+Without `-r`, a directory is refused. With it, directories are created as needed and their files are copied a few at a time. A link to a file is copied as the file. Links to directories (which could loop), broken links and special files such as sockets are skipped with a note on stderr, and `cp` then exits 1 after copying the rest. A directory of 10,000 entries or more is refused. Copying a file onto itself, or a directory into itself, is refused.
+
+Between two paired devices, `cns` connects to both and the data passes through this device, as `scp -3` does, so this device must be paired with both and the two need not be paired with each other. Within one device (`cns cp -r studio:a studio:b`), one connection serves both ends.
 
 A local path with a colon before any slash would read as remote: write it as `./name:with:colons`. On Windows, a drive letter such as `C:\` is local.
 

@@ -21,6 +21,7 @@ import { listeningAddresses } from "../addresses.js";
 import { serveControl, type PairingController } from "./daemon-server.js";
 import { removeStaleState } from "./daemon.js";
 import { runOneShot } from "./one-shot.js";
+import { infoSchema } from "./connect-device.js";
 
 /** CLI exit statuses for failures, as docs/paired-peers.md lists them: 3 unpaired or changed device, 4 permission denied, else 1. */
 export function authExitCode(error: unknown): number {
@@ -34,11 +35,6 @@ export { commandExitCode } from "./one-shot.js";
 // Bound connections that have not authenticated yet, including ones that never complete the handshake.
 export const MAX_PEERS = 32;
 const HANDSHAKE_MS = 5000;
-const infoSchema = z.object({
-  platform: z.enum(["aix", "android", "darwin", "freebsd", "haiku", "linux", "openbsd", "sunos", "win32", "cygwin", "netbsd"]),
-  name: z.string().max(128), shell: z.enum(["PowerShell", "Bash"]),
-  hostname: z.string().max(256), cwd: z.string().max(32768), pid: z.int().positive(),
-});
 interface SocketData { address: string; session?: Session; channel?: SecureChannel }
 interface Session {
   id: string;

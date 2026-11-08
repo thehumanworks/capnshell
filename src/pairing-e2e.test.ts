@@ -113,6 +113,9 @@ test("two devices pair, run commands within their grants, and refuse everyone el
   // Commands name the paired device and run within its grants.
   const run = await cli(laptop, ["run", "studio", "--", "printf ok; printf err >&2; exit 3"]);
   assert.deepEqual([run.code, run.stdout, run.stderr], [3, "ok", "err"]);
+  // Without quotes, the words after -- are joined into the command, as ssh does.
+  const words = await cli(laptop, ["run", "studio", "--", "printf", "%s-%s", "a", "b"]);
+  assert.deepEqual([words.code, words.stdout], [0, "a-b"]);
   const piped = await cli(laptop, ["run", "studio", "--", "tr a-z A-Z"], "piped input");
   assert.deepEqual([piped.code, piped.stdout], [0, "PIPED INPUT"]);
   const sessions = await cli(laptop, ["sessions", "studio", "--json"]);

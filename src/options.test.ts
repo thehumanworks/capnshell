@@ -142,10 +142,19 @@ test("run preserves the single shell string, working directory and timeout", { s
   assert.throws(() => parseOptions(["run", "studio", "--", "echo ok"], { CNS_CWD: "" }));
 });
 
-test("run requires an explicit delimiter and exactly one nonempty shell string", { skip: !posix }, () => {
+test("run takes everything after the first -- as the command, joining words with spaces as ssh does", { skip: !posix }, () => {
+  assert.equal(parseOptions(["run", "studio", "--", "ls", "-la", "/tmp"]).command, "ls -la /tmp");
+  assert.equal(parseOptions(["run", "studio", "--", "git", "status"]).command, "git status");
+  // Options and a second -- after the first belong to the command.
+  assert.equal(parseOptions(["run", "studio", "--", "grep", "--cwd", "--", "-n", "x"]).command, "grep --cwd -- -n x");
+  assert.equal(parseOptions(["run", "studio", "--cwd", "/srv", "--", "make", "test"]).cwd, "/srv");
+  assert.equal(parseOptions(["run", "studio", "--", "printf '%s' \"a b\""]).command, "printf '%s' \"a b\"");
+});
+
+test("run requires an explicit delimiter and a nonempty command", { skip: !posix }, () => {
   for (const args of [
-    ["run"], ["run", "studio"], ["run", "studio", "--"], ["run", "studio", "echo ok"],
-    ["run", "studio", "--", ""], ["run", "studio", "--", " "], ["run", "studio", "--", "echo", "ok"],
+    ["run"], ["run", "studio"], ["run", "studio", "--"], ["run", "studio", "echo ok"], ["run", "studio", "echo", "--", "ok"], ["run", "--", "studio"],
+    ["run", "studio", "--", ""], ["run", "studio", "--", " "], ["run", "studio", "--", " ", " "],
     ["run", "studio", "--cwd", "/tmp", "--cwd", "/srv", "--", "echo ok"],
     ["run", "studio", "--timeout", "-1", "--", "echo ok"],
     ["run", "studio", "--timeout", "2147483648", "--", "echo ok"],
@@ -163,12 +172,12 @@ test("tty opens a login shell or one quoted command with optional terminal setti
   assert.equal(config.command, command);
   assert.deepEqual([config.cwd, config.timeoutMs, config.cols, config.rows, config.term], ["/srv", 1000, 120, 40, "screen-256color"]);
   assert.equal(parseOptions(["tty", "studio", "--", "htop"]).command, "htop");
+  assert.equal(parseOptions(["tty", "studio", "--", "vim", "notes.md"]).command, "vim notes.md");
   assert.equal(parseOptions(["tty", "studio", "--", "htop"]).screen, undefined);
   assert.deepEqual(parseOptions(["tty", "studio", "--screen", "--", "htop"]).screen, { history: 0 });
   assert.deepEqual(parseOptions(["tty", "studio", "--screen", "--history", "1000"]).screen, { history: 1000 });
   for (const args of [
-    ["tty", "studio", "htop"], ["tty", "studio", "--"], ["tty", "studio", "--", " "],
-    ["tty", "studio", "--", "echo", "ok"], ["tty", "studio", "--cols", "0"], ["tty", "studio", "--rows", "1001"], ["tty", "studio", "--cols", "8x"],
+    ["tty", "studio", "htop"], ["tty", "studio", "--"], ["tty", "studio", "--", " "], ["tty", "studio", "vim", "--", "x"], ["tty", "studio", "--cols", "0"], ["tty", "studio", "--rows", "1001"], ["tty", "studio", "--cols", "8x"],
     ["tty", "studio", "--term", "xterm 256"], ["tty", "studio", "--timeout", "-1"],
     ["tty", "studio", "--history", "5"], ["tty", "studio", "--screen", "--history", "1001"], ["tty", "studio", "--screen", "--history", "x"],
     ["run", "studio", "--screen", "--", "echo ok"],
@@ -213,13 +222,31 @@ test("run forwards stdin unless --no-stdin says otherwise", { skip: !posix }, ()
   assert.equal(parseOptions(["tty", "studio"]).stdin, undefined);
 });
 
-test("cp takes one local path and one DEVICE:PATH, scp style", { skip: !posix }, () => {
-  assert.deepEqual(parseOptions(["cp", "./a.txt", "studio:/tmp/"]).copy, { direction: "upload", local: "./a.txt", remote: "/tmp/" });
-  assert.deepEqual(parseOptions(["cp", "studio:notes.txt", "."]).copy, { direction: "download", local: ".", remote: "notes.txt" });
-  assert.deepEqual(parseOptions(["cp", "report.pdf", "studio:"]).copy, { direction: "upload", local: "report.pdf", remote: "" });
-  for (const argv of [["cp", "a", "b"], ["cp", "studio:a", "studio:b"], ["cp", "a"], ["cp", "", "studio:b"], ["cp", "missing:/x", "."], ["cp", ":x", "."], ["cp", "ws://box:47381/x", "."]]) {
+test("cp takes a local path and a DEVICE:PATH, or two DEVICE:PATHs, scp style", { skip: !posix }, () => {
+  const upload = parseOptions(["cp", "./a.txt", "studio:/tmp/"]);
+  assert.deepEqual(upload.copy, { source: { path: "./a.txt" }, destination: { device: "studio", path: "/tmp/" }, recursive: false });
+  assert.equal(upload.expect.name, "studio");
+  assert.equal(upload.copyTo, undefined);
+  assert.deepEqual(parseOptions(["cp", "studio:notes.txt", "."]).copy, { source: { device: "studio", path: "notes.txt" }, destination: { path: "." }, recursive: false });
+  assert.deepEqual(parseOptions(["cp", "report.pdf", "studio:"]).copy?.destination, { device: "studio", path: "" });
+  assert.equal(parseOptions(["cp", "-r", "site", "studio:/srv/"]).copy?.recursive, true);
+  assert.equal(parseOptions(["cp", "studio:site", "out", "--recursive"]).copy?.recursive, true);
+  // Within one device, one connection serves both ends.
+  const within = parseOptions(["cp", "studio:a", "studio:b"]);
+  assert.deepEqual(within.copy, { source: { device: "studio", path: "a" }, destination: { device: "studio", path: "b" }, recursive: false });
+  assert.equal(within.copyTo, undefined);
+  for (const argv of [["cp", "a", "b"], ["cp", "a"], ["cp", "", "studio:b"], ["cp", "studio:b", ""], ["cp", "missing:/x", "."], ["cp", "studio:x", "missing:/y"], ["cp", ":x", "."], ["cp", "ws://box:47381/x", "."], ["cp", "-r", "-r", "a", "studio:"]]) {
     assert.throws(() => parseOptions(argv), argv.join(" "));
   }
+});
+
+test("cp between two paired devices connects to the source and names the destination", { skip: !posix }, () => {
+  const other = generateIdentity();
+  savePairedPeer("nas", { publicKey: other.publicKey, addresses: ["ws://192.168.1.11:47381"], pairedAt: new Date().toISOString(), grants: { incoming: [], outgoing: expandGrants(["files"]) } });
+  const config = parseOptions(["cp", "-r", "studio:~/photos", "nas:backup/"]);
+  assert.equal(config.expect.name, "studio");
+  assert.deepEqual([config.copyTo?.name, config.copyTo?.publicKey], ["nas", other.publicKey]);
+  assert.deepEqual(config.copy, { source: { device: "studio", path: "~/photos" }, destination: { device: "nas", path: "backup/" }, recursive: true });
 });
 
 test("DEVICE:PATH is told from local paths", () => {

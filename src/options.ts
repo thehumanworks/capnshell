@@ -40,6 +40,7 @@ const peerOptionsSchema = z.strictObject({
   until: z.string().min(1, "--until requires text.").max(4096).optional(),
   json: z.boolean().optional(),
   stdin: z.boolean().default(true),
+  recursive: z.boolean().optional(),
 });
 
 /**
@@ -83,8 +84,10 @@ export interface PeerConfig {
   json?: boolean;
   /** For run: forward this process's stdin when it is not a terminal (the default). */
   stdin?: boolean;
-  /** For cp: the file to copy and which way. */
+  /** For cp: what to copy, from where to where. */
   copy?: CopyRequest;
+  /** For cp between two paired devices: the destination, which `expect`, the source, is not. */
+  copyTo?: ExpectedPeer;
 }
 
 export function isLoopback(host: string): boolean {
@@ -148,7 +151,7 @@ export function addPeerCommands(program: Command, run: (config: PeerConfig) => v
   const descriptions: Record<PeerRole, string> = {
     run: "Execute one shell command on a paired device and exit with its status",
     tty: "Open an interactive terminal (PTY) on a paired device, or start a named session",
-    cp: "Copy a file between this device and a paired device",
+    cp: "Copy files or directories between this device and a paired device, or between two paired devices",
     sessions: "List a paired device's named PTY sessions",
     keys: "Send keys to a named PTY session",
     screen: "Print a named PTY session's screen, optionally once it shows some text",
@@ -167,7 +170,8 @@ export function addPeerCommands(program: Command, run: (config: PeerConfig) => v
     if (role === "run") command.option("-n, --no-stdin", "Do not forward this process's stdin to the command");
     if (role === "sessions") command.option("--json", "Print the sessions as JSON");
     if (role === "cp") {
-      command.addHelpText("after", "\nExactly one path is on the paired device, written DEVICE:PATH. A relative or ~/ remote path\nstarts at the remote user's home. A destination that is a directory, or ends with /,\nreceives the file under its own name. New files keep the source's permission bits.\nOne file per call; directories are not copied. Needs the files grant on the device.\nExamples: cns cp ./build.tar.gz studio:/tmp/    cns cp studio:~/notes.txt .");
+      command.option("-r, --recursive", "Copy directories and everything in them");
+      command.addHelpText("after", "\nEither path, or both, is on a paired device, written DEVICE:PATH. A relative or ~/ remote path\nstarts at the remote user's home. A destination that is a directory, or ends with /, receives\nthe source under its own name. New files keep the source's permission bits. -r copies a\ndirectory; links to files are copied as files, links to directories and special files are\nskipped, and the command then exits 1. Between two paired devices the data passes through\nthis one. Needs the files grant on each paired device.\nExamples: cns cp ./build.tar.gz studio:/tmp/    cns cp studio:~/notes.txt .\n          cns cp -r ./site studio:/srv/    cns cp -r studio:~/photos nas:~/backup/");
     }
     if (role === "keys") {
       command.option("-l, --literal", "Send every argument as literal text, without key names")
@@ -187,37 +191,28 @@ export function addPeerCommands(program: Command, run: (config: PeerConfig) => v
         .option("--history <lines>", `With --screen, include up to ${MAX_SCREEN_HISTORY} scrollback lines`)
         .option("--name <name>", "Start a named session in the background and return; see cns keys, screen and kill")
         .option("--attach <name>", "Attach to a named session; Ctrl-] detaches and leaves it running")
-        .addHelpText("after", "\nWithout a command, attaches to the device's main session at a terminal, or starts the remote\nuser's login shell (PowerShell on Windows). Otherwise pass exactly one quoted string after -- in\nthe remote shell's syntax. A local terminal is switched to raw mode, so keys such as Ctrl-C go to\nthe remote program. Piped input is forwarded verbatim; send \\x04 yourself for Ctrl-D.\n--screen prints what the terminal shows, like tmux capture-pane; combine it with --timeout to\nsnapshot a program that keeps running.\n--name starts a session that outlives this command; --timeout then limits its lifetime.\nExamples: cns tty studio    cns tty studio --cwd /srv/app -- 'claude'    printf 'ls\\nexit\\n' | cns tty studio\n          cns tty studio --screen --timeout 5000 -- 'htop'\n          cns tty studio --name build -- 'make watch'    cns tty studio --attach build");
+        .addHelpText("after", "\nWithout a command, attaches to the device's main session at a terminal, or starts the remote\nuser's login shell (PowerShell on Windows). Otherwise everything after -- is the command, in the\nremote shell's syntax; several words are joined with spaces, as ssh does. A local terminal is\nswitched to raw mode, so keys such as Ctrl-C go to the remote program. Piped input is forwarded verbatim; send \\x04 yourself for Ctrl-D.\n--screen prints what the terminal shows, like tmux capture-pane; combine it with --timeout to\nsnapshot a program that keeps running.\n--name starts a session that outlives this command; --timeout then limits its lifetime.\nExamples: cns tty studio    cns tty studio --cwd /srv/app -- 'claude'    printf 'ls\\nexit\\n' | cns tty studio\n          cns tty studio --screen --timeout 5000 -- 'htop'\n          cns tty studio --name build -- 'make watch'    cns tty studio --attach build");
     }
     if (role === "run") {
-      command.addHelpText("after", "\nPass exactly one quoted shell string after --. Your local shell removes the outer quotes.\nExamples: cns run studio -- 'git status'    cns run studio -- 'printf \"hello\\n\"'");
+      command.addHelpText("after", "\nEverything after -- is the command, in the remote shell's syntax. Several words are joined\nwith spaces, as ssh does; quote what your local shell would otherwise expand, such as $HOME,\nglobs, pipes and ;. One quoted string reaches the remote shell unchanged.\nExamples: cns run studio -- git status    cns run studio -- ls -la /tmp\n          cns run studio -- 'cd /srv && make'    cns run studio -- 'printf \"hello\\n\"'");
     }
     rejectRepeatedOptions(command);
-    if (role === "run") {
-      command.usage("<device> [options] -- <command>").argument("<device>", device).argument("[command]");
-      command.action((name: string, shellCommand: string | undefined) => {
+    if (role === "run" || role === "tty") {
+      command.usage(role === "run" ? "<device> [options] -- <command...>" : "<device> [options] [-- <command...>]")
+        .argument("<device>", device).argument("[command...]");
+      command.action((name: string, words: string[]) => {
         // Positional parsing preserves the subcommand delimiter in the parent args.
         const rawArgs = program.args;
         const delimiter = rawArgs.indexOf("--");
-        if (shellCommand === undefined && delimiter >= 0 && rawArgs[delimiter + 1] === name) throw new Error("run requires a paired device's name: cns run DEVICE -- 'command'.");
-        if (delimiter < 0 || rawArgs.length - delimiter !== 2 || rawArgs[delimiter + 1] !== shellCommand) {
-          throw new Error("run requires -- followed by exactly one quoted shell command.");
+        const after = delimiter < 0 ? [] : rawArgs.slice(delimiter + 1);
+        if (delimiter >= 0 && !words.length && after[0] === name) throw new Error(`${role} requires a paired device's name: cns ${role} DEVICE -- command.`);
+        if (delimiter < 0 ? words.length || role === "run" : after.length !== words.length) {
+          throw new Error(`${role} requires -- before its command: cns ${role} DEVICE -- command.`);
         }
-        if (!shellCommand?.trim() || shellCommand.length > 8192) throw new Error("Command must contain 1-8192 characters.");
-        return run({ ...resolveOptions(role, command, name), command: shellCommand });
-      });
-    } else if (role === "tty") {
-      command.usage("<device> [options] [-- <command>]").argument("<device>", device).argument("[command]");
-      command.action((name: string, shellCommand: string | undefined) => {
-        const rawArgs = program.args;
-        const delimiter = rawArgs.indexOf("--");
-        if (delimiter >= 0) {
-          if (shellCommand === undefined && rawArgs[delimiter + 1] === name) throw new Error("tty requires a paired device's name: cns tty DEVICE -- 'command'.");
-          if (rawArgs.length - delimiter !== 2 || rawArgs[delimiter + 1] !== shellCommand) throw new Error("tty accepts exactly one quoted shell command after --.");
-          if (!shellCommand?.trim() || shellCommand.length > 8192) throw new Error("Command must contain 1-8192 characters.");
-        } else if (shellCommand !== undefined) {
-          throw new Error("tty requires -- before its shell command.");
-        }
+        // Everything after the first -- is the command. Several words are joined with spaces, as ssh does,
+        // and the remote shell parses the result; one quoted string reaches it unchanged.
+        const shellCommand = delimiter < 0 ? undefined : words.join(" ");
+        if (shellCommand !== undefined && (!shellCommand.trim() || shellCommand.length > 8192)) throw new Error("Command must contain 1-8192 characters.");
         const config = resolveOptions(role, command, name);
         if (config.attach && shellCommand !== undefined) throw new Error("--attach joins a running session; it does not take a command.");
         return run({ ...config, command: shellCommand });
@@ -227,12 +222,18 @@ export function addPeerCommands(program: Command, run: (config: PeerConfig) => v
       command.action((source: string, destination: string) => {
         const from = splitRemote(source);
         const to = splitRemote(destination);
-        if (from && to) throw new Error("cp copies between this device and a paired device: one path must be local.");
-        if (!from && !to) throw new Error("cp needs one path on the paired device, written DEVICE:PATH.");
-        const remote = (from ?? to)!;
-        const local = from ? destination : source;
-        if (!local) throw new Error("cp needs a local path.");
-        return run({ ...resolveOptions(role, command, remote.target), copy: { direction: from ? "download" : "upload", local, remote: remote.path } });
+        if (!from && !to) throw new Error("cp needs a path on a paired device, written DEVICE:PATH.");
+        if ((!from && !source) || (!to && !destination)) throw new Error("cp needs a local path.");
+        const { recursive } = command.opts<{ recursive?: boolean }>();
+        const copy: CopyRequest = {
+          source: from ? { device: from.target, path: from.path } : { path: source },
+          destination: to ? { device: to.target, path: to.path } : { path: destination },
+          recursive: recursive === true,
+        };
+        // The command connects to the source device when there is one, else to the destination.
+        const config = resolveOptions(role, command, (from ?? to)!.target);
+        if (from && to && to.target !== from.target) return run({ ...config, copy, copyTo: resolvePeer(to.target) });
+        return run({ ...config, copy });
       });
     } else if (role === "sessions") {
       command.usage("<device> [options]").argument("<device>", device).action((name: string) => run(resolveOptions(role, command, name)));

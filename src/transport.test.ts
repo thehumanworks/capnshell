@@ -105,7 +105,7 @@ test("cp copies files both ways in parts, into directories, keeping permission b
   assert.equal(await readFile(path.join(directory, "remote", "empty"), "utf8"), "");
   const missing = await cp(`studio:${directory}/nope`, ".");
   assert.equal(missing.code, 1);
-  assert.match(missing.stderr, /ENOENT/);
+  assert.match(missing.stderr, /nope: No such file or directory/);
   assert.match((await cp(`studio:${directory}/remote`, ".")).stderr, /is a directory/);
 });
 
