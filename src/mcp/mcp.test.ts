@@ -6,6 +6,7 @@ import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { Client, InMemoryTransport, StreamableHTTPClientTransport, type CallToolResult } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
+import { newBunWebSocketRpcSession, RpcTarget, type BunWebSocketTransport } from "capnweb";
 import { connectControl } from "../commands/daemon.js";
 import { GrantedShell } from "../granted-shell.js";
 import type { Permission } from "../peers.js";
@@ -13,7 +14,7 @@ import { ShellApi, type FileChunk } from "../shell.js";
 import { cliEnvironment, cliInvocation, launchCli, testDevices, unusedPort } from "../test-support.js";
 import { LegacySessions, MAX_SESSIONS } from "./legacy-sessions.js";
 import { clip, createMcpServer, MAX_RESULT_CHARS, readLines } from "./server.js";
-import type { McpTarget, PeerFiles, ToolController } from "./target.js";
+import { daemonTarget, type McpTarget, type PeerFiles, type ToolController } from "./target.js";
 
 const posix = process.platform !== "win32";
 const print = (marker: string) => posix ? `printf '${marker}'` : `[Console]::Write('${marker}')`;
@@ -512,6 +513,46 @@ test("the daemon target chooses among linked devices and kills cancelled command
   console.close();
   await new Promise((resolve) => setTimeout(resolve, 500));
   assert.ok(alive(keptPid), "a detached console's command keeps running");
+});
+
+/** The control surface of a daemon started by a cns from before the file tools: it lists a peer but offers no files. */
+class OlderControlApi extends RpcTarget {
+  peers() { return [{ id: "p1", info: new ShellApi().info() }]; }
+}
+
+test("file tools tell a daemon that is older than cns to restart instead of failing with 'files' is not a function", async (t) => {
+  const directory = await temporaryDirectory(t);
+  const statePath = path.join(directory, "daemon.json");
+  const token = "a".repeat(64);
+  const server = Bun.serve<{ transport?: BunWebSocketTransport<unknown> }>({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request, server) { return server.upgrade(request, { data: {} }) ? undefined : new Response("upgrade", { status: 400 }); },
+    websocket: {
+      open(ws) { ws.data.transport = newBunWebSocketRpcSession(ws, new OlderControlApi()).transport as BunWebSocketTransport<unknown>; },
+      message(ws, message) { ws.data.transport?.dispatchMessage(message); },
+      close(ws, code, reason) { ws.data.transport?.dispatchClose(code, reason); },
+    },
+  });
+  t.after(() => server.stop(true));
+  await writeFile(statePath, JSON.stringify({ version: 1, pid: process.pid, port: server.port, token }), { mode: 0o600 });
+
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+  const mcp = createMcpServer(daemonTarget(statePath));
+  await mcp.connect(serverSide);
+  const client = new Client({ name: "cns-tests", version: "1" });
+  await client.connect(clientSide);
+  t.after(async () => { await client.close(); await mcp.close(); });
+
+  for (const [name, args] of [
+    ["list_directory", { path: directory }], ["read_file", { path: statePath }], ["glob", { pattern: "*", path: directory }],
+  ] as const) {
+    const result = await client.callTool({ name, arguments: args });
+    assert.equal(result.isError, true, name);
+    assert.doesNotMatch(text(result), /is not a function/, name);
+    assert.match(text(result), /runs an older cns than this one and does not offer file access/, name);
+    assert.ok(text(result).includes(`cns stop --state ${statePath}, then cns up --state ${statePath}`), name);
+  }
 });
 
 /** Files whose reads come back in pieces of `piece` bytes, to cross chunk boundaries. */
