@@ -1,0 +1,38 @@
+# The cns gateway as a Cloudflare Worker: an MCP server for Claude custom connectors that
+# reaches devices paired with it through the relay built into cns. Deploy it to your own
+# Cloudflare account from this directory; README.md has the steps.
+name = "cns-gateway"
+main = "worker.ts"
+compatibility_date = "2026-10-01"
+# nodejs_compat: cns's code uses Buffer and node:crypto. global_fetch_strictly_public: fetches
+# go out to the public internet, so the gateway reaches the relay on the same zone through its
+# public route, and client metadata documents can never be fetched from inside Cloudflare.
+compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
+
+routes = [{ pattern = "gateway.cns.nothuman.work", custom_domain = true }]
+
+# cns's encryption uses libsodium.js, which compiles WebAssembly at run time; Workers forbid
+# that, so the gateway uses the same algorithms in plain JavaScript (nacl.ts).
+[alias]
+"libsodium-wrappers" = "./sodium.ts"
+
+[vars]
+# Where the gateway is served; OAuth tokens are issued for GATEWAY_ORIGIN/mcp.
+GATEWAY_ORIGIN = "https://gateway.cns.nothuman.work"
+# OWNER_KEYS, the public keys of the devices that may run cns gateway, is a secret:
+#   npx wrangler secret put OWNER_KEYS
+
+[[durable_objects.bindings]]
+name = "GATEWAY"
+class_name = "Gateway"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Gateway"]
+
+# OAuth clients, grants and tokens (hashed). Create it once with
+#   npx wrangler kv namespace create OAUTH_KV
+# and put the id it prints here.
+[[kv_namespaces]]
+binding = "OAUTH_KV"
+id = "9b67e9fbfd374ba3b8a6020885c44ca3"

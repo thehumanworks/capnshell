@@ -13,6 +13,7 @@ export async function openSocket(url: string, signal: AbortSignal): Promise<WebS
   if (signal.aborted) throw signal.reason;
   const headers = isRelayRequest(url) ? { [CLIENT_HEADER]: await clientProof(url) } : undefined;
   if (signal.aborted) throw signal.reason;
+  if (inWorker()) return await openWorkerSocket(url, headers, signal);
   return await new Promise((resolve, reject) => {
     // Bun and Node (undici) both take headers here; browsers do not, and need no relay.
     const socket = headers ? new WebSocket(url, { headers }) : new WebSocket(url);
@@ -38,6 +39,40 @@ export async function openSocket(url: string, signal: AbortSignal): Promise<WebS
     socket.addEventListener("error", onError);
     signal.addEventListener("abort", onAbort);
   });
+}
+
+/** Whether this runs in a Cloudflare Worker, as the gateway does (gateway/). */
+const inWorker = () => typeof (globalThis as { WebSocketPair?: unknown }).WebSocketPair === "function";
+
+/**
+ * Open a client WebSocket in a Cloudflare Worker, whose WebSocket constructor takes no
+ * headers: Workers open one with a fetch that asks for an upgrade.
+ */
+async function openWorkerSocket(url: string, headers: Record<string, string> | undefined, signal: AbortSignal): Promise<WebSocket> {
+  // The fetch's signal stays tied to the socket it returns: aborting it later would close the
+  // socket. So it is aborted only while connecting, never once the socket is open.
+  const connecting = new AbortController();
+  let timedOut = false;
+  const abort = () => connecting.abort();
+  const timer = setTimeout(() => { timedOut = true; connecting.abort(); }, CONNECT_MS);
+  signal.addEventListener("abort", abort, { once: true });
+  let response: Response;
+  try {
+    response = await fetch(url.replace(/^ws/, "http"), { headers: { ...headers, Upgrade: "websocket" }, signal: connecting.signal });
+  } catch (error) {
+    if (signal.aborted) throw signal.reason;
+    throw new Error(timedOut ? `Timed out connecting to ${url}.` : `Cannot connect to ${url}. Check that the listener is running and reachable.`, { cause: error });
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener("abort", abort);
+  }
+  const socket = (response as Response & { webSocket?: WebSocket & { accept(): void } | null }).webSocket;
+  if (!socket) {
+    await response.body?.cancel();
+    throw new Error(`Cannot connect to ${url}: it answered ${response.status}.`);
+  }
+  socket.accept();
+  return socket;
 }
 
 /** Drop a socket at once. Node's WebSocket, which Pi may run on, has no terminate(). */

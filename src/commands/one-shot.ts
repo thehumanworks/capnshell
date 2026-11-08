@@ -3,9 +3,9 @@ import type { ConnectionController } from "../console.js";
 import type { PeerConfig } from "../options.js";
 import { MAX_EXEC_CHUNK_BYTES, type ExecInput, type ExecSink, type PtyExit, type PtyScreen, type PtySessionInfo, type RunResult } from "../shell.js";
 import { attachSession, attachTerminal, plain } from "../terminal.js";
+import { DEFAULT_UNTIL_MS, describeExit, formatSessions } from "../session-text.js";
 
-/** Wait this long for --until text unless --timeout says otherwise. */
-export const DEFAULT_UNTIL_MS = 30_000;
+export { DEFAULT_UNTIL_MS, describeExit, formatSessions };
 
 export function commandExitCode(result: Pick<RunResult, "exitCode" | "signalNumber" | "timedOut">): number {
   if (result.timedOut) return 124;
@@ -16,21 +16,6 @@ export function commandExitCode(result: Pick<RunResult, "exitCode" | "signalNumb
 // Like tmux capture-pane, but without the blank rows below the last output.
 function printScreen(screen: PtyScreen) {
   process.stdout.write(screen.text.replace(/\n+$/, "") + "\n");
-}
-
-export function describeExit(exit: Pick<PtyExit, "exitCode" | "signal" | "timedOut">): string {
-  if (exit.timedOut) return "timed out";
-  if (exit.exitCode !== null) return `exited ${exit.exitCode}`;
-  return exit.signal ? `killed by ${exit.signal}` : "ended";
-}
-
-export function formatSessions(sessions: PtySessionInfo[]): string {
-  const rows = sessions.map((session) => [
-    session.name, session.exit ? describeExit(session.exit) : "running", `${session.cols}x${session.rows}`,
-    `${session.viewers} attached`, session.command ?? "(login shell)",
-  ]);
-  const widths = rows.reduce((max, row) => row.map((cell, index) => Math.max(cell.length, max[index] ?? 0)), [] as number[]);
-  return rows.map((row) => row.map((cell, index) => index === row.length - 1 ? cell : cell.padEnd(widths[index]!)).join("  ")).join("\n");
 }
 
 /** Writes a command's output to this process's stdout and stderr; each chunk is acknowledged once written. */

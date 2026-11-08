@@ -2,7 +2,7 @@ import path from "node:path";
 import { McpServer, type CallToolResult, type ServerContext } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import manifest from "../../package.json" with { type: "json" };
-import { DEFAULT_UNTIL_MS, describeExit, formatSessions } from "../commands/one-shot.js";
+import { DEFAULT_UNTIL_MS, describeExit, formatSessions } from "../session-text.js";
 import { errorMessage } from "../errors.js";
 import { explainDenial } from "../peers.js";
 import { MAX_KEYS } from "../keys.js";
@@ -400,9 +400,52 @@ export async function readLines(files: PeerFiles, file: string, offset: number, 
   }
 }
 
+/** Every tool the server offers. */
+export const TOOL_NAMES = [
+  "list_peers", "run_command", "start_session", "send_keys", "read_screen", "list_sessions", "kill_session",
+  "read_file", "write_file", "list_directory", "glob",
+] as const;
+export type ToolName = typeof TOOL_NAMES[number];
+
+/** One finished tool call, for an audit log. */
+export interface ToolCall {
+  tool: ToolName;
+  /** The arguments as the client sent them, after validation. */
+  args: Record<string, unknown>;
+  /** False for an error result, or a call that was cancelled or threw. */
+  ok: boolean;
+  elapsedMs: number;
+}
+
+export interface McpServerOptions {
+  /** Offer only these tools; by default every tool. */
+  tools?: readonly ToolName[];
+  /** Called once each call ends. */
+  onCall?: (call: ToolCall) => void;
+}
+
 /** A fresh server for one MCP connection or HTTP request, with tools that reach `target`'s peers. */
-export function createMcpServer(target: McpTarget): McpServer {
-  const server = new McpServer({ name: "cns", title: "Cap'n Shell", version: manifest.version }, { instructions });
+export function createMcpServer(target: McpTarget, options: McpServerOptions = {}): McpServer {
+  const mcp = new McpServer({ name: "cns", title: "Cap'n Shell", version: manifest.version }, { instructions });
+  const { tools, onCall } = options;
+  // Tools left out are never registered, so a client cannot list or call them.
+  const server = {
+    registerTool: ((name: ToolName, config: never, handler: (args: Record<string, unknown>, ctx: ServerContext) => Promise<CallToolResult>) => {
+      if (tools && !tools.includes(name)) return undefined;
+      if (!onCall) return mcp.registerTool(name, config, handler as never);
+      return mcp.registerTool(name, config, (async (args: Record<string, unknown>, ctx: ServerContext) => {
+        const started = Date.now();
+        let ok = false;
+        try {
+          const result = await handler(args, ctx);
+          ok = !result.isError;
+          return result;
+        } finally {
+          try { onCall({ tool: name, args, ok, elapsedMs: Date.now() - started }); } catch { /* An audit failure never fails the call. */ }
+        }
+      }) as never);
+    }) as unknown as McpServer["registerTool"],
+  };
 
   server.registerTool("list_peers", {
     title: "List peers",
@@ -651,5 +694,5 @@ export function createMcpServer(target: McpTarget): McpServer {
     return { text: lines.join("\n"), structured: { peer: call.peerId, path: directory, paths, truncated } };
   }));
 
-  return server;
+  return mcp;
 }

@@ -701,3 +701,33 @@ test("file tools need the files grant on a paired device", { timeout: 30000 }, a
   const allowed = await grantedClient(t, ["files"]);
   assert.equal(succeeded(await allowed.callTool({ name: "read_file", arguments: { path: file } })).content, "secret");
 });
+
+test("a server limited to some tools lists and runs only those, and reports each call", async (t) => {
+  const calls: { tool: string; ok: boolean; args: Record<string, unknown> }[] = [];
+  const target: McpTarget = {
+    label: "a test peer",
+    async open() {
+      return {
+        controller: { run: async () => ({ stdout: "hi\n", stderr: "", exitCode: 0, signal: null, signalNumber: null, timedOut: false, elapsedMs: 1, truncated: false }) } as unknown as ToolController,
+        peer: async () => "p1",
+        lost: false,
+        close() {},
+      };
+    },
+  };
+  const server = createMcpServer(target, { tools: ["run_command", "read_file"], onCall: (call) => calls.push(call) });
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverSide);
+  const client = new Client({ name: "cns-tests", version: "1" });
+  await client.connect(clientSide);
+  t.after(() => client.close());
+  assert.deepEqual((await client.listTools()).tools.map((tool) => tool.name).sort(), ["read_file", "run_command"]);
+  const ran = await client.callTool({ name: "run_command", arguments: { command: "echo hi" } }) as CallToolResult;
+  assert.equal(ran.isError, undefined);
+  // A tool left out does not exist for the client.
+  await assert.rejects(client.callTool({ name: "write_file", arguments: { path: "/tmp/x", content: "x" } }), /write_file/);
+  const failed = await client.callTool({ name: "read_file", arguments: { path: "/etc/hosts" } }) as CallToolResult;
+  assert.equal(failed.isError, true);
+  assert.deepEqual(calls.map(({ tool, ok }) => ({ tool, ok })), [{ tool: "run_command", ok: true }, { tool: "read_file", ok: false }]);
+  assert.equal(calls[0]!.args.command, "echo hi");
+});
