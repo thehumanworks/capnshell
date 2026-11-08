@@ -125,6 +125,20 @@ export function pairedTarget(expect: { name: string; publicKey: string; addresse
 }
 
 /**
+ * Explain a call the local daemon does not offer: it was started by an older cns, which
+ * keeps running after cns is upgraded until the daemon restarts.
+ */
+function olderDaemon(error: unknown, statePath: string | undefined): unknown {
+  if (!(error instanceof TypeError) || !/^'\w+' is not a function\.$/.test(error.message)) return error;
+  const state = statePath === undefined ? "" : ` --state ${statePath}`;
+  return new Error(
+    `The local daemon runs an older cns than this one and does not offer file access. Restart it with cns stop${state}, then cns up${state}; ` +
+    "if it runs as a service and cns has moved, as an upgrade can do, run cns up --install instead.",
+    { cause: error },
+  );
+}
+
+/**
  * Reach the peers connected to the local daemon. Each call reads the daemon's
  * state afresh, so a restarted daemon is found again. Closing a call's control
  * connection makes the daemon kill its commands and end its waits.
@@ -156,7 +170,7 @@ export function daemonTarget(statePath?: string, cwd?: string): McpTarget {
           ...connection.controller,
           async files(id) {
             // The peer's own file calls, which a paired device allows with the files grant alone.
-            const files = await remote.files(id);
+            const files = await remote.files(id).catch((error: unknown) => { throw olderDaemon(error, statePath); });
             forks.push(files);
             return files as unknown as PeerFiles;
           },
