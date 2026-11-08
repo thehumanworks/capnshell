@@ -10,3 +10,4 @@ result-*
 .pi/worktrees
 .wrangler
 relay-token
+.dev.vars

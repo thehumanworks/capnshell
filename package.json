@@ -20,8 +20,8 @@
     "build:pi": "bun scripts/build-pi-package.ts",
     "typecheck": "bun node_modules/typescript/bin/tsc --noEmit",
     "start": "bun src/cli.ts",
-    "test": "bun test --timeout 30000 ./src ./pi",
-    "test:compiled": "bun run build && CAPNWEB_TEST_BINARY=1 bun test --timeout 30000 ./src ./pi"
+    "test": "bun test --timeout 30000 ./src ./pi ./gateway",
+    "test:compiled": "bun run build && CAPNWEB_TEST_BINARY=1 bun test --timeout 30000 ./src ./pi ./gateway"
   },
   "engines": {
     "bun": "1.4.4"
@@ -53,9 +53,13 @@
     }
   },
   "devDependencies": {
+    "@cloudflare/workers-oauth-provider": "1.2.4",
     "@earendil-works/pi-coding-agent": "1.4.0",
     "@earendil-works/pi-tui": "1.4.0",
     "@modelcontextprotocol/client": "2.4.0",
+    "@noble/ciphers": "2.4.0",
+    "@noble/curves": "2.4.0",
+    "@noble/hashes": "2.4.0",
     "@types/bun": "1.4.4",
     "@types/node": "26.6.6",
     "execa": "10.2.1",

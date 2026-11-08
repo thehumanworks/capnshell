@@ -52,6 +52,35 @@ export function createCli(): Command {
       if (options.json) console.log(JSON.stringify(peers, null, 2));
       else for (const peer of peers) console.log(`${peer.name}\t${peer.fingerprint}\t${peer.addresses[0] ?? "-"}`);
     });
+  const gateway = program.command("gateway").description("Administer the gateway that lets Claude's connectors reach devices paired with it")
+    .addHelpText("after", "\nThe gateway is a Cloudflare Worker you deploy (gateway/README.md). Commands are signed with this\ndevice's identity, which the gateway accepts when its public key is in the gateway's OWNER_KEYS.\nThe gateway's address is CNS_GATEWAY, or --url, or https://gateway.cns.nothuman.work.");
+  const gatewayCommand = (name: string, description: string) => gateway.command(name).description(description)
+    .option("--url <url>", "The gateway's address (default: CNS_GATEWAY, else https://gateway.cns.nothuman.work)")
+    .option("--json", "Print the answer as JSON");
+  const gatewayCommands = () => import("./commands/gateway.js");
+  gatewayCommand("status", "Show the gateway's fingerprint, devices, approved connectors and approvals waiting")
+    .action(async (options) => { await (await gatewayCommands()).status(options); });
+  gatewayCommand("pair <invite>", "Pair the gateway with the device that printed this invite (cns pair there)")
+    .option("--name <name>", "The gateway's name for the device (default: the name it suggests)")
+    .option("--request <grants>", "What the gateway asks to use there (default: shell,files,sessions:create)")
+    .addHelpText("after", "\nOn the device: cns pair; it prints an invite and asks before saving, showing the gateway's\nfingerprint and what it requests. Compare the fingerprint with cns gateway status. The\ndevice grants at most what was requested; cns pair --grant files there grants less.")
+    .action(async (invite: string, options) => { await (await gatewayCommands()).pair(invite, options); });
+  gatewayCommand("remove <name>", "Forget a device: no connector reaches it from now on")
+    .action(async (name: string, options) => { await (await gatewayCommands()).remove(name, options); });
+  gatewayCommand("approve <code>", "Approve a connector that is waiting with this code on its sign-in page")
+    .option("--devices <names>", "The devices it may reach, comma-separated, or all (default: all paired now)")
+    .option("--tools <tools>", "The tools it may use, comma-separated, read (look only) or all (default: all)")
+    .option("--yes", "Approve without asking, after checking the details it prints")
+    .action(async (code: string, options) => { await (await gatewayCommands()).approve(code, options); });
+  gatewayCommand("deny <code>", "Decline a connector that is waiting with this code")
+    .action(async (code: string, options) => { await (await gatewayCommands()).deny(code, options); });
+  gatewayCommand("grants", "List approved connectors")
+    .action(async (options) => { await (await gatewayCommands()).grants(options); });
+  gatewayCommand("revoke <id>", "Revoke an approved connector at once, by the ID cns gateway grants shows")
+    .action(async (id: string, options) => { await (await gatewayCommands()).revoke(id, options); });
+  gatewayCommand("log", "Show the newest tool calls connectors made: when, which device, which tool, the command or path")
+    .option("--limit <n>", "How many entries (default: 50, at most 1000)")
+    .action(async (options) => { await (await gatewayCommands()).log(options); });
   program.command("up")
     .description("Run this device as a paired peer: start its daemon, or report the running one")
     .option("--bind <address>", "Interface to listen on (default: every interface; CNS_BIND)")

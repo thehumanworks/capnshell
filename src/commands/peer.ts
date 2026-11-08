@@ -71,6 +71,17 @@ interface PendingInvite {
 /** The most recent attempt is tried first, then every saved address in turn. */
 const REDIAL_MIN_MS = 1000;
 const REDIAL_MAX_MS = 30_000;
+
+/**
+ * Whether to keep a standing link to a paired device. A device that gave no address of its
+ * own and lets this one do nothing, such as the gateway (gateway/), never answers through
+ * the relay and offers nothing over a link: it dials when it needs this device, so dialing
+ * it would only knock on the relay every 30 seconds for nothing.
+ */
+export function worthDialing(entry: { publicKey: string; addresses: readonly string[]; grants: { outgoing: readonly string[] } }, relay: string | undefined): boolean {
+  if (!entry.addresses.length && !entry.grants.outgoing.length) return false;
+  return dialAddresses(entry, relay).length > 0;
+}
 /** How long the person on the inviting device has to decide once a proposal arrives. */
 const DECISION_MS = 10 * 60 * 1000;
 /** A daemon registered at a relay pings it this often, and re-registers if it hears nothing for three times as long. */
@@ -413,7 +424,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
   function dial(name: string) {
     if (links.has(name) || stopping) return;
     const entry = getPeer(name);
-    if (!entry || !dialAddresses(entry, relay).length) return;
+    if (!entry || !worthDialing(entry, relay)) return;
     const expectedKey = entry.publicKey;
     let attempt = 0;
     let stopped = false;
@@ -437,7 +448,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
     }
     async function attempt_() {
       const current = getPeer(name);
-      const addresses = current ? dialAddresses(current, relay) : [];
+      const addresses = current && worthDialing(current, relay) ? dialAddresses(current, relay) : [];
       if (!current || current.publicKey !== expectedKey || !addresses.length) return stop();
       // Skip while an inbound link from the same device is already up.
       if (linkTo(current.publicKey)) return schedule();

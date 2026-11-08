@@ -23,7 +23,8 @@
     "src/**/*.ts",
     "pi/**/*.ts",
     "scripts/**/*.ts",
-    "relay/**/*.ts"
+    "relay/**/*.ts",
+    "gateway/**/*.ts"
   ],
   "exclude": [
     "node_modules",
