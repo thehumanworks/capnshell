@@ -154,7 +154,7 @@ test("run takes everything after the first -- as the command, joining words with
 test("run requires an explicit delimiter and a nonempty command", { skip: !posix }, () => {
   for (const args of [
     ["run"], ["run", "studio"], ["run", "studio", "--"], ["run", "studio", "echo ok"], ["run", "studio", "echo", "--", "ok"], ["run", "--", "studio"],
-    ["run", "studio", "--", ""], ["run", "studio", "--", " "], ["run", "studio", "--", " ", " "],
+    ["run", "studio", "--", ""], ["run", "studio", "--", " "], ["run", "studio", "--", " ", " "], ["run", "studio", "--", "x".repeat(4096), "y".repeat(4096)],
     ["run", "studio", "--cwd", "/tmp", "--cwd", "/srv", "--", "echo ok"],
     ["run", "studio", "--timeout", "-1", "--", "echo ok"],
     ["run", "studio", "--timeout", "2147483648", "--", "echo ok"],
