@@ -128,11 +128,18 @@ The console automatically selects the initial sole peer. When several peers are 
 
 ## Command execution
 
-Pass exactly one shell string after `--`; quote it to preserve spaces, redirects and variables for the remote shell:
+Everything after the first `--` is the command. Several words are joined with spaces, as `ssh` does, so simple commands need no quotes:
+
+```sh
+cns run studio -- git status
+cns run studio --cwd /tmp --timeout 10000 -- ls -la
+```
+
+Options after `--`, and any later `--`, belong to the remote command. Your local shell still expands quotes, globs, variables and operators such as `|`, `;` and `>` before `cns` sees them, so quote the whole command when the remote shell should handle them:
 
 ```sh
 cns run studio -- 'printf "hello\n"; exit 7'
-cns run studio --cwd /tmp --timeout 10000 -- 'pwd; ls -la'
+cns run studio -- 'cd /srv/app && git log -1 > /tmp/head.txt'
 ```
 
 ### Environment defaults

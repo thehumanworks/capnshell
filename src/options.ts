@@ -190,20 +190,22 @@ export function addPeerCommands(program: Command, run: (config: PeerConfig) => v
         .addHelpText("after", "\nWithout a command, attaches to the device's main session at a terminal, or starts the remote\nuser's login shell (PowerShell on Windows). Otherwise pass exactly one quoted string after -- in\nthe remote shell's syntax. A local terminal is switched to raw mode, so keys such as Ctrl-C go to\nthe remote program. Piped input is forwarded verbatim; send \\x04 yourself for Ctrl-D.\n--screen prints what the terminal shows, like tmux capture-pane; combine it with --timeout to\nsnapshot a program that keeps running.\n--name starts a session that outlives this command; --timeout then limits its lifetime.\nExamples: cns tty studio    cns tty studio --cwd /srv/app -- 'claude'    printf 'ls\\nexit\\n' | cns tty studio\n          cns tty studio --screen --timeout 5000 -- 'htop'\n          cns tty studio --name build -- 'make watch'    cns tty studio --attach build");
     }
     if (role === "run") {
-      command.addHelpText("after", "\nPass exactly one quoted shell string after --. Your local shell removes the outer quotes.\nExamples: cns run studio -- 'git status'    cns run studio -- 'printf \"hello\\n\"'");
+      command.addHelpText("after", "\nEverything after the first -- is the command, in the remote shell's syntax. Several words are\njoined with spaces, as ssh does, so quote the whole command to keep quotes, globs or operators\nsuch as | and ; from your local shell.\nExamples: cns run studio -- git status    cns run studio -- 'printf \"hello\\n\"; ls | wc -l'");
     }
     rejectRepeatedOptions(command);
     if (role === "run") {
-      command.usage("<device> [options] -- <command>").argument("<device>", device).argument("[command]");
-      command.action((name: string, shellCommand: string | undefined) => {
+      command.usage("<device> [options] -- <command...>").argument("<device>", device).argument("[command...]");
+      command.action((name: string, words: string[]) => {
         // Positional parsing preserves the subcommand delimiter in the parent args.
         const rawArgs = program.args;
         const delimiter = rawArgs.indexOf("--");
-        if (shellCommand === undefined && delimiter >= 0 && rawArgs[delimiter + 1] === name) throw new Error("run requires a paired device's name: cns run DEVICE -- 'command'.");
-        if (delimiter < 0 || rawArgs.length - delimiter !== 2 || rawArgs[delimiter + 1] !== shellCommand) {
-          throw new Error("run requires -- followed by exactly one quoted shell command.");
+        if (delimiter >= 0 && rawArgs.indexOf(name) > delimiter) throw new Error("run requires a paired device's name: cns run DEVICE -- command.");
+        // Every word after the first -- belongs to the command, so all of them must have come from there.
+        if (delimiter < 0 || words.length === 0 || words.length !== rawArgs.length - delimiter - 1) {
+          throw new Error("run requires -- followed by the shell command: cns run DEVICE -- command.");
         }
-        if (!shellCommand?.trim() || shellCommand.length > 8192) throw new Error("Command must contain 1-8192 characters.");
+        const shellCommand = words.join(" ");
+        if (!shellCommand.trim() || shellCommand.length > 8192) throw new Error("Command must contain 1-8192 characters.");
         return run({ ...resolveOptions(role, command, name), command: shellCommand });
       });
     } else if (role === "tty") {

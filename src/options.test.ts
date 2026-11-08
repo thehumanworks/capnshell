@@ -142,10 +142,23 @@ test("run preserves the single shell string, working directory and timeout", { s
   assert.throws(() => parseOptions(["run", "studio", "--", "echo ok"], { CNS_CWD: "" }));
 });
 
-test("run requires an explicit delimiter and exactly one nonempty shell string", { skip: !posix }, () => {
+test("run joins every word after the first -- into the command", { skip: !posix }, () => {
+  assert.equal(parseOptions(["run", "studio", "--", "git", "status"]).command, "git status");
+  assert.equal(parseOptions(["run", "studio", "--", "echo", "ok"]).command, "echo ok");
+  // Options and a second -- after the delimiter belong to the remote command.
+  const config = parseOptions(["run", "studio", "--cwd", "/tmp", "--", "ls", "-la", "--cwd", "/srv", "--", "x"]);
+  assert.equal(config.command, "ls -la --cwd /srv -- x");
+  assert.equal(config.cwd, "/tmp");
+  assert.equal(parseOptions(["run", "studio", "--", "grep", "-n", "studio", "a b"]).command, "grep -n studio a b");
+  assert.equal(parseOptions(["run", "studio", "--", "echo", ""]).command, "echo ");
+});
+
+test("run requires an explicit delimiter and a nonempty shell command", { skip: !posix }, () => {
   for (const args of [
-    ["run"], ["run", "studio"], ["run", "studio", "--"], ["run", "studio", "echo ok"],
-    ["run", "studio", "--", ""], ["run", "studio", "--", " "], ["run", "studio", "--", "echo", "ok"],
+    ["run"], ["run", "studio"], ["run", "studio", "--"], ["run", "studio", "echo ok"], ["run", "studio", "echo", "--", "ok"],
+    ["run", "--", "studio"], ["run", "--", "studio", "echo", "ok"],
+    ["run", "studio", "--", ""], ["run", "studio", "--", " "], ["run", "studio", "--", "", " "],
+    ["run", "studio", "--", "x".repeat(4096), "x".repeat(4096)],
     ["run", "studio", "--cwd", "/tmp", "--cwd", "/srv", "--", "echo ok"],
     ["run", "studio", "--timeout", "-1", "--", "echo ok"],
     ["run", "studio", "--timeout", "2147483648", "--", "echo ok"],
