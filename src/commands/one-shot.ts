@@ -139,9 +139,29 @@ export async function runOneShot(config: PeerConfig, controller: ConnectionContr
       return commandExitCode(exit);
     }
     case "cp": {
-      const { copy } = await import("./copy.js");
-      await copy(controller.files(id), await controller.info(id), config.copy!);
-      return 0;
+      const { copy, localSide, remoteSide } = await import("./copy.js");
+      const { source, destination, recursive } = config.copy!;
+      const connected = remoteSide(config.expect.name, controller.files(id), await controller.info(id));
+      // Between two paired devices, the data passes through this one, as with scp -3.
+      let other: import("./connect-device.js").DeviceConnection | undefined;
+      try {
+        const sideOf = async (device: string | undefined) => {
+          if (device === undefined) return localSide();
+          if (device === config.expect.name) return connected;
+          const { connectDevice } = await import("./connect-device.js");
+          other = await connectDevice(config.copyTo!, signal);
+          return remoteSide(device, other.remote, other.info);
+        };
+        const from = await sideOf(source.device);
+        const to = await sideOf(destination.device);
+        const skipped = await copy(from, source.path, to, destination.path, {
+          recursive,
+          skipped: (entry, reason) => console.error(`cns: skipped ${entry}: ${reason}`),
+        });
+        return skipped ? 1 : 0;
+      } finally {
+        other?.close();
+      }
     }
     case "sessions": {
       const sessions = await controller.ptySessions(id);
