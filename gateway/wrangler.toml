@@ -35,4 +35,4 @@ new_sqlite_classes = ["Gateway"]
 # and put the id it prints here.
 [[kv_namespaces]]
 binding = "OAUTH_KV"
-id = "REPLACE_WITH_OAUTH_KV_ID"
+id = "9b67e9fbfd374ba3b8a6020885c44ca3"

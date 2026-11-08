@@ -39,7 +39,8 @@ Claude ──HTTPS + OAuth──▶ gateway (Worker + Durable Object) ──encr
 
 From this directory, in your Cloudflare account (the zone for the hostname must be there):
 
-1. Create the KV namespace for OAuth state, and put the id it prints in `wrangler.toml`:
+1. Create the KV namespace for OAuth state, and put the id it prints in `wrangler.toml`
+   (the one there is for gateway.cns.nothuman.work; replace it for your own deployment):
 
    ```sh
    npx wrangler kv namespace create OAUTH_KV
