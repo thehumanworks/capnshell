@@ -3,6 +3,11 @@
 # `mise use -g github:thehumanworks/capnshell` installs. Each archive holds the
 # executable at its root, and SHA256SUMS lists them all. Every executable is
 # built on its own platform and run there before the release is published.
+#
+# Running the workflow by hand with a tag that does not exist yet creates that
+# tag on main's head, after checking it against main's package.json, and then
+# releases it. That lets a cloud session, whose git access cannot push tags,
+# publish a release: merge the version bump, then dispatch with the new tag.
 name: Release
 
 on:
@@ -11,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing tag to (re)build the release for, such as v1.0.0
+        description: Tag to release, such as v1.2.0. An existing tag is rebuilt; a new one is created on main's head first.
         required: true
 
 permissions:
@@ -30,6 +35,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Create the tag on main if it does not exist
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if gh api "repos/$GH_REPO/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG exists; rebuilding its release."
+            exit 0
+          fi
+          if [ "$GITHUB_REF" != refs/heads/main ]; then
+            echo "::error::Tag $TAG does not exist. New tags are only created from main; dispatch the workflow on main."
+            exit 1
+          fi
+          version="$(gh api "repos/$GH_REPO/contents/package.json?ref=$GITHUB_SHA" -H 'Accept: application/vnd.github.raw' | jq -r .version)"
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::Tag $TAG does not match main's package.json version $version (expected v$version)."
+            exit 1
+          fi
+          gh api "repos/$GH_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA" >/dev/null
+          echo "Created $TAG at $GITHUB_SHA."
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.TAG }}
