@@ -19,7 +19,7 @@ import type { RpcStub } from "capnweb";
 import { RefusingShell } from "../refusing-shell.js";
 import { connectControl, daemonStatePath, removeStaleState, startDaemon, stopDaemon, type ControlConnection } from "./daemon.js";
 import { selfInvocation } from "../runtime.js";
-import { describeService, installService, installedService, lingering, serviceEnvironment, serviceFile, serviceKind, serviceName, startService, uninstallService } from "../service.js";
+import { describeService, installService, installedService, lingering, serviceEnvironment, serviceFailed, serviceFile, serviceKind, serviceLog, serviceName, startService, uninstallService, type ServiceKind } from "../service.js";
 
 /** How long the invited device waits for the inviting person to decide. */
 const PROPOSAL_WAIT_MS = 10 * 60 * 1000;
@@ -107,16 +107,26 @@ function daemonSettings(options: { bind?: string; port?: string }): { bind: stri
   return { bind, port };
 }
 
-/** The control connection of a daemon that is starting, once it answers. */
-async function awaitControl(statePath: string | undefined, timeoutMs = 15_000): Promise<ControlConnection> {
+/**
+ * The control connection of a daemon that is starting, once it answers. With `failed`, stop
+ * waiting as soon as the service manager reports that the daemon failed.
+ */
+async function awaitControl(statePath: string | undefined, timeoutMs = 15_000, failed?: () => string | undefined): Promise<ControlConnection> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     try { return await connectControl(statePath); }
     catch (error) {
+      const failure = failed?.();
+      if (failure) throw new Error(failure, { cause: error });
       if (Date.now() >= deadline) throw new Error(`The daemon did not start within ${timeoutMs / 1000} seconds: ${errorMessage(error)}`, { cause: error });
     }
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
+}
+
+/** A probe for awaitControl: the installed service's daemon exited with an error. */
+function serviceFailure(kind: ServiceKind, state: string): () => string | undefined {
+  return () => serviceFailed(kind) ? `The ${serviceName(kind)} failed to start the daemon. See ${serviceLog(kind, state)}` : undefined;
 }
 
 /** The local paired daemon, started if it is not running, or if the one that was has crashed. */
@@ -138,7 +148,7 @@ async function pairedDaemon(options: { bind?: string; port?: string; state?: str
     if (given.length) console.error(`The installed service's settings apply, not --${given.join(", --")}. Run cns up --install with them to change it.`);
     try {
       startService(service.kind);
-      const control = await awaitControl(options.state);
+      const control = await awaitControl(options.state, undefined, serviceFailure(service.kind, daemonStatePath(options.state)));
       if (!quiet) console.error(`Started the peer daemon through ${describeService(service.kind)}.`);
       return { control, started: true };
     } catch (error) {
@@ -209,13 +219,12 @@ async function install(options: UpOptions): Promise<void> {
   }
   await installService(file);
   console.error(`Installed ${describeService(kind)} at ${file.path}. It starts the daemon at login and restarts it if it fails; cns stop stops it until the next cns up or login.`);
-  if (kind === "launchd") console.error(`Its log: ${path.join(path.dirname(state), "service.log")}.`);
-  else {
-    console.error("Its log: journalctl --user -u cns.");
+  console.error(`Its log: ${serviceLog(kind, state)}.`);
+  if (kind === "systemd") {
     if (lingering() === false) console.error(`systemd stops user services when you log out. To keep the daemon running without a login, run: loginctl enable-linger ${os.userInfo().username}`);
   }
   console.error("Run cns up --install again after moving or upgrading cns to a new path, or to change --bind or --port.");
-  (await awaitControl(options.state)).close();
+  (await awaitControl(options.state, undefined, serviceFailure(kind, state))).close();
 }
 
 /** `cns up --uninstall`: stop the service's daemon and remove the service. */

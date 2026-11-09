@@ -67,10 +67,10 @@ test.skipIf(process.platform === "win32")("rejects a symlink as the custom confi
   expect(() => save("studio")).toThrow("directory must be private");
 });
 
-test.skipIf(process.platform !== "win32")("saved peers fail closed on Windows", () => {
-  expect(() => save("studio")).toThrow("not available on Windows");
-  process.env.CNS_CONFIG_DIR = path.join(dir, "missing");
-  expect(() => listPeers()).toThrow("not available on Windows");
-  expect(() => getPeer("studio")).toThrow("not available on Windows");
-  expect(() => removePeerFile("studio")).toThrow("not available on Windows");
+test.skipIf(process.platform !== "win32")("on Windows, a paired device is saved in a private directory and loads back", () => {
+  save("studio");
+  expect(peerNames()).toEqual(["studio"]);
+  expect(getPeer("studio")?.name).toBe("studio");
+  removePeerFile("studio");
+  expect(getPeer("studio")).toBeUndefined();
 });

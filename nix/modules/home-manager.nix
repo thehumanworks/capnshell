@@ -9,7 +9,7 @@ let
   cfg = config.services.cns;
   inherit (pkgs.stdenv.hostPlatform) isDarwin isLinux system;
   exe = lib.getExe cfg.package;
-  args = [ "listen" "--no-repl" "--paired" "--service" "--state" cfg.stateFile "--bind" cfg.bind "--port" (toString cfg.port) ];
+  args = [ "daemon" "--service" "--state" cfg.stateFile "--bind" cfg.bind "--port" (toString cfg.port) ];
   # Commands paired devices run get the daemon's PATH, not a login shell's.
   defaultPath = lib.concatStringsSep ":" ([
     "${config.home.profileDirectory}/bin"

@@ -1,14 +1,13 @@
 import { randomBytes } from "node:crypto";
-import { closeSync, constants, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { checkConfigDirectory, checkPrivateDirectory, configDirectory, isPrivateFile, requirePrivateStateSupport } from "./config.js";
+import { checkConfigDirectory, checkPrivateDirectory, configDirectory, isPrivateFile, makePrivateDirectory } from "./config.js";
 
 // One private file per paired device, named by this user's alias for it. peers.ts reads
 // and writes the JSON records; this module only handles the files.
 export const peerNamePattern = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
 /** The directory of saved peers, one file per name. */
 export function peersDirectory(): string {
-  requirePrivateStateSupport("Saved peers");
   return path.join(configDirectory(), "peers");
 }
 /** The configuration and peers directories are private and on a trusted path. */
@@ -26,7 +25,7 @@ const file = peerFile;
 /** Create the peers directory if needed, with the default configuration directory. */
 export function preparePeersDirectory(): void {
   checkConfigDirectory(true); // A custom configuration directory must already exist.
-  mkdirSync(directory(), { recursive: true, mode: 0o700 });
+  makePrivateDirectory(directory());
   checkDirectories();
 }
 

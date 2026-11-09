@@ -34,10 +34,11 @@ export function serviceKind(platform: NodeJS.Platform = process.platform): Servi
   return undefined;
 }
 
+/** launchd and systemd run on macOS and Linux, so their paths are POSIX ones on every platform. */
 export function servicePath(kind: ServiceKind, home = os.homedir(), env: NodeJS.ProcessEnv = process.env): string {
-  if (kind === "launchd") return path.join(home, "Library", "LaunchAgents", `${SERVICE_LABEL}.plist`);
-  const config = env.XDG_CONFIG_HOME && path.isAbsolute(env.XDG_CONFIG_HOME) ? env.XDG_CONFIG_HOME : path.join(home, ".config");
-  return path.join(config, "systemd", "user", SERVICE_UNIT);
+  if (kind === "launchd") return path.posix.join(home, "Library", "LaunchAgents", `${SERVICE_LABEL}.plist`);
+  const config = env.XDG_CONFIG_HOME && path.posix.isAbsolute(env.XDG_CONFIG_HOME) ? env.XDG_CONFIG_HOME : path.posix.join(home, ".config");
+  return path.posix.join(config, "systemd", "user", SERVICE_UNIT);
 }
 
 /** The variables a daemon started from a login shell would have, which launchd and systemd do not pass on. */
@@ -134,7 +135,7 @@ export function serviceFile(kind: ServiceKind, spec: ServiceSpec, home?: string,
 export type Runner = (file: string, args: string[]) => { code: number; output: string };
 
 export const runCommand: Runner = (file, args) => {
-  const result = spawnSync(file, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+  const result = spawnSync(file, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 30_000 });
   if (result.error) return { code: 127, output: result.error.message };
   return { code: result.status ?? 1, output: `${result.stdout ?? ""}${result.stderr ?? ""}`.trim() };
 };
@@ -194,6 +195,22 @@ export function installedService(state: string, home?: string, env?: NodeJS.Proc
 export function startService(kind: ServiceKind, runner: Runner = runCommand): void {
   if (kind === "launchd") must(runner, "launchctl", ["kickstart", `${launchdDomain()}/${SERVICE_LABEL}`]);
   else must(runner, "systemctl", ["--user", "start", SERVICE_UNIT]);
+}
+
+/**
+ * Whether the installed daemon has already failed since it was started: systemd shows it failed, or
+ * waiting to restart after a failure. Undefined where the service manager cannot tell.
+ */
+export function serviceFailed(kind: ServiceKind, runner: Runner = runCommand): boolean | undefined {
+  if (kind !== "systemd") return undefined;
+  const result = runner("systemctl", ["--user", "show", SERVICE_UNIT, "--property=ActiveState,SubState"]);
+  if (result.code !== 0) return undefined;
+  return /^ActiveState=failed$/m.test(result.output) || /^SubState=auto-restart$/m.test(result.output);
+}
+
+/** Where to read the installed daemon's output. */
+export function serviceLog(kind: ServiceKind, state: string): string {
+  return kind === "launchd" ? path.join(path.dirname(state), "service.log") : "journalctl --user -u cns";
 }
 
 /** Whether systemd keeps this user's services running without a login session. */
