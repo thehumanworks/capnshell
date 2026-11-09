@@ -21,7 +21,7 @@ A run is clean when it completes the task with no refused call.
 | Variant | single | several | stale | unnamed |
 |---|---|---|---|---|
 | Before (IDs first everywhere) | 1/11 | 3/11 | 0/9 | 8/8 |
-| Shipped: argument, instructions, errors and `list_peers` | 11/11 | 11/11 | 9/9 | 8/8 |
+| Shipped: argument, instructions, errors and `list_peers` | 17/17 | 17/17 | 9/9 | 8/8 |
 | Ablation: `list_peers` changes only | 5/6 | 6/6 | 6/6 | — |
 | Ablation: argument, instructions and errors only | 6/6 | 6/6 | 6/6 | — |
 
