@@ -24,3 +24,10 @@ test("deny entries do not make a directory shared", () => {
 test("the icacls /save file's name line comes before the DACL", () => {
   expect(sddlOthers(`.cns\r\nD:PAI(A;OICI;FA;;;${user})(A;OICI;FA;;;AU)\r\n`, user)).toEqual(["AU"]);
 });
+
+test("the local Administrator account, which SDDL writes as LA, is the user when the user is that account", () => {
+  const administrator = "S-1-5-21-1-2-3-500";
+  expect(sddlOthers("D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;LA)", administrator)).toEqual([]);
+  expect(sddlOthers("D:PAI(A;OICI;FA;;;LA)", user)).toEqual(["LA"]);
+  expect(sddlOthers("D:PAI(A;OICI;FA;;;LG)", user)).toEqual(["LG"]);
+});

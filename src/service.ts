@@ -34,10 +34,11 @@ export function serviceKind(platform: NodeJS.Platform = process.platform): Servi
   return undefined;
 }
 
+/** launchd and systemd run on macOS and Linux, so their paths are POSIX ones on every platform. */
 export function servicePath(kind: ServiceKind, home = os.homedir(), env: NodeJS.ProcessEnv = process.env): string {
-  if (kind === "launchd") return path.join(home, "Library", "LaunchAgents", `${SERVICE_LABEL}.plist`);
-  const config = env.XDG_CONFIG_HOME && path.isAbsolute(env.XDG_CONFIG_HOME) ? env.XDG_CONFIG_HOME : path.join(home, ".config");
-  return path.join(config, "systemd", "user", SERVICE_UNIT);
+  if (kind === "launchd") return path.posix.join(home, "Library", "LaunchAgents", `${SERVICE_LABEL}.plist`);
+  const config = env.XDG_CONFIG_HOME && path.posix.isAbsolute(env.XDG_CONFIG_HOME) ? env.XDG_CONFIG_HOME : path.posix.join(home, ".config");
+  return path.posix.join(config, "systemd", "user", SERVICE_UNIT);
 }
 
 /** The variables a daemon started from a login shell would have, which launchd and systemd do not pass on. */

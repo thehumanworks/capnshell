@@ -61,11 +61,20 @@ export function sddlOthers(sddl: string, user: string): string[] {
   for (const [, ace] of dacl[2]!.matchAll(/\(([^)]*)\)/g)) {
     const [type = "", flags = "", , , , trustee = ""] = ace!.split(";");
     if (type === "D" || type === "OD" || type === "XD") continue;
-    if (trustee === user || WINDOWS_TRUSTED.has(trustee)) continue;
+    if (trustee === user || WINDOWS_TRUSTED.has(trustee) || accountAlias(trustee, user) === user) continue;
     if ((trustee === "CO" || trustee === "S-1-3-0") && flags.includes("IO")) continue;
     others.add(trustee);
   }
   return [...others];
+}
+
+/**
+ * SDDL writes the local Administrator and Guest accounts as LA and LG rather than their SIDs, the
+ * machine's SID followed by 500 or 501. Resolved against `user`'s machine; other trustees are kept.
+ */
+function accountAlias(trustee: string, user: string): string {
+  const rid = trustee === "LA" ? "500" : trustee === "LG" ? "501" : undefined;
+  return rid ? `${user.slice(0, user.lastIndexOf("-"))}-${rid}` : trustee;
 }
 
 function windowsSddl(target: string): string {
