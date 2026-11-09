@@ -11,3 +11,4 @@ result-*
 .wrangler
 relay-token
 .dev.vars
+evals/*/results/

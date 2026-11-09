@@ -26,10 +26,10 @@ const instructions = `cns runs commands and terminal programs on other machines 
 - For interactive programs, REPLs, TUIs, servers and watchers, use a named session: start_session, then send_keys and read_screen, then kill_session. Sessions keep running between calls until killed, and other clients of the same peer can see them.
 - To wait for a program, pass until to read_screen or send_keys rather than sleeping.
 - For files on a peer, use read_file, write_file, list_directory and glob rather than cat, echo or ls through run_command. Paths are in the peer's own syntax; relative ones start from the default working directory.
-- When several peers are connected, pass peer to choose one.`;
+- Name a peer by the name list_peers gives it. A paired device keeps its name, but its ID (such as p4) changes whenever it reconnects, so pass an ID only for a peer that has no name. When several peers are connected, pass peer to choose one.`;
 
 const peer = z.string().min(1).max(64).optional()
-  .describe("Peer ID from list_peers, or a paired device's name. May be omitted when only one peer is connected.");
+  .describe("The peer's name from list_peers, such as studio. Pass its ID only when it has no name: a paired device's ID changes whenever it reconnects. May be omitted when only one peer is connected.");
 const name = sessionNameSchema.describe("Session name: 1-64 letters, digits, '.', '_' or '-'.");
 const cwd = z.string().min(1).max(4096).optional()
   .describe("Absolute working directory on the peer, in its own path syntax. Defaults to the peer user's home directory.");
@@ -75,8 +75,8 @@ const viewSchema = {
 };
 
 const peerSchema = z.object({
-  id: z.string(),
-  name: z.string().optional().describe("For a device paired with this one: its saved name, which `peer` also accepts."),
+  id: z.string().describe("The peer's ID for now: it changes whenever the peer reconnects. Pass name as `peer` instead when there is one."),
+  name: z.string().optional().describe("For a device paired with this one: its saved name, which stays the same across reconnects. Pass it as `peer`."),
   fingerprint: z.string().optional().describe("For a paired device: its identity's fingerprint."),
   hostname: z.string(),
   platform: z.string().describe("Node.js platform name, such as linux, darwin or win32."),
@@ -449,7 +449,8 @@ export function createMcpServer(target: McpTarget, options: McpServerOptions = {
 
   server.registerTool("list_peers", {
     title: "List peers",
-    description: "List the peers this server reaches, with their ID, hostname, operating system, shell and home directory.",
+    description: "List the peers this server reaches, with each one's name (for a paired device), ID, hostname, operating system, shell and home directory. " +
+      "Other tools take the name as `peer`; a peer's ID changes whenever it reconnects, so use the ID only for a peer without a name.",
     inputSchema: z.strictObject({}),
     outputSchema: z.object({ peers: z.array(peerSchema) }),
     annotations: observing,
@@ -459,7 +460,7 @@ export function createMcpServer(target: McpTarget, options: McpServerOptions = {
       ...peer ? { name: peer.name, fingerprint: peer.fingerprint } : {},
     }));
     const text = peers.length
-      ? peers.map((p) => `${p.id}${p.name ? ` (${p.name}, paired)` : ""}  ${p.hostname}  ${p.os}  ${p.shell}  home: ${p.home}`).join("\n")
+      ? peers.map((p) => `${p.name ? `${p.name} (paired; ID ${p.id} until it reconnects)` : p.id}  ${p.hostname}  ${p.os}  ${p.shell}  home: ${p.home}`).join("\n")
       : "No peers are connected.";
     return { text, structured: { peers } };
   }));
