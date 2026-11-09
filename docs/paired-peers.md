@@ -160,7 +160,7 @@ The plan first kept the unauthenticated mode beside paired devices. Once the rel
 | Named sessions, `keys`, `screen`, `kill`, `tty --attach` | Unchanged semantics, on a paired device; handles follow PR 19. |
 | Daemon control (`attach`, `stop`, `~/.cns/daemon.json`) | Same daemon; `up` is its only front door. |
 | Older `cns` on one side | Refused at the handshake, with a message saying so. |
-| Windows | Identities and paired devices wait for filesystem ACL checks, so Windows cannot pair until they land; it previously worked only through the legacy mode. |
+| Windows | Identities and paired devices are kept in `~/.cns`, whose ACL must allow only the user, SYSTEM and Administrators (checked with `icacls /save` by SID). |
 
 ## 10. Slices
 

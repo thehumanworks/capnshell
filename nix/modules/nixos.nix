@@ -88,7 +88,7 @@ in
         User = cfg.user;
         # The daemon needs this device's identity; `cns identity` creates it on first use.
         ExecStartPre = "${exe} identity";
-        ExecStart = utils.escapeSystemdExecArgs [ exe "listen" "--no-repl" "--paired" "--service" "--state" stateFile "--bind" cfg.bind "--port" (toString cfg.port) ];
+        ExecStart = utils.escapeSystemdExecArgs [ exe "daemon" "--service" "--state" stateFile "--bind" cfg.bind "--port" (toString cfg.port) ];
         Restart = "on-failure";
         RestartSec = 5;
       };

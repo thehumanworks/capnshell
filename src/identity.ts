@@ -2,7 +2,7 @@ import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, sig
 import { closeSync, constants, fstatSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
-import { checkConfigDirectory, configDirectory, isPrivateFile, requirePrivateStateSupport } from "./config.js";
+import { checkConfigDirectory, configDirectory, isPrivateFile } from "./config.js";
 
 /**
  * A device's identity: a long-lived Ed25519 key pair in the configuration
@@ -88,7 +88,6 @@ export function generateIdentity(): Identity {
 
 /** This device's identity, if the file exists. The file must be private and consistent. */
 export function loadIdentity(): Identity | undefined {
-  requirePrivateStateSupport("Device identities");
   const file = identityPath();
   let fd: number;
   try { checkConfigDirectory(); fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)); }
@@ -104,7 +103,6 @@ export function loadIdentity(): Identity | undefined {
 
 /** This device's identity, created on first use. Returns whether it was created now. */
 export function ensureIdentity(): { identity: Identity; created: boolean } {
-  requirePrivateStateSupport("Device identities");
   const existing = loadIdentity();
   if (existing) return { identity: existing, created: false };
   checkConfigDirectory(true);

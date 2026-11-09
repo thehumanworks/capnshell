@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { installService, installedService, launchdPlist, serviceEnvironment, serviceFile, servicePath, systemdUnit, uninstallService, type Runner, type ServiceSpec } from "./service.js";
+import { installService, installedService, launchdPlist, serviceEnvironment, serviceFailed, serviceFile, servicePath, systemdUnit, uninstallService, type Runner, type ServiceSpec } from "./service.js";
 import { launchCli, unusedPort } from "./test-support.js";
 
 const spec: ServiceSpec = {
@@ -151,4 +151,23 @@ test("cns up --install runs the daemon from the unit; cns up starts it again aft
   assert.match(removed.stdout, /^Removed the systemd user service; the daemon is stopped\./);
   assert.match((await cli(["status", "--state", state])).stdout, /Daemon:\s+not running/);
   assert.match((await cli(["up", "--uninstall", "--state", state])).stdout, /^No systemd user service is installed\./);
+});
+
+test("the Nix modules run the daemon command that cns up --install writes", async () => {
+  // A command cns no longer has makes the service fail at every start, and cns up then waits for it until it times out.
+  for (const module of ["home-manager.nix", "nixos.nix"]) {
+    const source = await readFile(path.join(import.meta.dir, "..", "nix", "modules", module), "utf8");
+    const words = /\[\s*(?:exe\s+)?((?:"[^"]*"\s+)+)"--state"/.exec(source)?.[1]?.match(/"[^"]*"/g)?.map((word) => JSON.parse(word));
+    assert.deepEqual(words, ["daemon", "--service"], module);
+  }
+});
+
+test("a systemd service that failed, or waits to restart after failing, is reported failed", () => {
+  const shows = (output: string): Runner => () => ({ code: 0, output });
+  assert.equal(serviceFailed("systemd", shows("ActiveState=activating\nSubState=auto-restart")), true);
+  assert.equal(serviceFailed("systemd", shows("ActiveState=failed\nSubState=failed")), true);
+  assert.equal(serviceFailed("systemd", shows("ActiveState=activating\nSubState=start-pre")), false);
+  assert.equal(serviceFailed("systemd", shows("ActiveState=active\nSubState=running")), false);
+  assert.equal(serviceFailed("systemd", () => ({ code: 1, output: "Failed to connect to bus" })), undefined);
+  assert.equal(serviceFailed("launchd", shows("")), undefined);
 });

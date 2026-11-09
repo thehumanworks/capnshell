@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
+import { execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -51,7 +52,31 @@ test.skipIf(process.platform === "win32")("unsafe or inconsistent identity files
   chmodSync(dir, 0o700);
 });
 
-test.skipIf(process.platform !== "win32")("identities fail closed on Windows", () => {
-  expect(() => ensureIdentity()).toThrow("not available on Windows");
-  expect(() => loadIdentity()).toThrow("not available on Windows");
+test.skipIf(process.platform !== "win32")("on Windows, an identity is created in a private directory and loads back", () => {
+  const first = ensureIdentity();
+  expect(first.created).toBe(true);
+  expect(loadIdentity()?.publicKey).toBe(first.identity.publicKey);
+  expect(ensureIdentity().created).toBe(false);
+});
+
+test.skipIf(process.platform !== "win32")("on Windows, a directory that other users can read is refused", () => {
+  // Grant Users (S-1-5-32-545) read access, as a shared folder might.
+  execFileSync("icacls.exe", [dir, "/grant", "*S-1-5-32-545:(OI)(CI)R"]);
+  expect(() => ensureIdentity()).toThrow("must be private");
+});
+
+test.skipIf(process.platform !== "win32")("on Windows, the default directory is created with a private ACL", () => {
+  const home = mkdtempSync(path.join(os.tmpdir(), "cns-home-"));
+  // Even under a parent that Users can read, the new directory keeps only its own entries.
+  execFileSync("icacls.exe", [home, "/grant", "*S-1-5-32-545:(OI)(CI)R"]);
+  const previousHome = process.env.USERPROFILE;
+  delete process.env.CNS_CONFIG_DIR;
+  process.env.USERPROFILE = home;
+  try {
+    expect(ensureIdentity().created).toBe(true);
+    expect(loadIdentity()).toBeDefined();
+  } finally {
+    process.env.USERPROFILE = previousHome;
+    rmSync(home, { recursive: true, force: true });
+  }
 });
