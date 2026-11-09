@@ -43,6 +43,17 @@ test("the service keeps the login environment the daemon's shells need, and noth
     { PATH: "/a:/b", SHELL: "/bin/zsh", LANG: "en_US.UTF-8", CNS_CONFIG_DIR: "/c" });
 });
 
+test("installed services preserve CA paths without inheriting secrets or TLS bypasses", () => {
+  const trust = { NODE_EXTRA_CA_CERTS: "/etc/company/root.pem", SSL_CERT_FILE: "/etc/ssl/ca-bundle.crt", SSL_CERT_DIR: "/etc/ssl/certs" };
+  const env = serviceEnvironment({ ...trust, SECRET: "do-not-copy", NODE_TLS_REJECT_UNAUTHORIZED: "0", SSLKEYLOGFILE: "/tmp/keys" });
+  assert.deepEqual(env, trust);
+  for (const contents of [systemdUnit({ ...spec, env }), launchdPlist({ ...spec, env })]) {
+    for (const [name, value] of Object.entries(trust)) { assert.ok(contents.includes(name)); assert.ok(contents.includes(value)); }
+    assert.doesNotMatch(contents, /SECRET|do-not-copy|NODE_TLS_REJECT_UNAUTHORIZED|SSLKEYLOGFILE/);
+  }
+  assert.deepEqual(serviceEnvironment({ NODE_EXTRA_CA_CERTS: "", SSL_CERT_FILE: "", SSL_CERT_DIR: "" }), {});
+});
+
 test("service files live where launchd and systemd look for per-user services", () => {
   assert.equal(servicePath("launchd", "/Users/a"), "/Users/a/Library/LaunchAgents/com.thehumanworks.cns.plist");
   assert.equal(servicePath("systemd", "/home/a", {}), "/home/a/.config/systemd/user/cns.service");

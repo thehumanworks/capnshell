@@ -512,12 +512,13 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
    */
   function registerAtRelay(base: string) {
     let attempt = 0;
+    let lastFailure = "";
     const register_ = async () => {
       if (stopping) return;
       const url = relayEndpoint(base, "accept", identity.publicKey);
       let socket: WebSocket;
       try { socket = await openSocket(url, cancelled.signal); }
-      catch { return retry(); }
+      catch (error) { return retry(printable(errorMessage(error))); }
       const host = new URL(url).host;
       let lastHeard = Date.now();
       let readyAt = 0;
@@ -540,6 +541,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
         } else if (message.t === "ready" && !readyAt) {
           readyAt = Date.now();
           relayRegistered = true;
+          lastFailure = "";
           announce(`Registered at the relay ${host}; devices that cannot reach this one directly can reach it there.`);
         } else if (message.t === "incoming" && typeof message.id === "string" && /^[A-Za-z0-9_-]{22}$/.test(message.id) && readyAt) {
           if (relayAnswers.has(message.id)) return;
@@ -555,11 +557,17 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
         if (relayRegistered && !stopping) announce(`Left the relay ${host}${event.reason ? `: ${printable(event.reason)}` : ""}; registering again.`);
         relayRegistered = false;
         if (readyAt && Date.now() - readyAt >= RELAY_STABLE_MS) attempt = 0;
-        retry();
+        retry(readyAt ? undefined : `Connection closed before registration (${event.code})${event.reason ? `: ${printable(event.reason)}` : ""}`);
       }, { once: true });
     };
-    const retry = () => {
+    const retry = (failure?: string) => {
       if (stopping) return;
+      // Report the first failure and any changed reason, not the same outage on
+      // every backoff tick. A successful registration resets this suppression.
+      if (failure && failure !== lastFailure) {
+        lastFailure = failure;
+        announce(`Cannot register at the relay ${new URL(base).host}: ${failure} Retrying automatically.`);
+      }
       const timer = setTimeout(() => void register_(), Math.min(REDIAL_MAX_MS, REDIAL_MIN_MS * 2 ** Math.min(attempt++, 5)));
       timer.unref?.();
     };

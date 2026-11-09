@@ -17,7 +17,12 @@ let
     "/run/current-system/sw/bin"
     "/nix/var/nix/profiles/default/bin"
   ] ++ lib.optionals isDarwin [ "/opt/homebrew/bin" ] ++ [ "/usr/local/bin" "/usr/bin" "/bin" "/usr/sbin" "/sbin" ]);
-  environment = { PATH = defaultPath; } // cfg.environment;
+  # A service does not read hm-session-vars.sh. Preserve explicitly declared CA
+  # paths so TLS interception/private roots work just as they do in the user's shell.
+  trustEnvironment = lib.filterAttrs
+    (name: value: builtins.elem name [ "NODE_EXTRA_CA_CERTS" "SSL_CERT_FILE" "SSL_CERT_DIR" ] && value != "")
+    config.home.sessionVariables;
+  environment = { PATH = defaultPath; } // trustEnvironment // cfg.environment;
   # The same quoting as src/service.ts, which `cns up` matches the state file against.
   quote = value: ''"${lib.replaceStrings [ "\\" "\"" "%" "$" ] [ "\\\\" "\\\"" "%%" "$$" ] value}"'';
 in
@@ -52,9 +57,10 @@ in
       example = { CNS_CONFIG_DIR = "/home/me/.config/cns"; };
       description = ''
         Environment for the daemon, added to a PATH of the usual Nix profile
-        directories (set PATH here to replace it). Commands that paired devices
-        run inherit it. Use `cns config relay` for a relay, not this: values
-        here are readable in the Nix store.
+        directories (set PATH here to replace it). NODE_EXTRA_CA_CERTS, SSL_CERT_FILE
+        and SSL_CERT_DIR are inherited from home.sessionVariables when set; values
+        here override them. Commands that paired devices run inherit it. Do not put
+        secrets here: values are readable in the Nix store.
       '';
     };
   };

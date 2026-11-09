@@ -1,7 +1,7 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { serve } from "bun";
+import Bun from "bun";
 import { newBunWebSocketRpcSession, RpcTarget, type BunWebSocketTransport } from "capnweb";
 import type { ConnectionController, PeerController } from "../console.js";
 import type { Decision, Proposal } from "../pairing.js";
@@ -136,8 +136,8 @@ export async function serveControl(controller: PeerController, stop: () => void,
   const file = daemonStatePath(statePath);
   await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
   const authorization = Buffer.from(`Bearer ${token}`);
-  const server = serve<SocketData>({
-    hostname: "127.0.0.1",
+  const listen = (hostname: "::1" | "127.0.0.1") => Bun.serve<SocketData>({
+    hostname,
     port: 0,
     fetch(request, server) {
       const supplied = Buffer.from(request.headers.get("Authorization") ?? "");
@@ -157,7 +157,18 @@ export async function serveControl(controller: PeerController, stop: () => void,
       close(ws, code, reason) { ws.data.transport?.dispatchClose(code, reason); },
     },
   });
-  const state = stateSchema.parse({ version: 1, pid: process.pid, port: server.port, token });
+  // WSL mirrored networking can route IPv4 localhost through a broken host path
+  // while IPv6 loopback still works. Prefer IPv6, without requiring it on hosts
+  // where it is disabled. Do not hide unrelated listener failures.
+  let host: "::1" | "127.0.0.1" = "::1";
+  let server: ReturnType<typeof listen>;
+  try { server = listen(host); }
+  catch (error) {
+    if (!(error instanceof Error && "code" in error && ["EAFNOSUPPORT", "EPROTONOSUPPORT", "EADDRNOTAVAIL"].includes(String(error.code)))) throw error;
+    host = "127.0.0.1";
+    server = listen(host);
+  }
+  const state = stateSchema.parse({ version: 2, pid: process.pid, host, port: server.port, token });
   try {
     // Exclusive creation also arbitrates concurrent starts. Never replace another daemon's state.
     await writeFile(file, JSON.stringify(state) + "\n", { flag: "wx", mode: 0o600 });

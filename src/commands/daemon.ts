@@ -39,12 +39,18 @@ export interface DaemonStatus extends ListenerInfo {
   relayRegistered?: boolean;
 }
 
-export const stateSchema = z.strictObject({
+const legacyStateSchema = z.strictObject({
   version: z.literal(1),
   pid: z.int().positive(),
   port: z.int().min(1).max(65535),
   token: z.string().regex(/^[a-f0-9]{64}$/),
 });
+// Old daemons always bound IPv4. New state records the literal loopback address;
+// never accept an arbitrary host that could receive the local control token.
+export const stateSchema = z.discriminatedUnion("version", [
+  legacyStateSchema,
+  legacyStateSchema.extend({ version: z.literal(2), host: z.enum(["::1", "127.0.0.1"]) }),
+]);
 type DaemonState = z.infer<typeof stateSchema>;
 
 export function daemonStatePath(value?: string): string {
@@ -192,7 +198,8 @@ export interface ControlConnection {
 }
 
 async function connectToState(state: DaemonState): Promise<ControlConnection> {
-  const socket = new WebSocket(`ws://127.0.0.1:${state.port}`, { headers: { Authorization: `Bearer ${state.token}` } });
+  const host = state.version === 1 ? "127.0.0.1" : state.host;
+  const socket = new WebSocket(`ws://${host === "::1" ? "[::1]" : host}:${state.port}`, { headers: { Authorization: `Bearer ${state.token}` } });
   try {
     await new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => finish(new Error("Local daemon connection timed out.")), 5000);

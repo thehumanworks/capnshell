@@ -1,4 +1,5 @@
 import type { RpcStub } from "capnweb";
+import { printable } from "./errors.js";
 import { CLIENT_HEADER, clientProof, isRelayRequest } from "./relay-hub.js";
 import type { ShellApi } from "./shell.js";
 
@@ -22,7 +23,11 @@ export async function openSocket(url: string, signal: AbortSignal): Promise<WebS
       cleanup();
       resolve(socket);
     };
-    const onError = () => fail(new Error(`Cannot connect to ${url}. Check that the listener is running and reachable.`));
+    const onError = (event: Event) => {
+      const cause: unknown = "error" in event ? event.error : undefined;
+      const detail = cause instanceof Error ? cause.message : "message" in event && typeof event.message === "string" ? event.message : "";
+      fail(new Error(`Cannot connect to ${url}.${detail ? ` ${printable(detail).slice(0, 1024)}` : " Check that the listener is running and reachable."}`, { cause }));
+    };
     const onAbort = () => fail(signal.reason);
     function cleanup() {
       clearTimeout(timer);

@@ -57,7 +57,8 @@ in
       default = { };
       description = ''
         Extra environment for the daemon and the commands paired devices run.
-        Use `cns config relay` for a relay, not this: values here are readable
+        NODE_EXTRA_CA_CERTS and SSL_CERT_FILE default to security.pki.caBundle;
+        values here override them. Do not put secrets here: values are readable
         in the Nix store.
       '';
     };
@@ -73,7 +74,11 @@ in
       wants = [ "network-online.target" ];
       after = [ "network-online.target" ];
       startLimitIntervalSec = 0;
-      environment = cfg.environment // {
+      environment = {
+        # Bun's built-in roots alone do not include security.pki.certificateFiles.
+        NODE_EXTRA_CA_CERTS = config.security.pki.caBundle;
+        SSL_CERT_FILE = config.security.pki.caBundle;
+      } // cfg.environment // {
         # Commands paired devices run get the daemon's PATH, not a login shell's.
         PATH = lib.mkForce (lib.concatStringsSep ":" (map (p: "${p}/bin") cfg.path ++ [
           "/run/wrappers/bin"

@@ -44,7 +44,10 @@ export function servicePath(kind: ServiceKind, home = os.homedir(), env: NodeJS.
 /** The variables a daemon started from a login shell would have, which launchd and systemd do not pass on. */
 export function serviceEnvironment(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const kept: Record<string, string> = {};
-  for (const name of ["PATH", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "CNS_CONFIG_DIR", "CNS_RELAY"]) {
+  // CA paths are trust configuration, not credentials. Without them a service can
+  // fail to reach the relay even though the same binary works in the login shell.
+  // Never inherit TLS-verification bypasses or the rest of the shell's environment.
+  for (const name of ["PATH", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "CNS_CONFIG_DIR", "CNS_RELAY", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR"]) {
     const value = env[name];
     if (value) kept[name] = value;
   }

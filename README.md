@@ -307,6 +307,10 @@ cns stop
 
 `cns up` starts the daemon as a detached process; `cns up --install` makes it a service that starts at login and restarts if it fails. Its private local state defaults to `~/.cns/daemon.json`. To run separate daemons, use different ports and pass the same custom `--state PATH` to `up`, `attach` and `stop`. Startup prints the log location. The state file allows one daemon per path: `cns up` reports the daemon already running. If a daemon crashed, the next `cns up` removes its state once the control endpoint does not answer and its process no longer exists.
 
+The private control endpoint uses IPv6 loopback (`::1`) when available, falling back to `127.0.0.1` when IPv6 cannot be bound. Its address and random port are recorded in version-2 daemon state; clients also read older version-1 state, which always means IPv4. `--bind` and `--port` configure the paired-device listener, not this control endpoint. Upgrade local clients (including the Pi extension) and restart the daemon together: older clients cannot read version-2 state. Pairings and the device identity are unchanged.
+
+If `cns up` reports **Local daemon connection timed out** while the daemon is running, check local networking before deleting any state. WSL mirrored networking can leave IPv4 localhost connections timing out even when a process is listening, while IPv6 loopback still works. Installing the updated CLI alone does not move an already-running IPv4 daemon: update the service's executable and restart it through its service manager (`systemctl --user restart cns` for a systemd user service). If it was installed with `cns up --install`, install it again from the updated executable; for a Nix-managed service, update its package through Nix instead. Restarting ends the daemon's sessions. See [ADR 0003](docs/adr/0003-local-control-loopback.md) for the diagnosis, compatibility rules and regression checks.
+
 Detaching with `:quit` or Ctrl+C leaves the daemon, its links and pending commands running. `stop` shuts down the daemon and cleans up its sessions.
 
 ## MCP server
@@ -430,9 +434,21 @@ imports = [ inputs.capnshell.nixosModules.default ];
 services.cns = { enable = true; user = "alice"; };
 ```
 
-Both modules install `cns` and take `bind`, `port`, `stateFile` and `environment` like `cns up --install`; the NixOS one also takes `openFirewall` and `path`. They create the device's identity on first start; pair as usual with `cns pair`. Commands paired devices run get the service's `PATH`, which lists the user's Nix profiles and the system's packages, not a login shell's. Set a relay with `cns config relay`, which the service reads when it starts, rather than in `environment`, which ends up readable in the Nix store. The Home Manager service has the name and state file `cns up --install` uses, so `cns up` starts it after `cns stop`, and Home Manager keeps it at the current package's path across upgrades; don't also run `cns up --install`. The NixOS service is managed with `systemctl` (`systemctl restart cns`, `journalctl -u cns`): `cns stop` stops it until it restarts, and `cns up` would then start a second daemon outside it.
+Both modules install `cns` and take `bind`, `port`, `stateFile` and `environment` like `cns up --install`; the NixOS one also takes `openFirewall` and `path`. They create the device's identity on first start; pair as usual with `cns pair`. Commands paired devices run get the service's `PATH`, which lists the user's Nix profiles and the system's packages, not a login shell's. The built-in relay requires no configuration. Do not put secrets in `environment`, which ends up readable in the Nix store. The Home Manager service has the name and state file `cns up --install` uses, so `cns up` starts it after `cns stop`, and Home Manager keeps it at the current package's path across upgrades; don't also run `cns up --install`. The NixOS service is managed with `systemctl` (`systemctl restart cns`, `journalctl -u cns`): `cns stop` stops it until it restarts, and `cns up` would then start a second daemon outside it.
 
 The default package/app is also available as `cns` (and the legacy flake attribute `capnweb-shell`). The package contains the executable with an absolute Nix-provided Bash path; it does not require or install a source checkout. Distribute Nix builds through Nix because their runtime libraries may reference the Nix store.
+
+### Relay TLS trust in services
+
+If direct connections cannot reach a device, pairing and commands automatically try its relay. The target daemon must first register there: `cns status` should say `Relay: ... (registered)`. Merely listing a relay address in an invite does not prove registration succeeded.
+
+A service can fail to register even when the same executable works in a terminal: systemd and launchd do not read the login shell's environment. This matters on networks that use a private CA or TLS inspection. Check `journalctl --user -u cns` (NixOS system service: `journalctl -u cns`; macOS: `~/.cns/service.log`). Registration failures now include the underlying TLS/network error; identical errors are suppressed until the reason changes or registration succeeds. `unable to get local issuer certificate` means the runtime could not verify the certificate chain—not that direct-address fallback needs disabling.
+
+- `cns up --install` preserves `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE` and `SSL_CERT_DIR` when set. Reinstall from the updated executable to apply this to an existing service.
+- The **NixOS module** defaults `NODE_EXTRA_CA_CERTS` and `SSL_CERT_FILE` to `security.pki.caBundle`, including configured system roots.
+- The **Home Manager module** copies those three CA variables from `home.sessionVariables` when declared. `services.cns.environment` overrides them; for example, `services.cns.environment.NODE_EXTRA_CA_CERTS = "/etc/ssl/certs/ca-certificates.crt";` uses an existing Linux system bundle for this service only.
+
+Use an existing trusted CA bundle, keep certificate verification enabled, and scope any extra configuration to cns. Do not set `NODE_TLS_REJECT_UNAUTHORIZED=0`. After updating and restarting the service, wait for `registered`, then generate a **fresh** `cns pair` invite: a restart invalidates outstanding invites. [The relay verification report](docs/verification/2026-11-09-relay-trust.md) records the reproduced failure and end-to-end tests.
 
 ### Releases
 

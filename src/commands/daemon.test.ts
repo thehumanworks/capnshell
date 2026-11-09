@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spyOn } from "bun:test";
+import bun from "bun";
 import { once } from "node:events";
 import * as fs from "node:fs/promises";
 import { chmod, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
@@ -10,9 +11,10 @@ import test, { type TestContext } from "node:test";
 import { spawn } from "node:child_process";
 import { RpcTarget } from "capnweb";
 import { ShellApi, type ExecSink, type PtyExit } from "../shell.js";
-import { cliInvocation, launchCli as launch, settledLink, testDevices } from "../test-support.js";
+import { cliInvocation, launchCli as launch, LOOPBACK, settledLink, testDevices } from "../test-support.js";
 import { plain } from "../terminal.js";
-import { connectControl, removeStaleState, startDaemon } from "./daemon.js";
+import type { PeerController } from "../console.js";
+import { connectControl, removeStaleState, startDaemon, stateSchema } from "./daemon.js";
 import { serveControl } from "./daemon-server.js";
 
 async function temporaryState(t: TestContext): Promise<string> {
@@ -61,6 +63,71 @@ async function unusedPort(): Promise<string> {
   await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   return String(address.port);
 }
+
+const emptyController: PeerController = {
+  async peers() { return []; },
+  async info() { throw new Error("unused"); },
+  async run() { throw new Error("unused"); },
+  async openPty() { throw new Error("unused"); },
+  async ptySessions() { throw new Error("unused"); },
+  async startPtySession() { throw new Error("unused"); },
+  async ptySession() { throw new Error("unused"); },
+  async shell() { throw new Error("unused"); },
+};
+
+test("daemon state accepts legacy IPv4 and explicit loopback only", () => {
+  const legacy = { version: 1, pid: process.pid, port: 12345, token: "a".repeat(64) };
+  assert.deepEqual(stateSchema.parse(legacy), legacy);
+  for (const host of ["::1", "127.0.0.1"]) {
+    const state = { ...legacy, version: 2, host };
+    assert.deepEqual(stateSchema.parse(state), state);
+  }
+  for (const host of [undefined, "localhost", "0.0.0.0", "::", "[::1]", "192.0.2.1", "example.invalid", "::ffff:127.0.0.1"]) {
+    assert.equal(stateSchema.safeParse({ ...legacy, version: 2, host }).success, false, String(host));
+  }
+  assert.equal(stateSchema.safeParse({ ...legacy, host: "::1" }).success, false);
+  assert.equal(stateSchema.safeParse({ ...legacy, version: 3 }).success, false);
+});
+
+for (const code of ["EAFNOSUPPORT", "EPROTONOSUPPORT", "EADDRNOTAVAIL"]) {
+  test(`daemon control falls back to IPv4 on ${code} and reads legacy state`, async (t) => {
+    const statePath = await temporaryState(t);
+    const originalServe = bun.serve;
+    const hosts: unknown[] = [];
+    const spy = spyOn(bun, "serve").mockImplementation(((options: Parameters<typeof bun.serve>[0]) => {
+      hosts.push(options.hostname);
+      if (options.hostname === "::1") throw Object.assign(new Error("IPv6 unavailable"), { code });
+      return originalServe(options);
+    }) as typeof bun.serve);
+    try {
+      const cleanup = await serveControl(emptyController, () => {}, statePath);
+      t.after(cleanup);
+    } finally { spy.mockRestore(); }
+    assert.deepEqual(hosts, ["::1", "127.0.0.1"]);
+    const state = JSON.parse(await readFile(statePath, "utf8"));
+    assert.deepEqual([state.version, state.host], [2, "127.0.0.1"]);
+    const current = await connectControl(statePath);
+    try { assert.equal((await plain(current.remote.status())).pid, process.pid); }
+    finally { current.close(); }
+    // Pre-upgrade state has no host; it must still select IPv4, not the new default.
+    const { host: _host, ...legacy } = state;
+    await writeFile(statePath, JSON.stringify({ ...legacy, version: 1 }));
+    const old = await connectControl(statePath);
+    try { assert.equal((await plain(old.remote.status())).pid, process.pid); }
+    finally { old.close(); }
+  });
+}
+
+test("daemon control does not hide unrelated bind failures or write state", async (t) => {
+  const statePath = await temporaryState(t);
+  const failure = Object.assign(new Error("Too many files"), { code: "EMFILE" });
+  const spy = spyOn(bun, "serve").mockImplementation(() => { throw failure; });
+  try {
+    await assert.rejects(() => serveControl(emptyController, () => {}, statePath), (error) => error === failure);
+    assert.equal(spy.mock.calls.length, 1);
+    await assert.rejects(() => stat(statePath), { code: "ENOENT" });
+  } finally { spy.mockRestore(); }
+});
 
 test("daemon control rejects unsafe and malformed state files", async (t) => {
   const statePath = await temporaryState(t);
@@ -142,7 +209,8 @@ test("local control authenticates before upgrade and exclusively owns private st
   t.after(cleanup);
   const state = JSON.parse(await readFile(statePath, "utf8"));
   if (process.platform !== "win32") assert.equal((await stat(statePath)).mode & 0o777, 0o600);
-  const url = `http://127.0.0.1:${state.port}`;
+  assert.deepEqual([state.version, state.host], [2, LOOPBACK]);
+  const url = `http://${state.host === "::1" ? "[::1]" : state.host}:${state.port}`;
   assert.equal((await fetch(url)).status, 401);
   assert.equal((await fetch(url, { headers: { Authorization: "Bearer bad-token" } })).status, 401);
   assert.equal((await fetch(url, { headers: { Authorization: `Bearer ${state.token}`, Origin: "https://example.invalid" } })).status, 401);
@@ -175,6 +243,26 @@ test("control cleanup never removes another daemon's state", async (t) => {
   await writeFile(statePath, JSON.stringify(replacement));
   await cleanup();
   assert.equal(JSON.parse(await readFile(statePath, "utf8")).token, replacement.token);
+});
+
+test("cns up, status, attach and stop use local control independently of the peer bind", async (t) => {
+  const devices = await testDevices(t);
+  const studio = await devices.device("studio");
+  await devices.up(studio); // The peer listener remains on IPv4 even when control uses IPv6.
+  const state = JSON.parse(await readFile(studio.state, "utf8"));
+  assert.deepEqual([state.version, state.host], [2, LOOPBACK]);
+  const again = await devices.cli(studio, ["up", "--state", studio.state]);
+  assert.equal(again.code, 0, again.output);
+  assert.match(again.stdout, /Running as/);
+  assert.equal(JSON.parse(await readFile(studio.state, "utf8")).pid, state.pid);
+  const status = await devices.cli(studio, ["status", "--json", "--state", studio.state]);
+  assert.equal(status.code, 0, status.output);
+  assert.match(status.stdout, new RegExp(`"pid":\\s*${state.pid}`));
+  const attached = await devices.cli(studio, ["attach", "--state", studio.state], ":peers\n:quit\n");
+  assert.equal(attached.code, 0, attached.output);
+  const stopped = await devices.cli(studio, ["stop", "--state", studio.state]);
+  assert.equal(stopped.code, 0, stopped.output);
+  await assert.rejects(() => stat(studio.state), { code: "ENOENT" });
 });
 
 test("the daemon starts, proxies a linked device to attached consoles, survives detach, rejects a duplicate start and stops", { skip: process.platform === "win32", timeout: 60000 }, async (t) => {

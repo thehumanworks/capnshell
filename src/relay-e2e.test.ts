@@ -23,7 +23,8 @@ test("devices that cannot reach each other directly pair and link through the bu
   cleanups.push(async () => relay?.stop());
   // CNS_RELAY stands in for the relay built into cns, as it does for development.
   const relayBase = external ?? `ws://127.0.0.1:${relayPort}`;
-  const relayHost = new URL(relayBase).host.replace(/[.]/g, "\\.");
+  const relayUrl = new URL(relayBase);
+  const relayPrefix = (relayUrl.host + relayUrl.pathname.replace(/\/+$/, "")).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const device = async (name: string) => {
     const dir = path.join(root, name);
     await mkdir(dir, { mode: 0o700 });
@@ -58,11 +59,11 @@ test("devices that cannot reach each other directly pair and link through the bu
   const up = await cli(studio, ["up", "--bind", "127.0.0.1", "--port", port, "--state", studio.state]);
   assert.equal(up.code, 0, up.stderr);
   cleanups.push(() => cli(studio, ["stop", "--state", studio.state]));
-  assert.match(up.stdout, new RegExp(`Reachable at ws://127\\.0\\.0\\.1:${port}, wss?://${relayHost}/v1/dial/[A-Za-z0-9_-]{43}\\.\\nRelay: \\S+, regist`));
+  assert.match(up.stdout, new RegExp(`Reachable at ws://127\\.0\\.0\\.1:${port}, wss?://${relayPrefix}/v1/dial/[A-Za-z0-9_-]{43}\\.\\nRelay: \\S+, regist`));
   await eventually(async () => /Relay: +\S+ \(registered\)/.test((await cli(studio, ["status", "--state", studio.state])).stdout), "studio registers at the relay");
 
-  // The invite lists the direct address, then the relay. Laptop gets only the relay part, as if
-  // studio's network were out of reach, and pairs through it.
+  // Keep an unreachable direct address in the invite: pairing must fall back to
+  // the relay automatically, not require the person to edit it to relay-only.
   const inviting = launchCli(t, ["pair", "--yes", "--name", "laptop", "--grant", "all", "--state", studio.state], { env: studio.env });
   inviting.child.stdin.end();
   await inviting.waitFor("Invite: cns1:");
@@ -70,15 +71,16 @@ test("devices that cannot reach each other directly pair and link through the bu
   const body = JSON.parse(Buffer.from(text.slice(INVITE_PREFIX.length), "base64url").toString("utf8"));
   assert.deepEqual(body.addr.map(isRelayAddress), [false, true]);
   assert.ok(body.addr.every((address: string) => !new URL(address).search), "invites carry no query, token or otherwise");
-  const relayOnly = INVITE_PREFIX + Buffer.from(JSON.stringify({ ...body, addr: body.addr.filter(isRelayAddress) })).toString("base64url");
-  const paired = await cli(laptop, ["pair", relayOnly, "--yes", "--name", "studio", "--request", "all"]);
+  const unreachableDirect = "ws://127.0.0.1:1";
+  const fallbackInvite = INVITE_PREFIX + Buffer.from(JSON.stringify({ ...body, addr: [unreachableDirect, ...body.addr.filter(isRelayAddress)] })).toString("base64url");
+  const paired = await cli(laptop, ["pair", fallbackInvite, "--yes", "--name", "studio", "--request", "all"]);
   assert.equal(paired.code, 0, paired.stderr);
   assert.equal(await inviting.exited, 0, inviting.stderr);
 
   // Laptop's saved addresses: an unreachable direct one first, then the relay. Commands fall back to it.
   const file = path.join(laptop.dir, "peers", "studio");
   const record = JSON.parse(await readFile(file, "utf8"));
-  await writeFile(file, JSON.stringify({ ...record, addresses: ["ws://127.0.0.1:1", ...record.addresses] }), { mode: 0o600 });
+  assert.deepEqual(record.addresses, [unreachableDirect, ...body.addr.filter(isRelayAddress)]);
   const run = await cli(laptop, ["run", "studio", "--", "printf via-relay"]);
   assert.deepEqual([run.code, run.stdout], [0, "via-relay"], run.stderr);
   const doctor = await cli(laptop, ["doctor", "studio"]);
