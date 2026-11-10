@@ -15,6 +15,7 @@ import { cliEnvironment, cliInvocation, launchCli, settledLink, testDevices, unu
 import { LegacySessions, MAX_SESSIONS } from "./legacy-sessions.js";
 import { clip, createMcpServer, MAX_RESULT_CHARS, readLines } from "./server.js";
 import { daemonTarget, type McpTarget, type PeerFiles, type ToolController } from "./target.js";
+import { CNS_VERSION } from "../version.js";
 
 const posix = process.platform !== "win32";
 const print = (marker: string) => posix ? `printf '${marker}'` : `[Console]::Write('${marker}')`;
@@ -245,6 +246,8 @@ test("stdio MCP server runs commands on a paired device and reports failures as 
   assert.equal(peers.peers[0].id, "p1");
   assert.equal(peers.peers[0].name, "studio");
   assert.equal(peers.peers[0].shell, posix ? "Bash" : "PowerShell");
+  // Agents can see which cns a device runs.
+  assert.equal(peers.peers[0].version, CNS_VERSION);
   // The device's name selects it too.
   assert.equal(succeeded(await client.callTool({ name: "run_command", arguments: { command: print("BY_NAME"), peer: "studio" } })).stdout, "BY_NAME");
 
@@ -494,7 +497,10 @@ test("the daemon target chooses among linked devices and kills cancelled command
   assert.deepEqual(succeeded(await client.callTool({ name: "glob", arguments: { pattern: "**/*.txt", path: directory } })).paths, [noteFile]);
 
   await linked("second", "SECOND");
-  assert.equal(succeeded(await client.callTool({ name: "list_peers", arguments: {} })).peers.length, 2);
+  const both = succeeded(await client.callTool({ name: "list_peers", arguments: {} }));
+  assert.equal(both.peers.length, 2);
+  // Through the daemon too: the version survives the daemon's check of each device's handshake.
+  assert.deepEqual(both.peers.map((peer: { version?: string }) => peer.version), [CNS_VERSION, CNS_VERSION]);
   const ambiguous = await client.callTool({ name: "run_command", arguments: { command: print("x") } });
   assert.equal(ambiguous.isError, true);
   assert.match(text(ambiguous), /Several peers are connected \(first \(p\d+\), second \(p\d+\)\); pass peer/);

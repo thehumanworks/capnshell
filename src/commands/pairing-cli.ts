@@ -18,9 +18,10 @@ import { selfCheck, type SelfFacts } from "../self-check.js";
 import type { ShellApi } from "../shell.js";
 import type { RpcStub } from "capnweb";
 import { RefusingShell } from "../refusing-shell.js";
-import { connectControl, daemonStatePath, removeStaleState, startDaemon, stopDaemon, type ControlConnection } from "./daemon.js";
-import { selfInvocation } from "../runtime.js";
-import { describeService, installService, installedService, lingering, serviceEnvironment, serviceFailed, serviceFile, serviceKind, serviceLog, serviceName, startService, uninstallService, type ServiceKind } from "../service.js";
+import { connectControl, daemonStatePath, removeStaleState, startDaemon, stopDaemon, type ControlConnection, type DaemonStatus } from "./daemon.js";
+import { selfInvocation, selfPath } from "../runtime.js";
+import { CNS_VERSION, daemonDrift, describeVersion, reportedVersion, restartAdvice, versionOrder } from "../version.js";
+import { describeService, installService, installedService, installedServiceRuns, lingering, serviceEnvironment, serviceFailed, serviceFile, serviceKind, serviceLog, serviceName, startService, uninstallService, type ServiceKind } from "../service.js";
 
 /** How long the invited device waits for the inviting person to decide. */
 const PROPOSAL_WAIT_MS = 10 * 60 * 1000;
@@ -172,14 +173,37 @@ export async function up(options: UpOptions): Promise<void> {
     const status = await control.remote.status();
     const peers = await control.controller.peers();
     const service = installedService(daemonStatePath(options.state));
-    console.log(`${started ? "Started" : "Running"} as ${status.identity?.fingerprint} (pid ${status.pid}${service ? `, ${describeService(service.kind)}` : ""}), listening at ${status.url}.`);
+    const version = reportedVersion(status.version);
+    console.log(`${started ? "Started" : "Running"} as ${status.identity?.fingerprint} (${version ? `cns ${version}, ` : ""}pid ${status.pid}${service ? `, ${describeService(service.kind)}` : ""}), listening at ${status.url}.`);
     if (status.addresses?.length) console.log(`Reachable at ${status.addresses.join(", ")}.`);
     if (status.relay) console.log(`Relay: ${status.relay}${status.relayRegistered ? ", registered" : ", registering"}.`);
     const paired = listPeers();
     console.log(paired.length
       ? `Paired devices: ${paired.map((peer) => `${peer.name}${peers.some((connected) => connected.peer?.daemon && connected.peer.fingerprint === peer.fingerprint) ? " (online)" : ""}`).join(", ")}.`
       : "No paired devices yet. Run cns pair here and type the code it shows on the other device.");
+    const drift = driftWarning(status, options.state);
+    if (drift) console.error(`Warning: ${drift}`);
   } finally { control.close(); }
+}
+
+/**
+ * When the running daemon is not this cns's version: what that means and what to run, or undefined
+ * when it is. A daemon keeps the executable it started with, so an upgrade reaches paired devices,
+ * and commands that use the daemon's links, only once the daemon restarts.
+ */
+function driftWarning(status: DaemonStatus, state?: string): string | undefined {
+  const self = { version: CNS_VERSION, executable: selfPath() };
+  const installed = installedService(daemonStatePath(state));
+  return daemonDrift({
+    daemon: { version: status.version, ...status.executable ? { executable: printable(status.executable) } : {} },
+    self,
+    advice: restartAdvice({
+      service: status.service,
+      ...installed ? { installed: { kind: installed.kind, ...installedServiceRuns(installed, self.executable) } } : {},
+      platform: process.platform,
+    }),
+    which: process.platform === "win32" ? "Get-Command cns" : "command -v cns",
+  });
 }
 
 function requireServiceKind() {
@@ -438,8 +462,10 @@ async function daemonIfRunning(state?: string): Promise<ControlConnection | unde
 const printable = (text: string) => text.replace(/[\u0000-\u001f\u007f-\u009f]/g, "?");
 
 /** The paired devices the local daemon has a standing link to, by fingerprint. */
-async function standingLinks(control: ControlConnection): Promise<Map<string, { name: string; hostname: string; via: "direct" | "relay" }>> {
-  return new Map((await control.controller.peers()).flatMap((peer) => peer.peer?.daemon ? [[peer.peer.fingerprint, { name: peer.peer.name, hostname: printable(peer.info.hostname), via: peer.peer.via }]] : []));
+async function standingLinks(control: ControlConnection): Promise<Map<string, { name: string; hostname: string; via: "direct" | "relay"; version: string | undefined }>> {
+  return new Map((await control.controller.peers()).flatMap((peer) => peer.peer?.daemon
+    ? [[peer.peer.fingerprint, { name: peer.peer.name, hostname: printable(peer.info.hostname), via: peer.peer.via, version: reportedVersion(peer.info.version) }]]
+    : []));
 }
 
 /** `cns status`: this device, its daemon and its links. */
@@ -447,27 +473,34 @@ export async function status(options: StatusOptions): Promise<void> {
   const identity = loadIdentity();
   const control = await daemonIfRunning(options.state);
   let daemon: Record<string, unknown> | null = null;
-  const links: Array<{ name: string; fingerprint: string; address: string; hostname: string }> = [];
+  let drift: string | undefined;
+  const links: Array<{ name: string; fingerprint: string; address: string; hostname: string; version: string | null }> = [];
   if (control) {
     try {
       const info = await control.remote.status();
-      daemon = { pid: info.pid, url: info.url, addresses: info.addresses ?? [], relay: info.relay ?? null, relayRegistered: info.relayRegistered ?? null, startedAt: new Date(info.startedAt).toISOString() };
-      for (const [fingerprint, link] of await standingLinks(control)) links.push({ name: link.name, fingerprint, address: link.via, hostname: link.hostname });
+      drift = driftWarning(info, options.state);
+      daemon = {
+        pid: info.pid, url: info.url, addresses: info.addresses ?? [], relay: info.relay ?? null, relayRegistered: info.relayRegistered ?? null, startedAt: new Date(info.startedAt).toISOString(),
+        version: reportedVersion(info.version) ?? null, executable: info.executable ? printable(info.executable) : null, warning: drift ?? null,
+      };
+      for (const [fingerprint, link] of await standingLinks(control)) links.push({ name: link.name, fingerprint, address: link.via, hostname: link.hostname, version: link.version ?? null });
     } finally { control.close(); }
   }
   const paired = listPeers();
   if (options.json) {
-    console.log(JSON.stringify({ identity: identity ? { publicKey: identity.publicKey, fingerprint: identity.fingerprint } : null, daemon, links, paired: paired.length }, null, 2));
+    console.log(JSON.stringify({ version: CNS_VERSION, identity: identity ? { publicKey: identity.publicKey, fingerprint: identity.fingerprint } : null, daemon, links, paired: paired.length }, null, 2));
     return;
   }
   console.log(`This device: ${identity ? identity.fingerprint : "no identity yet (cns identity or cns up creates one)"}`);
+  console.log(`This cns:    ${CNS_VERSION} (${selfPath()})`);
   if (!daemon) console.log("Daemon:      not running (cns up starts it)");
   else {
-    console.log(`Daemon:      pid ${daemon.pid} at ${daemon.url}${(daemon.addresses as string[]).length ? `, reachable at ${(daemon.addresses as string[]).join(", ")}` : ""}`);
+    console.log(`Daemon:      ${describeVersion((daemon.version as string | null) ?? undefined)}, pid ${daemon.pid} at ${daemon.url}${(daemon.addresses as string[]).length ? `, reachable at ${(daemon.addresses as string[]).join(", ")}` : ""}`);
+    if (drift) console.log(`             Warning: ${drift}`);
     if (daemon.relay) console.log(`Relay:       ${daemon.relay} (${daemon.relayRegistered ? "registered" : "registering"})`);
   }
   console.log(`Paired:      ${paired.length} device${paired.length === 1 ? "" : "s"}${paired.length ? `: ${paired.map((peer) => peer.name).join(", ")}` : ""}`);
-  console.log(links.length ? `Links:       ${links.map((link) => `${link.name} (${link.address}, ${link.hostname})`).join(", ")}` : "Links:       none");
+  console.log(links.length ? `Links:       ${links.map((link) => `${link.name} (${link.address}, ${link.hostname}, ${link.version ? `cns ${link.version}` : "older cns"})`).join(", ")}` : "Links:       none");
 }
 
 /** `cns doctor` with no name: whether paired devices can reach this device, and from where. */
@@ -487,13 +520,18 @@ async function doctorSelf(options: DoctorOptions): Promise<void> {
   if (control) {
     try {
       const info = await control.remote.status();
-      daemon = { running: true, pid: info.pid, url: info.url, addresses: info.addresses ?? [], ...info.identity ? { identity: info.identity } : {}, ...info.relay ? { relay: info.relay } : {}, ...info.relayRegistered !== undefined ? { relayRegistered: info.relayRegistered } : {} };
+      const version = reportedVersion(info.version);
+      const drift = driftWarning(info, options.state);
+      daemon = {
+        running: true, pid: info.pid, url: info.url, addresses: info.addresses ?? [], ...info.identity ? { identity: info.identity } : {}, ...info.relay ? { relay: info.relay } : {},
+        ...info.relayRegistered !== undefined ? { relayRegistered: info.relayRegistered } : {}, ...version ? { version } : {}, ...drift ? { drift } : {},
+      };
     } catch (error) {
       daemon = { running: false, error: `it does not answer: ${printable(errorMessage(error))}` };
     } finally { control.close(); }
   }
   const relay = builtInRelay();
-  const { report, lines, exitCode } = selfCheck({ identity, identityPath: identityPath(), daemon, paired: listPeers().length, ...relay ? { relay } : {} });
+  const { report, lines, exitCode } = selfCheck({ identity, identityPath: identityPath(), self: { version: CNS_VERSION, executable: selfPath() }, daemon, paired: listPeers().length, ...relay ? { relay } : {} });
   if (options.json) console.log(JSON.stringify(report, null, 2));
   else console.log(lines.join("\n"));
   if (exitCode) process.exitCode = exitCode;
@@ -524,6 +562,9 @@ export async function doctor(name: string | undefined, options: DoctorOptions): 
   const attempts: Array<{ address: string; result: string; detail?: string }> = [];
   /** What the device says this one may use there now, from the first address that answers. */
   let live: Permission[] | undefined;
+  /** The cns version the device runs, from the first address that answers; undefined for one too old to say. */
+  let version: string | undefined;
+  let answered = false;
   // The saved addresses and, when none is a relay, the built-in relay, as commands dial them.
   const addresses = dialAddresses(entry, builtInRelay());
   if (!addresses.length) lines.push("  No saved address: cns peer address NAME ws://HOST:PORT adds one.");
@@ -539,7 +580,9 @@ export async function doctor(name: string | undefined, options: DoctorOptions): 
         const remote = rpcSession<ShellApi>(channel, new RefusingShell());
         try {
           const info = await plain(remote.info());
-          attempts.push({ address, result: "ok", detail: printable(`${info.hostname}, ${info.platform}/${info.shell}, encrypted`) });
+          const reported = reportedVersion(info.version);
+          attempts.push({ address, result: "ok", detail: printable(`${info.hostname}, ${info.platform}/${info.shell}, ${reported ? `cns ${reported}` : "older cns"}, encrypted`) });
+          if (!answered) { answered = true; version = reported; }
           live ??= await liveAccess(remote);
         } finally { remote[Symbol.dispose](); }
       } finally {
@@ -553,6 +596,12 @@ export async function doctor(name: string | undefined, options: DoctorOptions): 
   }
   report.attempts = attempts;
   for (const attempt of attempts) lines.push(`  ${attempt.address}${isRelayAddress(attempt.address) ? (entry.addresses.includes(attempt.address) ? " [relay]" : " [built-in relay]") : ""}: ${attempt.result}${attempt.detail ? ` (${attempt.detail})` : ""}`);
+  if (answered) {
+    report.version = version ?? null;
+    const order = versionOrder(version);
+    if (order === "older" || order === "unknown") lines.push(`  It runs ${describeVersion(version)}, older than this device's ${CNS_VERSION}: upgrade cns on ${name} and restart its daemon (cns doctor there says how).`);
+    else if (order === "newer") lines.push(`  It runs cns ${version}, newer than this device's ${CNS_VERSION}: upgrade cns here.`);
+  }
   if (live) {
     report.access = live;
     const saved = entry.grants.outgoing;
@@ -631,23 +680,33 @@ export async function removePeer(name: string, options: { state?: string }): Pro
 /** `cns peers`: every paired device with its status. */
 export async function peers(options: PeersOptions): Promise<void> {
   const saved = listPeers();
-  let online = new Map<string, { via: "direct" | "relay" }>();
+  let online = new Map<string, { via: "direct" | "relay"; version: string | undefined }>();
   const control = await daemonIfRunning(options.state);
   if (control) {
     try { online = await standingLinks(control); }
     catch { /* A daemon that cannot answer: everything is offline. */ }
     finally { control.close(); }
   }
-  const rows = saved.map((peer) => ({ name: peer.name, fingerprint: peer.fingerprint, status: online.has(peer.fingerprint) ? "online" : "offline", connection: online.get(peer.fingerprint)?.via ?? null, access: peer.grants.outgoing, grants: peer.grants.incoming, addresses: peer.addresses }));
+  const rows = saved.map((peer) => {
+    const link = online.get(peer.fingerprint);
+    // Known only while linked: what a device runs can change whenever it is offline.
+    return { name: peer.name, fingerprint: peer.fingerprint, status: link ? "online" : "offline", connection: link?.via ?? null, version: link?.version ?? null, access: peer.grants.outgoing, grants: peer.grants.incoming, addresses: peer.addresses };
+  });
   if (options.json) { console.log(JSON.stringify(rows, null, 2)); return; }
   if (!rows.length) { console.error("No paired devices. Run cns pair to pair with another device."); return; }
-  const table = [["NAME", "STATUS", "CONNECTION", "ACCESS", "FINGERPRINT"], ...rows.map((row) => [
-    row.name, row.status, row.connection ?? "-", describeGrants(row.access), row.fingerprint,
+  const table = [["NAME", "STATUS", "CONNECTION", "VERSION", "ACCESS", "FINGERPRINT"], ...rows.map((row) => [
+    row.name, row.status, row.connection ?? "-", row.status === "online" ? row.version ?? "older" : "-", describeGrants(row.access), row.fingerprint,
   ])];
   const widths = table.reduce((max, row) => row.map((cell, index) => Math.max(cell.length, max[index] ?? 0)), [] as number[]);
   console.log(table.map((row) => row.map((cell, index) => index === row.length - 1 ? cell : cell.padEnd(widths[index]!)).join("  ")).join("\n"));
   const blocked = rows.flatMap((row) => !row.access.length ? [row.name] : []);
   if (blocked.length) console.error(`\n${noAccessHint(blocked)}`);
+  const behind = rows.flatMap((row) => {
+    if (row.status !== "online") return [];
+    const order = versionOrder(row.version ?? undefined);
+    return order === "older" || order === "unknown" ? [`${row.name} (${row.version ?? "too old to report its version"})`] : [];
+  });
+  if (behind.length) console.error(`\nOlder cns than this device's ${CNS_VERSION}: ${behind.join(", ")}. Upgrade cns there and restart its daemon; cns doctor there says how.`);
 }
 
 /** What to do about paired devices that grant this one nothing, which the other device alone can change. */

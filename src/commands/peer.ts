@@ -23,6 +23,7 @@ import { serveControl, type PairingController } from "./daemon-server.js";
 import { removeStaleState } from "./daemon.js";
 import { runOneShot } from "./one-shot.js";
 import { infoSchema } from "./connect-device.js";
+import { describeVersion } from "../version.js";
 import { openDeviceLink, type DeviceLink } from "../device-link.js";
 import { afterDialFailure, dialTurn, keepsOutbound, onDialed, onInbound, redialDelay, worthDialing } from "../link-rules.js";
 
@@ -256,7 +257,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
         finally { info[Symbol.dispose]?.(); }
         if (!sessions.has(id) || stopping) return;
         clearTimeout(session.timer);
-        announce(`Connected to ${describe(session)} [${session.info.platform} / ${session.info.shell}].`);
+        announce(`Connected to ${describe(session)} [${session.info.platform} / ${session.info.shell}, ${describeVersion(session.info.version)}].`);
         if (session.peer?.daemon) void learnFromPeer(session);
         if (command) await stop(await runOneShot(command, controller, id, cancelled.signal));
       } catch (error) {
@@ -623,7 +624,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
       // the endpoint decides. A state file whose daemon answers is kept, and this start then fails.
       if (daemon.service) await removeStaleState(daemon.state, { ignorePid: true });
       controlCleanup = await serveControl(controller, () => { void stop(); }, daemon.state,
-        { url: daemon.url, bind: daemon.bind, port: daemon.port, remote: daemon.remote, ...relay ? { relay } : {} }, pairing);
+        { url: daemon.url, bind: daemon.bind, port: daemon.port, remote: daemon.remote, service: daemon.service, ...relay ? { relay } : {} }, pairing);
       if (stopping) { await Promise.all([controlCleanup(), listener.stop(true)]); return; }
       process.send?.({ ready: true });
       if (process.connected) process.disconnect?.();

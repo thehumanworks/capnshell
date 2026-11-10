@@ -8,7 +8,7 @@
  */
 import {
   ACCEPTED_CLIENT_KEYS, ANSWER_MS, CHALLENGE_MS, CLIENT_HEADER, MAX_DIALS_PER_ADDRESS, MAX_HELD_BYTES, MAX_HELD_MESSAGES, MAX_PIPES_PER_KEY, MAX_RELAY_MESSAGE_BYTES,
-  PairingRooms, randomId, route, size, verifyClient, verifyProof, type RelayData,
+  PairingRooms, RELAY_HEALTH, randomId, route, size, verifyClient, verifyProof, type RelayData,
 } from "../src/relay-hub.js";
 
 // The few Workers runtime types this file uses, so it typechecks without @cloudflare/workers-types.
@@ -46,7 +46,7 @@ export default {
     const url = new URL(request.url);
     const target = route(url);
     if (!target) return new Response("Not found", { status: 404 });
-    if (target.kind === "health") return new Response("cns relay\n");
+    if (target.kind === "health") return new Response(RELAY_HEALTH);
     if (request.headers.has("Origin")) return new Response("Browser origins are not allowed", { status: 401 });
     // Only cns: anything without a valid client header is refused before it reaches a Durable Object, so it costs nothing.
     if (!(await verifyClient(request.headers.get(CLIENT_HEADER), url.host, url.pathname, ACCEPTED_CLIENT_KEYS))) return new Response("Only cns may use this relay", { status: 401 });

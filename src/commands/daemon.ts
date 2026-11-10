@@ -24,6 +24,8 @@ export interface ListenerInfo {
   remote: boolean;
   /** The relay this daemon registers at: the built-in one, unless CNS_RELAY=off. */
   relay?: string;
+  /** The daemon runs under a service manager: cns daemon --service, as cns up --install and the Nix modules start it. */
+  service?: boolean;
 }
 export interface DaemonStatus extends ListenerInfo {
   pid: number;
@@ -37,6 +39,10 @@ export interface DaemonStatus extends ListenerInfo {
   addresses?: string[];
   /** Whether the daemon is registered at its relay right now. */
   relayRegistered?: boolean;
+  /** The cns version the daemon runs; absent from daemons before it was reported. */
+  version?: string;
+  /** The executable the daemon runs, or its script when run from source. */
+  executable?: string;
 }
 
 const legacyStateSchema = z.strictObject({

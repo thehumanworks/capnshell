@@ -13,6 +13,7 @@
  */
 import OAuthProvider, { AuthorizationError, CimdFetchError, type OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { errorMessage } from "../src/errors.js";
+import { CNS_VERSION } from "../src/version.js";
 import { ownerKeys, OWNER_HEADER, verifyOwner } from "../src/owner-proof.js";
 import type { Permission } from "../src/peers.js";
 import type { ToolName } from "../src/mcp/server.js";
@@ -199,7 +200,7 @@ const defaultHandler = {
     if (url.pathname === "/authorize/cancel" && request.method === "POST") return await wait(request, env, true);
     if (url.pathname.startsWith("/admin/")) return await admin(request, env, url.pathname.slice("/admin/".length));
     if (url.pathname === "/" || url.pathname === "/health") {
-      return new Response(`cns gateway\nAdd ${url.origin}/mcp as a custom connector in Claude; approve it with cns gateway approve CODE.\n`, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
+      return new Response(`cns gateway ${CNS_VERSION}\nAdd ${url.origin}/mcp as a custom connector in Claude; approve it with cns gateway approve CODE.\n`, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
     }
     return new Response("Not found", { status: 404 });
   },

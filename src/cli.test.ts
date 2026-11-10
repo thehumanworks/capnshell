@@ -7,6 +7,7 @@ import { execa } from "execa";
 import { generateIdentity } from "./identity.js";
 import { savePairedPeer } from "./peers.js";
 import { cliEnvironment, cliInvocation } from "./test-support.js";
+import { CNS_VERSION } from "./version.js";
 
 function runCli(args: string[], cwd: string, reject = true) {
   const invocation = cliInvocation(args);
@@ -18,6 +19,14 @@ async function temporaryDirectory(t: TestContext): Promise<string> {
   t.after(() => rm(directory, { recursive: true, force: true }));
   return directory;
 }
+
+test("cns --version prints this cns's version and nothing else", async (t) => {
+  const cwd = await temporaryDirectory(t);
+  for (const flag of ["--version", "-V"]) {
+    const result = await runCli([flag], cwd);
+    assert.deepEqual([result.exitCode, result.stdout, result.stderr], [0, CNS_VERSION, ""]);
+  }
+});
 
 test("the CLI exposes only cross-platform peer commands with side-effect-free help", async (t) => {
   const cwd = await temporaryDirectory(t);

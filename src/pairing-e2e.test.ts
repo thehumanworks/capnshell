@@ -8,6 +8,10 @@ import { suggestedName } from "./pairing.js";
 import { savePairedPeer } from "./peers.js";
 import { connectControl } from "./commands/daemon.js";
 import { cliEnvironment, cliInvocation, launchCli, unusedPort } from "./test-support.js";
+import { CNS_VERSION } from "./version.js";
+
+/** This cns's version, as a regular expression. */
+const VERSION = CNS_VERSION.replaceAll(".", "\\.");
 
 const posix = process.platform !== "win32";
 const decoder = new TextDecoder();
@@ -60,7 +64,9 @@ test("two devices pair, run commands within their grants, and refuse everyone el
   // Studio runs the paired daemon on loopback for this test.
   const up = await cli(studio, ["up", "--bind", "127.0.0.1", "--port", port, "--state", studio.state]);
   assert.equal(up.code, 0, up.stderr);
-  assert.match(up.stdout, /^Started as [a-z2-7]{4}(-[a-z2-7]{4}){5} \(pid \d+\), listening at ws:\/\/127\.0\.0\.1:\d+\.\nReachable at ws:\/\/127\.0\.0\.1:\d+\.\nNo paired devices yet/);
+  assert.match(up.stdout, new RegExp(`^Started as [a-z2-7]{4}(-[a-z2-7]{4}){5} \\(cns ${VERSION}, pid \\d+\\), listening at ws://127\\.0\\.0\\.1:\\d+\\.\nReachable at ws://127\\.0\\.0\\.1:\\d+\\.\nNo paired devices yet`));
+  // The daemon it started runs this cns, so there is nothing to warn about.
+  assert.doesNotMatch(up.stderr, /The daemon runs/);
   cleanups.push(() => cli(studio, ["stop", "--state", studio.state]));
   const again = await cli(studio, ["up", "--bind", "127.0.0.1", "--port", port, "--state", studio.state]);
   assert.match(again.stdout, /^Running as/);
@@ -131,12 +137,12 @@ test("two devices pair, run commands within their grants, and refuse everyone el
   assert.deepEqual(laptopPeers.map((peer: Record<string, unknown>) => [peer.name, peer.status, peer.access, peer.grants]),
     [["studio", "offline", ["shell", "files", "sessions:list", "sessions:create", "sessions:view", "sessions:control", "sessions:kill"], ["shell"]]]);
   const studioPeers = await cli(studio, ["peers", "--state", studio.state]);
-  assert.match(studioPeers.stdout, /^NAME +STATUS +CONNECTION +ACCESS +FINGERPRINT\nlaptop +offline +- +shell +[a-z2-7-]+\n$/);
+  assert.match(studioPeers.stdout, /^NAME +STATUS +CONNECTION +VERSION +ACCESS +FINGERPRINT\nlaptop +offline +- +- +shell +[a-z2-7-]+\n$/);
   assert.match((await cli(laptop, ["peer", "list"])).stdout, /^studio\t/);
 
   // Status and doctor describe this device, its daemon and how it reaches a peer.
   const status = await cli(studio, ["status", "--state", studio.state]);
-  assert.match(status.stdout, new RegExp(`^This device: ${studioIdentity.fingerprint}\nDaemon: +pid \\d+ at ws://127\\.0\\.0\\.1:${port}, reachable at ws://127\\.0\\.0\\.1:${port}\nPaired: +1 device: laptop\nLinks: +none\n$`));
+  assert.match(status.stdout, new RegExp(`^This device: ${studioIdentity.fingerprint}\nThis cns: +${VERSION} \\(.+\\)\nDaemon: +cns ${VERSION}, pid \\d+ at ws://127\\.0\\.0\\.1:${port}, reachable at ws://127\\.0\\.0\\.1:${port}\nPaired: +1 device: laptop\nLinks: +none\n$`));
   const laptopStatus = JSON.parse((await cli(laptop, ["status", "--json", "--state", laptop.state])).stdout);
   assert.deepEqual([laptopStatus.daemon, laptopStatus.links, laptopStatus.paired], [null, [], 1]);
   const doctor = await cli(laptop, ["doctor", "studio", "--state", laptop.state]);
@@ -144,6 +150,10 @@ test("two devices pair, run commands within their grants, and refuse everyone el
   assert.match(doctor.stdout, new RegExp(`^studio: paired device ${studioIdentity.fingerprint}\n  This device may use its:  shell, files, sessions\n  It may use this device's: shell\n  Daemon link: no daemon running here \\(cns up\\)\n  ws://127\\.0\\.0\\.1:${port}: ok \\(`));
   const doctorJson = JSON.parse((await cli(laptop, ["doctor", "studio", "--json", "--state", laptop.state])).stdout);
   assert.equal(doctorJson.attempts[0].result, "ok");
+  // Doctor says which cns the device runs; the same as this one, so there is no advice to upgrade.
+  assert.equal(doctorJson.version, CNS_VERSION);
+  assert.match(doctorJson.attempts[0].detail, new RegExp(`, cns ${VERSION}, encrypted$`));
+  assert.doesNotMatch(doctor.stdout, /It runs/);
   // Without a name, doctor checks this device: studio is ready on loopback only, laptop has no daemon.
   const self = await cli(studio, ["doctor", "--state", studio.state]);
   assert.equal(self.code, 0, self.stderr);
@@ -152,6 +162,8 @@ test("two devices pair, run commands within their grants, and refuse everyone el
   assert.match(self.stdout, /Warning: Every address here is private/);
   const selfJson = JSON.parse((await cli(studio, ["doctor", "--json", "--state", studio.state])).stdout);
   assert.deepEqual([selfJson.daemon.matchesIdentity, selfJson.reachableBeyondNetwork, selfJson.problems], [true, false, []]);
+  assert.deepEqual([selfJson.version, selfJson.daemon.version], [CNS_VERSION, CNS_VERSION]);
+  assert.ok(!selfJson.warnings.some((warning: string) => /The daemon runs/.test(warning)));
   const noDaemon = await cli(laptop, ["doctor", "--state", laptop.state]);
   assert.equal(noDaemon.code, 5);
   assert.match(noDaemon.stdout, /Daemon: +not running\n[\s\S]*Problem: No daemon runs here/);
@@ -296,7 +308,10 @@ test("two devices pair, run commands within their grants, and refuse everyone el
   await new Promise((resolve) => setTimeout(resolve, 1500));
   assert.deepEqual(await linkCounts(), [1, 1], "the link stays single");
   const online = await cli(laptop, ["peers", "--state", laptop.state]);
-  assert.match(online.stdout, /\nstudio +online +direct +shell, files, sessions +/);
+  // An online device shows the cns it runs, which its daemon's handshake reported.
+  assert.match(online.stdout, new RegExp(`\nstudio +online +direct +${VERSION} +shell, files, sessions +`));
+  assert.equal(JSON.parse((await cli(laptop, ["peers", "--json", "--state", laptop.state])).stdout)[0].version, CNS_VERSION);
+  assert.doesNotMatch(online.stderr, /Older cns than/);
   assert.match((await cli(studio, ["status", "--state", studio.state])).stdout, /Links: +laptop \(direct, /);
 
   // Laptop uses studio through the daemons' link. Revoking reaches that link even under a renamed alias,

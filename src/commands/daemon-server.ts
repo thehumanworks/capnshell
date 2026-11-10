@@ -6,6 +6,8 @@ import { newBunWebSocketRpcSession, RpcTarget, type BunWebSocketTransport } from
 import type { ConnectionController, PeerController } from "../console.js";
 import type { Decision, Proposal } from "../pairing.js";
 import type { AccessOptions, GlobOptions, PtyOptions, PtySessionOptions, PtySink, ReadFileOptions, RunOptions, ShellApi } from "../shell.js";
+import { selfPath } from "../runtime.js";
+import { CNS_VERSION } from "../version.js";
 
 /** What the daemon offers local clients for pairing and links. */
 export interface PairingController {
@@ -76,6 +78,7 @@ export class ControlApi extends RpcTarget {
     const peers = (await this.#controller.peers()).length;
     return {
       ...(this.#listener ?? { url: "", bind: "", port: 0, remote: false }), pid: process.pid, startedAt: this.#startedAt, peers,
+      version: CNS_VERSION, executable: selfPath(),
       ...this.#pairing ? { identity: this.#pairing.identity(), addresses: this.#pairing.addresses(), relayRegistered: this.#pairing.relayRegistered() } : {},
     };
   }
