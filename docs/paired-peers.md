@@ -42,9 +42,11 @@ The flow follows the handover's walkthrough:
 
 ```text
 studio $ cns pair
-Invite: cns1:...  (expires in 5 minutes)
+Code: 42-orbit-canyon-velvet
+On the other device, run: cns pair 42-orbit-canyon-velvet
+Waiting for it (the code works once and expires in 5 minutes)...
 
-laptop $ cns pair 'cns1:...' --name studio
+laptop $ cns pair 42-orbit-canyon-velvet --name studio
 Pair with studio? Fingerprint: k7qm-3h2x-...
 Request permission to use studio's shell? [Y/n] y
 
@@ -52,6 +54,7 @@ studio: Allow laptop (fingerprint j4ra-...) to use this machine's shell? [y/N] y
 Paired. Reverse shell access has not been granted.
 ```
 
+- A **pairing code** carries the invite between the devices so that nobody has to copy it. The number names a room on the relay; the three words (33 bits, from the BIP-39 English list) are a password the two devices check with CPace, a PAKE, before the inviting device sends the invite sealed under the key they agreed. The relay sees neither the words nor the invite and cannot test guesses offline; a wrong code costs one of three tries. [ADR 0004](adr/0004-pairing-codes.md) has the protocol and threat model. `cns pair --long` prints the invite itself instead, for pairing without the relay.
 - An **invite** is `cns1:` plus base64url JSON: `{ "v": 1, "id", "key": <inviter public key>, "addr": [<URLs the inviter is reachable at>], "secret": <128-bit random>, "exp": <unix time>, "name": <the inviter's suggested name> }`. It is single-use and expires after five minutes by default (`--expires`), or as soon as the `cns pair` that printed it exits. The inviter's daemon keeps the pending invite in memory only.
 - The invitee dials each address in turn and runs the **handshake** (section 3). The handshake proves possession of both keys. The invitee additionally proves knowledge of the invite secret by including an HMAC of the transcript, so a device that intercepted the invite's public part but not the secret cannot pair.
 - Each side **confirms interactively**, showing the other's fingerprint and the grants being requested. Both sides ask what the other may use (the accepting side: `What may studio use on this device? none, shell, files, sessions, all, or a comma-separated list [none]`). Non-interactive pairing (`--yes`, with `--grant shell,files` for what to allow) exists for scripted setups; `--yes` alone grants nothing. The inviting side grants at most what the other device requested.
@@ -68,7 +71,7 @@ Today the RPC capability is exported the moment the WebSocket opens, and the pee
 - **Encryption** (`src/secure.ts`). Each hello also carries a fresh libsodium `crypto_kx` public key, and the transcript both signatures cover includes both of them (auth version 2). `crypto_kx` then derives one session key per direction. Each side sends a `secretstream` header, and every later message is a libsodium `secretstream` record (XChaCha20-Poly1305): encrypted, authenticated, in order and never accepted twice. No cipher is implemented here; the code composes libsodium's constructions. The signatures also cover the initiator's link mode and invite id. Each side sends a heartbeat record right after its header, and a side counts the channel open only once the other's first record opens, which confirms that both derived the same keys. A record that fails to open, a replayed one, or a plaintext message after the handshake closes the link. Close frames are not encrypted, so they carry fixed phrases only. This device's copies of the session keys and the stream states are zeroed and freed when the link closes; libsodium.js may keep copies in its heap until that memory is reused.
 - **What observers see.** The handshake is plaintext: both identity keys (linkable across networks), the link mode, an invite id, refusal reasons, and the size and timing of records. A relay sees the same, plus which keys are registered.
 - **Records** carry 64 KiB fragments of Cap'n Web messages (so a relay that limits message size still works) and heartbeats. Each side sends a heartbeat every 15 s when idle; a link that delivers nothing for 45 s is closed as lost, and the daemon redials.
-- **Decision 2 (link encryption):** settled: libsodium (`libsodium-wrappers`, pinned) for key exchange and the stream, Ed25519 identities from section 1 for authentication.
+- **Decision 2 (link encryption):** settled: libsodium (`libsodium-wrappers-sumo`, pinned; the sumo build adds the ristretto255 operations pairing codes use) for key exchange and the stream, Ed25519 identities from section 1 for authentication.
 
 ## 4. Directional grants
 

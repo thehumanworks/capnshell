@@ -60,11 +60,11 @@ export function createCli(): Command {
   const gatewayCommands = () => import("./commands/gateway.js");
   gatewayCommand("status", "Show the gateway's fingerprint, devices, approved connectors and approvals waiting")
     .action(async (options) => { await (await gatewayCommands()).status(options); });
-  gatewayCommand("pair <invite>", "Pair the gateway with the device that printed this invite (cns pair there)")
+  gatewayCommand("pair <code...>", "Pair the gateway with the device showing this code, or that printed this cns1: invite (cns pair there)")
     .option("--name <name>", "The gateway's name for the device (default: the name it suggests)")
     .option("--request <grants>", "What the gateway asks to use there (default: shell,files,sessions:create)")
-    .addHelpText("after", "\nOn the device: cns pair; it prints an invite and asks before saving, showing the gateway's\nfingerprint and what it requests. Compare the fingerprint with cns gateway status. The\ndevice grants at most what was requested; cns pair --grant files there grants less.")
-    .action(async (invite: string, options) => { await (await gatewayCommands()).pair(invite, options); });
+    .addHelpText("after", "\nOn the device: cns pair; it shows a code and asks before saving, showing the gateway's\nfingerprint and what it requests. Compare the fingerprint with cns gateway status. The\ndevice grants at most what was requested; cns pair --grant files there grants less.")
+    .action(async (code: string[], options) => { await (await gatewayCommands()).pair(code, options); });
   gatewayCommand("remove <name>", "Forget a device: no connector reaches it from now on")
     .action(async (name: string, options) => { await (await gatewayCommands()).remove(name, options); });
   gatewayCommand("approve <code>", "Approve a connector that is waiting with this code on its sign-in page")
@@ -91,16 +91,17 @@ export function createCli(): Command {
     .addHelpText("after", "\nOnly paired devices can connect, after authenticating; each gets what cns pair granted it.\nThe daemon also registers at the relay built into cns, so paired devices on other networks reach it\nwith nothing to set up. Links are encrypted end to end, directly or through the relay. Pair with cns pair.\n--install keeps the running daemon's --bind and --port unless given; run it again to change them.")
     .action(async (options) => { const { up } = await import("./commands/pairing-cli.js"); await up(options); });
   program.command("pair")
-    .description("Pair this device with another: print an invite, or paste one from the other device")
-    .argument("[invite]", "The cns1:... invite the other device printed")
+    .description("Pair this device with another: show a pairing code, or type the code the other device shows")
+    .argument("[code...]", "The code the other device shows, such as 42-orbit-canyon-velvet, or a cns1:... invite")
     .option("--name <name>", "Save the other device under this name")
     .option("--request <grants>", "With an invite: what to ask for on the other device: shell, files, sessions, all, or permissions (default: all)")
     .option("--grant <grants>", "What the other device may do here: none, shell, files, sessions, all, or permissions. Without --grant either side asks, and --yes alone grants nothing; the inviting device grants at most what was requested")
-    .option("--expires <minutes>", "How long a printed invite stays valid (default: 5)")
+    .option("--expires <minutes>", "How long a code or invite stays valid (default: 5)")
+    .option("--long", "Print a cns1: invite to paste instead of a code, for pairing without the relay or from scripts")
     .option("--yes", "Pair without asking; for scripts, after comparing fingerprints yourself")
     .option("--state <path>", "Local daemon state file")
-    .addHelpText("after", "\nOn the device you want to reach:  cns pair          (prints an invite and waits)\nOn the other device:              cns pair 'cns1:...'\nBoth sides show the other's fingerprint and ask before saving anything.")
-    .action(async (invite: string | undefined, options) => { const { pair } = await import("./commands/pairing-cli.js"); await pair(invite, options); });
+    .addHelpText("after", "\nOn the device you want to reach:  cns pair                        (shows a code and waits)\nOn the other device:              cns pair 42-orbit-canyon-velvet\nThe code works once, through the relay built into cns; the first four letters of each word are\nenough. Three wrong tries end it. Without the relay, cns pair --long prints an invite to paste\nwith cns pair 'cns1:...'. Both sides show the other's fingerprint and ask before saving anything.")
+    .action(async (code: string[], options) => { const { pair } = await import("./commands/pairing-cli.js"); await pair(code.length ? code : undefined, options); });
   program.command("peers")
     .description("List paired devices with their status")
     .option("--json", "Print the list as JSON")

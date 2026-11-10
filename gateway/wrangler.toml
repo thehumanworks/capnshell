@@ -14,7 +14,7 @@ routes = [{ pattern = "gateway.cns.nothuman.work", custom_domain = true }]
 # cns's encryption uses libsodium.js, which compiles WebAssembly at run time; Workers forbid
 # that, so the gateway uses the same algorithms in plain JavaScript (nacl.ts).
 [alias]
-"libsodium-wrappers" = "./sodium.ts"
+"libsodium-wrappers-sumo" = "./sodium.ts"
 
 [vars]
 # Where the gateway is served; OAuth tokens are issued for GATEWAY_ORIGIN/mcp.

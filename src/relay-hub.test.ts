@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { startRelay } from "./relay-server.js";
 import { generateIdentity } from "./identity.js";
-import { challengeBytes, CLIENT_HEADER, CLIENT_KEY, CLIENT_SKEW_MS, clientProof, dialAddresses, isRelayAddress, isRelayRequest, MAX_DIALS_PER_ADDRESS, relayEndpoint, route, verifyClient } from "./relay-hub.js";
+import { challengeBytes, CLIENT_HEADER, CLIENT_KEY, CLIENT_SKEW_MS, clientProof, dialAddresses, isRelayAddress, isRelayRequest, MAX_DIALS_PER_ADDRESS, MAX_GUESTS_PER_ADDRESS, PairingRooms, relayEndpoint, roomEndpoint, route, verifyClient, type RelaySocket } from "./relay-hub.js";
 import { LOOPBACK } from "./test-support.js";
 
 /** The client header cns sends, made for `url`, or for `host` in its place, as a relay behind a proxy sees it. */
@@ -72,6 +72,72 @@ test("relay URLs and routes", () => {
   assert.deepEqual(route(new URL(relayEndpoint("wss://x/relay", "answer", key, "A".repeat(22)))), { kind: "answer", key, id: "A".repeat(22) });
   assert.deepEqual(route(new URL("https://x/relay")), { kind: "health" });
   assert.equal(route(new URL(`wss://x/other/v1/accept/${key}`)), undefined);
+  // Pairing rooms: open one, or join one by number.
+  assert.equal(roomEndpoint("https://relay.example/relay"), "wss://relay.example/relay/v1/room");
+  assert.equal(roomEndpoint("ws://127.0.0.1:47380", 42), "ws://127.0.0.1:47380/v1/room/42");
+  assert.ok(isRelayRequest(roomEndpoint("wss://relay.example/relay")));
+  assert.ok(isRelayRequest(roomEndpoint("wss://relay.example", 7)));
+  assert.ok(!isRelayAddress(roomEndpoint("wss://relay.example", 7)));
+  assert.deepEqual(route(new URL("wss://x/relay/v1/room")), { kind: "room" });
+  assert.deepEqual(route(new URL("wss://x/v1/room/42")), { kind: "join", room: 42 });
+  for (const bad of ["0", "042", "1234567", "x", "1/2"]) assert.equal(route(new URL(`wss://x/v1/room/${bad}`)), undefined, bad);
+});
+
+/** A socket for PairingRooms that records what it is sent and how it closed. */
+function roomSocket() {
+  const sent: unknown[] = [];
+  let closed: { code: number; reason: string } | undefined;
+  const socket: RelaySocket = { send: (data) => { sent.push(JSON.parse(String(data))); }, close: (code, reason) => { closed ??= { code, reason }; } };
+  return { socket, sent, get closed() { return closed; } };
+}
+
+test("pairing rooms pipe one guest at a time to the host, and the host ends guests", () => {
+  const rooms = new PairingRooms();
+  const host = roomSocket();
+  const hostSide = rooms.open(host.socket);
+  assert.deepEqual(host.sent.shift(), { t: "room", room: 1 });
+  const guest = roomSocket();
+  const guestSide = rooms.join(1, guest.socket, "192.0.2.1");
+  assert.deepEqual(host.sent.shift(), { t: "guest" });
+  // A second device waits its turn; an unknown room is refused.
+  const second = roomSocket();
+  rooms.join(1, second.socket, "192.0.2.2");
+  assert.equal(second.closed?.code, 4009);
+  const stranger = roomSocket();
+  rooms.join(2, stranger.socket, "192.0.2.2");
+  assert.equal(stranger.closed?.code, 4004);
+  hostSide.message(JSON.stringify({ t: "send", m: JSON.stringify({ t: "hello" }) }));
+  assert.deepEqual(guest.sent.shift(), { t: "hello" });
+  guestSide.message(JSON.stringify({ t: "reply" }));
+  assert.deepEqual(host.sent.shift(), { t: "msg", m: JSON.stringify({ t: "reply" }) });
+  hostSide.message(JSON.stringify({ t: "ping" }));
+  assert.deepEqual(host.sent.shift(), { t: "pong" });
+  hostSide.message(JSON.stringify({ t: "end", reason: "Wrong pairing code." }));
+  assert.deepEqual(guest.closed, { code: 4001, reason: "Wrong pairing code." });
+  assert.deepEqual(host.sent.shift(), { t: "left" });
+  // Binary or oversized guest messages end the guest; the host's room stays.
+  const third = roomSocket();
+  rooms.join(1, third.socket).message(new Uint8Array(4));
+  assert.equal(third.closed?.code, 4008);
+  // The host leaving ends the room and its guest.
+  const fourth = roomSocket();
+  rooms.join(1, fourth.socket);
+  hostSide.close();
+  assert.equal(fourth.closed?.code, 4004);
+  assert.equal(rooms.size, 0);
+});
+
+test("one address cannot hold many pairing rooms' guests", () => {
+  const rooms = new PairingRooms();
+  for (let index = 0; index <= MAX_GUESTS_PER_ADDRESS; index++) rooms.open(roomSocket().socket);
+  for (let room = 1; room <= MAX_GUESTS_PER_ADDRESS; room++) {
+    const guest = roomSocket();
+    rooms.join(room, guest.socket, "192.0.2.9");
+    assert.equal(guest.closed, undefined);
+  }
+  const extra = roomSocket();
+  rooms.join(MAX_GUESTS_PER_ADDRESS + 1, extra.socket, "192.0.2.9");
+  assert.equal(extra.closed?.code, 4029);
 });
 
 test("dialAddresses adds the relay only when the record has no relay address", () => {
@@ -188,7 +254,7 @@ test("the relay refuses every request that does not come from cns", async (t) =>
   const answer = relayEndpoint(base, "answer", studio.publicKey, "A".repeat(22));
   const forged = { [CLIENT_HEADER]: await clientProof(dial, Buffer.alloc(32, 7).toString("base64url")) };
   // Without the header, with one made under another key, or one made for another request.
-  for (const [url, headers] of [[accept, {}], [dial, {}], [answer, {}], [dial, forged], [dial, await client(accept)]] as const) {
+  for (const [url, headers] of [[accept, {}], [dial, {}], [answer, {}], [roomEndpoint(base), {}], [roomEndpoint(base, 1), {}], [dial, forged], [dial, await client(accept)]] as const) {
     assert.equal(await dialStatus(url, headers), 401, url);
     assert.equal(await open(url, headers).then(() => "open", () => "refused"), "refused");
   }

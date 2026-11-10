@@ -72,11 +72,14 @@ Pair a device with the gateway. On the device:
 cns pair --grant shell,files,sessions:create
 ```
 
-It prints an invite and waits. On an owner device:
+It shows a code, such as `42-orbit-canyon-velvet`, and waits. On an owner device:
 
 ```sh
-cns gateway pair 'cns1:...'
+cns gateway pair 42-orbit-canyon-velvet
 ```
+
+The owner device swaps the code for the device's invite through the relay and sends it to the
+gateway. `cns pair --long` prints a `cns1:` invite instead, which `cns gateway pair` also takes.
 
 The device shows the gateway's fingerprint (compare it with `cns gateway status`) and asks
 before saving. `--grant files`, for example, grants less; `--request` on `cns gateway pair`
@@ -111,7 +114,7 @@ All take `--json`, and `--url` or `CNS_GATEWAY` to name another gateway.
 - cns's encryption uses libsodium.js, which compiles WebAssembly at run time, and Workers
   forbid that. `nacl.ts` implements the same algorithms (crypto_kx and secretstream
   XChaCha20-Poly1305) with the audited `@noble` libraries; `nacl.test.ts` checks them
-  against libsodium. `wrangler.toml` aliases `libsodium-wrappers` to `sodium.ts`.
+  against libsodium. `wrangler.toml` aliases `libsodium-wrappers-sumo` to `sodium.ts`.
 - Devices running a cns release from before the gateway try to dial it every 30 seconds,
   since it has no address; it does no harm but costs relay requests. Newer releases don't
   dial a paired device that has no address and nothing granted to it.

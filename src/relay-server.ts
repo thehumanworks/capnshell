@@ -1,8 +1,8 @@
 import { serve, type Server } from "bun";
-import { ACCEPTED_CLIENT_KEYS, CLIENT_HEADER, MAX_RELAY_MESSAGE_BYTES, RelayRoom, route, verifyClient, type RelayData, type RelayHandlers } from "./relay-hub.js";
+import { ACCEPTED_CLIENT_KEYS, CLIENT_HEADER, MAX_RELAY_MESSAGE_BYTES, PairingRooms, RelayRoom, route, verifyClient, type RelayData, type RelayHandlers } from "./relay-hub.js";
 import { endpointUrl } from "./options.js";
 
-interface Data { handlers?: RelayHandlers; key: string; kind: "accept" | "dial" | "answer"; id?: string; host: string; address: string }
+interface Data { handlers?: RelayHandlers; key: string; kind: "accept" | "dial" | "answer" | "room" | "join"; id?: string; room?: number; host: string; address: string }
 
 export interface RelayOptions {
   bind: string;
@@ -40,6 +40,8 @@ export function startRelay(options: RelayOptions): { url: string; server: Server
     const entry = rooms.get(key);
     if (entry && --entry.sockets <= 0) rooms.delete(key);
   };
+  // Pairing rooms, numbered across the whole relay.
+  const pairingRooms = new PairingRooms();
   const perAddress = new Map<string, number>();
   let total = 0;
   const server = serve<Data>({
@@ -59,6 +61,11 @@ export function startRelay(options: RelayOptions): { url: string; server: Server
         const check = rooms.get(target.key)?.room.dialable(address) ?? { ok: false as const, status: 404, reason: "No device with this key is registered at this relay." };
         if (!check.ok) return new Response(check.reason, { status: check.status });
       }
+      if (target.kind === "room" || target.kind === "join") {
+        // Refusals of a join arrive as close reasons, which the joining device shows as they are.
+        if (server.upgrade(request, { data: { key: "", kind: target.kind, ...target.kind === "join" ? { room: target.room } : {}, host, address } })) return undefined;
+        return new Response("WebSocket upgrade required", { status: 400 });
+      }
       if (server.upgrade(request, { data: { key: target.key, kind: target.kind, id: target.kind === "answer" ? target.id : undefined, host, address } })) return undefined;
       return new Response("WebSocket upgrade required", { status: 400 });
     },
@@ -70,12 +77,14 @@ export function startRelay(options: RelayOptions): { url: string; server: Server
       open(ws) {
         total++;
         perAddress.set(ws.data.address, (perAddress.get(ws.data.address) ?? 0) + 1);
-        const room = join(ws.data.key, ws.data.host);
         const socket = {
           // Bun drops a message it cannot queue (send returns 0): end the pipe instead of losing data silently.
           send: (data: RelayData) => { if (ws.send(data) === 0) throw new Error("The reader fell too far behind."); },
           close: (code: number, reason: string) => ws.close(code, reason),
         };
+        if (ws.data.kind === "room") { ws.data.handlers = pairingRooms.open(socket); return; }
+        if (ws.data.kind === "join") { ws.data.handlers = pairingRooms.join(ws.data.room!, socket, ws.data.address); return; }
+        const room = join(ws.data.key, ws.data.host);
         ws.data.handlers = ws.data.kind === "accept" ? room.listen(socket, ws.data.host)
           : ws.data.kind === "dial" ? room.dial(socket, ws.data.address)
           : room.answer(ws.data.id!, socket);
@@ -83,7 +92,7 @@ export function startRelay(options: RelayOptions): { url: string; server: Server
       message(ws, message) { ws.data.handlers?.message(typeof message === "string" ? message : new Uint8Array(message)); },
       close(ws) {
         ws.data.handlers?.close();
-        leave(ws.data.key);
+        if (ws.data.kind !== "room" && ws.data.kind !== "join") leave(ws.data.key);
         total--;
         const left = (perAddress.get(ws.data.address) ?? 1) - 1;
         if (left > 0) perAddress.set(ws.data.address, left); else perAddress.delete(ws.data.address);

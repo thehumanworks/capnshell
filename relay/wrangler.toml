@@ -14,6 +14,15 @@ routes = [{ pattern = "cns.nothuman.work", custom_domain = true }]
 name = "RELAY_KEYS"
 class_name = "RelayKey"
 
+# Pairing rooms (cns pair's short codes): one object holds them all.
+[[durable_objects.bindings]]
+name = "RELAY_ROOMS"
+class_name = "RelayRooms"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["RelayKey"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["RelayRooms"]

@@ -64,7 +64,8 @@ test("devices that cannot reach each other directly pair and link through the bu
 
   // Keep an unreachable direct address in the invite: pairing must fall back to
   // the relay automatically, not require the person to edit it to relay-only.
-  const inviting = launchCli(t, ["pair", "--yes", "--name", "laptop", "--grant", "all", "--state", studio.state], { env: studio.env });
+  // --long prints the invite itself, which this test edits; pairing by code has its own test.
+  const inviting = launchCli(t, ["pair", "--long", "--yes", "--name", "laptop", "--grant", "all", "--state", studio.state], { env: studio.env });
   inviting.child.stdin.end();
   await inviting.waitFor("Invite: cns1:");
   const text = /Invite: (cns1:[A-Za-z0-9_-]+)/.exec(inviting.stdout)![1]!;
