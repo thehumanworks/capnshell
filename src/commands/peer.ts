@@ -22,6 +22,7 @@ import { serveControl, type PairingController } from "./daemon-server.js";
 import { removeStaleState } from "./daemon.js";
 import { runOneShot } from "./one-shot.js";
 import { infoSchema } from "./connect-device.js";
+import { openDeviceLink, type DeviceLink } from "../device-link.js";
 
 /** CLI exit statuses for failures, as docs/paired-peers.md lists them: 3 unpaired or changed device, 4 permission denied, else 1. */
 export function authExitCode(error: unknown): number {
@@ -59,6 +60,8 @@ interface Session {
   since: number;
   /** The saved address this process dialed the link at. */
   dialed?: string;
+  /** Local commands borrowing this link, told when it ends. */
+  borrowers: Set<() => void>;
 }
 interface PendingInvite {
   secret: Uint8Array;
@@ -96,6 +99,12 @@ const RELAY_STABLE_MS = 30_000;
  * that arrives later means the link this side holds is dead on the other.
  */
 const DIAL_RACE_MS = 5000;
+/**
+ * A standing link through the relay is replaced by a direct one this long after it was made,
+ * if the device can be dialed directly by then: twice the dial race, so that both daemons,
+ * whose clocks for the link start a moment apart, agree that the race is over.
+ */
+const UPGRADE_AFTER_MS = 2 * DIAL_RACE_MS;
 
 /**
  * Run the paired daemon, or one command on a paired device: the same link machinery, the
@@ -154,6 +163,9 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
     session.close("Shell session ended");
     session.local[Symbol.dispose]();
     session.remote[Symbol.dispose]();
+    // Commands that borrowed the link lose it as they would their own connection.
+    for (const lost of [...session.borrowers]) lost();
+    session.borrowers.clear();
     if (!stopping) announce(`Disconnected from ${describe(session)}.`);
   }
 
@@ -190,6 +202,27 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
     return session;
   }
   const controller: ConnectionController = {
+    async lend(publicKey, released, lost) {
+      // Only a standing link that has answered: one still authenticating may yet be refused.
+      const session = linkTo(publicKey);
+      if (!session?.info || stopping || released.aborted) return undefined;
+      let shell: RpcStub<ShellApi>;
+      // A fork, so releasing it ends the borrower's commands, unnamed terminals and handles, and nothing else.
+      try { shell = await forkShell(session.remote); }
+      catch (error) {
+        // Forking needs the shell grant. Without it the device offers only files and sessions,
+        // whose handles end when the borrower releases them, so its own shell will do.
+        if (!/^Permission denied/.test(errorMessage(error))) throw error;
+        shell = session.remote.dup();
+      }
+      if (!sessions.has(session.id) || released.aborted) {
+        shell[Symbol.dispose]();
+        return undefined;
+      }
+      session.borrowers.add(lost);
+      released.addEventListener("abort", () => session.borrowers.delete(lost), { once: true });
+      return { shell, via: session.via };
+    },
     async peers() {
       return [...sessions.values()].flatMap(({ id, info, peer, pairing }) => info && !pairing
         ? [{ id, info: { ...info }, ...peer ? { peer: { name: peer.name, fingerprint: fingerprint(peer.publicKey), daemon: peer.daemon, via: sessions.get(id)!.via } } : {} }] : []);
@@ -242,7 +275,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
 
   function register(connection: { close(reason: string): void; outbound: boolean; via?: "direct" | "relay"; dialed?: string }, local: Session["local"], remote: RpcStub<ShellApi>, address: string, peer?: Session["peer"]): Session {
     const id = `p${nextId++}`;
-    const session: Session = { id, address, close: connection.close, outbound: connection.outbound, via: connection.via ?? "direct", dialed: connection.dialed, local, remote, peer, since: Date.now(), timer: setTimeout(() => {
+    const session: Session = { id, address, close: connection.close, outbound: connection.outbound, via: connection.via ?? "direct", dialed: connection.dialed, local, remote, peer, since: Date.now(), borrowers: new Set(), timer: setTimeout(() => {
       if (!sessions.has(id)) return;
       console.error(`Handshake with ${describe(session)} timed out.`);
       disconnected(session, 1);
@@ -428,9 +461,12 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
     const expectedKey = entry.publicKey;
     let attempt = 0;
     let stopped = false;
+    let busy = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    // One timer at a time: a link that ends while the loop already waits does not start a second loop.
     const schedule = () => {
       if (stopped || stopping) return;
+      clearTimeout(timer);
       timer = setTimeout(() => void connect(), Math.min(REDIAL_MAX_MS, REDIAL_MIN_MS * 2 ** Math.min(attempt, 5)));
       timer.unref?.();
       attempt++;
@@ -439,45 +475,64 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
     const stop = handle.stop;
     // Any failure, such as an unreadable peer file, is reported and retried; the loop never dies quietly.
     async function connect() {
-      if (stopped || stopping) return;
+      // An attempt still dialing ends by scheduling the next one or by making a link.
+      if (stopped || stopping || busy) return;
+      busy = true;
       try { await attempt_(); }
       catch (error) {
         announce(`${name}: ${errorMessage(error)}`);
         schedule();
-      }
+      } finally { busy = false; }
     }
     async function attempt_() {
       const current = getPeer(name);
       const addresses = current && worthDialing(current, relay) ? dialAddresses(current, relay) : [];
       if (!current || current.publicKey !== expectedKey || !addresses.length) return stop();
-      // Skip while an inbound link from the same device is already up.
-      if (linkTo(current.publicKey)) return schedule();
+      let dialing = addresses;
+      const existing = linkTo(current.publicKey);
+      if (existing) {
+        // A link is up. Keep it, unless it runs through the relay while a direct one may work:
+        // a device that cannot be dialed, such as one in WSL behind its host's firewall, can
+        // still dial this one, and whichever daemon dialed first, typing then crosses the
+        // relay. Only once the link is past the dial race, which the other daemon also
+        // applies, so it takes the direct link as replacing the relayed one.
+        const direct = addresses.filter((url) => !isRelayAddress(url));
+        if (existing.via !== "relay" || !direct.length || Date.now() - existing.since < UPGRADE_AFTER_MS) return schedule();
+        dialing = direct;
+      }
       let channel: SecureChannel;
       let url: string;
       try {
-        ({ channel, url } = await connectFirst(addresses, identity, { expect: current.publicKey, mode: "daemon", signal: cancelled.signal }));
+        ({ channel, url } = await connectFirst(dialing, identity, { expect: current.publicKey, mode: "daemon", signal: cancelled.signal }));
       } catch (error) {
-        if (error instanceof AuthError && (error.code === "identity-changed" || error.code === "not-paired")) {
+        // A direct address that answers wrongly while the relayed link works says nothing about the device.
+        if (!existing && error instanceof AuthError && (error.code === "identity-changed" || error.code === "not-paired")) {
           announce(`${name}: ${error.message}`);
           return stop();
         }
         return schedule();
       }
       if (stopped || stopping) { channel.close(); return; }
-      // Both devices dialed at once: exactly one link survives, chosen the same way on both sides.
-      const inbound = linkTo(current.publicKey);
-      if (inbound) {
-        if (keepsOutbound(current.publicKey)) remove(inbound);
+      const other = linkTo(current.publicKey);
+      if (other && other === existing) {
+        // The direct link replaces the relayed one, here and on the other device.
+        remove(existing);
+      } else if (other) {
+        // Both devices dialed at once: exactly one link survives, chosen the same way on both sides.
+        if (keepsOutbound(current.publicKey)) remove(other);
         else { channel.close("Duplicate link"); return schedule(); }
       }
       attempt = 0;
+      const via = isRelayAddress(url) ? "relay" : "direct";
       const grants: GrantHolder = { current: current.grants.incoming };
       const owner = fingerprint(current.publicKey);
       const local = new GrantedShell(new ShellApi(ptys, { owner }), grants, name, owner, advertisedToPeers);
       const remote = rpcSession<ShellApi>(channel, local);
-      const session = register({ close: (reason) => channel.close(reason), outbound: true, via: isRelayAddress(url) ? "relay" : "direct", dialed: url }, local, remote, new URL(url).host, { name, publicKey: current.publicKey, daemon: true });
+      const session = register({ close: (reason) => channel.close(reason), outbound: true, via, dialed: url }, local, remote, new URL(url).host, { name, publicKey: current.publicKey, daemon: true });
       session.grants = grants;
       void channel.done.then(() => { disconnected(session); schedule(); });
+      // A relayed link keeps the loop going, to replace it once a direct one works.
+      if (via === "relay") schedule();
     }
     links.set(name, handle);
     void connect();
@@ -675,21 +730,20 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
       for (const entry of listPeers()) dial(entry.name);
     } else if (command) {
       const { expect } = command;
-      // One encrypted connection to the paired device, at the first of its addresses, or the relay, that answers as it.
-      let channel: SecureChannel;
-      let url: string;
+      // The local daemon's standing link to the device, lent for this command, or else one
+      // encrypted connection at the first of its addresses, or the relay, that answers as it.
+      let link: DeviceLink;
       try {
-        ({ channel, url } = await connectFirst(dialAddresses(expect, relay), identity, { expect: expect.publicKey, signal: cancelled.signal }));
+        link = await openDeviceLink(expect, identity, cancelled.signal);
       } catch (error) {
         if (error instanceof AuthError) throw error;
         throw new Error(`Cannot connect to ${expect.name}: ${errorMessage(error)}`, { cause: error });
       }
-      // One command's connection only uses the other device. The other device uses this one through
-      // the daemons' standing link, whose grants revocation can reach; this process it could not.
+      // One command's connection only uses the other device, offering it a RefusingShell. The other
+      // device uses this one through the daemons' standing link, whose grants revocation can reach.
       const local = new RefusingShell();
-      const remote = rpcSession<ShellApi>(channel, local);
-      const session = register({ close: (reason) => channel.close(reason), outbound: true, via: isRelayAddress(url) ? "relay" : "direct" }, local, remote, new URL(url).host, { name: expect.name, publicKey: expect.publicKey, daemon: false });
-      void channel.done.then(() => disconnected(session));
+      const session = register({ close: (reason) => link.close(reason), outbound: true, via: link.via }, local, link.remote, link.address, { name: expect.name, publicKey: expect.publicKey, daemon: false });
+      void link.done.then(() => disconnected(session));
     }
     await done;
   } catch (error) {

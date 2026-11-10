@@ -187,8 +187,9 @@ export async function startDaemon(config: DaemonSettings, options: StartDaemonOp
   }
 }
 
-export async function connectControl(statePath?: string) {
-  return connectToState(await readState(daemonStatePath(statePath)));
+/** Connect to the local daemon whose state is at `statePath`, giving up after `timeoutMs`. */
+export async function connectControl(statePath?: string, timeoutMs = 5000) {
+  return connectToState(await readState(daemonStatePath(statePath)), timeoutMs);
 }
 
 export interface ControlConnection {
@@ -197,12 +198,12 @@ export interface ControlConnection {
   close(): void;
 }
 
-async function connectToState(state: DaemonState): Promise<ControlConnection> {
+async function connectToState(state: DaemonState, timeoutMs = 5000): Promise<ControlConnection> {
   const host = state.version === 1 ? "127.0.0.1" : state.host;
   const socket = new WebSocket(`ws://${host === "::1" ? "[::1]" : host}:${state.port}`, { headers: { Authorization: `Bearer ${state.token}` } });
   try {
     await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => finish(new Error("Local daemon connection timed out.")), 5000);
+      const timer = setTimeout(() => finish(new Error("Local daemon connection timed out.")), timeoutMs);
       const onOpen = () => finish();
       const onError = () => finish(new Error("Cannot connect to the local daemon. Its state file may be stale."));
       function finish(error?: Error) {

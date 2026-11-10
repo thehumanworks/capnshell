@@ -60,13 +60,16 @@ export class ControlApi extends RpcTarget {
   /** Invites made through this control connection that are not decided yet. */
   #invites = new Set<string>();
   #closed = new AbortController();
-  constructor(controller: PeerController, stop: () => void, listener: ListenerInfo | undefined, startedAt: number, pairing?: PairingController) {
+  /** Close this control connection, as the daemon does when a link it lent over it ends. */
+  #hangUp: (reason: string) => void;
+  constructor(controller: PeerController, stop: () => void, listener: ListenerInfo | undefined, startedAt: number, pairing?: PairingController, hangUp: (reason: string) => void = () => {}) {
     super();
     this.#controller = controller;
     this.#stop = stop;
     this.#listener = listener;
     this.#startedAt = startedAt;
     this.#pairing = pairing;
+    this.#hangUp = hangUp;
   }
   /** The daemon's listener and how many peers it has, for clients that found its state file. */
   async status(): Promise<DaemonStatus> {
@@ -110,6 +113,22 @@ export class ControlApi extends RpcTarget {
   ptySession(id: string, name: string) { return this.#controller.ptySession(id, name); }
   /** A fork of the peer's whole shell, proxied by reference; releasing it kills its commands. */
   shell(id: string) { return this.#controller.shell(id); }
+  /**
+   * Lend a command, such as cns run or cns tty, this daemon's standing link to the paired
+   * device with `publicKey`, so the command uses it rather than dialing the device: a device
+   * this one cannot dial, such as one in WSL behind its host's firewall, may have dialed
+   * this daemon, and a link that is already up costs no handshake. The command gets a fork
+   * of the device's shell, which the device releases, ending the command's work, when this
+   * control connection closes; if the link ends first, this control connection closes, so
+   * the command sees its connection lost, as it would its own. The device's grants to this
+   * device apply as on any connection from it. Null when there is no such link.
+   */
+  async lend(publicKey: string) {
+    if (typeof publicKey !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(publicKey)) throw new TypeError("lend takes a device's public key.");
+    const lent = await this.#controller.lend?.(publicKey, this.#closed.signal, () => this.#hangUp("The daemon's link to the device ended"));
+    if (!lent) return null;
+    return { shell: lent.shell, via: lent.via, identity: this.#pairing?.identity().publicKey ?? null };
+  }
   /** The peer's file operations, which need only the files grant on a paired device. */
   files(id: string) {
     const files = (this.#controller as Partial<Pick<ConnectionController, "files">>).files;
@@ -151,7 +170,8 @@ export async function serveControl(controller: PeerController, stop: () => void,
       idleTimeout: 0,
       maxPayloadLength: 8 * 1024 * 1024,
       open(ws) {
-        ws.data.transport = newBunWebSocketRpcSession(ws, new ControlApi(controller, stop, listener, startedAt, pairing)).transport;
+        const hangUp = (reason: string) => { try { ws.close(1000, reason); } catch { /* Already closed. */ } };
+        ws.data.transport = newBunWebSocketRpcSession(ws, new ControlApi(controller, stop, listener, startedAt, pairing, hangUp)).transport;
       },
       message(ws, message) { ws.data.transport?.dispatchMessage(message); },
       close(ws, code, reason) { ws.data.transport?.dispatchClose(code, reason); },
