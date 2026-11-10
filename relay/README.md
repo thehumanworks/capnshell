@@ -14,6 +14,12 @@ and `src/relay-hub.ts` for the protocol.
 One Durable Object per device key, using the WebSocket hibernation API, so a registered
 device that is idle costs nothing.
 
+Pairing codes (`42-orbit-canyon-velvet`) meet in rooms: `/v1/room` opens one and gets its
+number, and `/v1/room/N` joins it. One Durable Object, `RelayRooms`, holds every room and
+only passes messages between the device showing a code and the one typing it; the two run
+a PAKE through it, so it never sees the words or the invite they exchange.
+[ADR 0004](../docs/adr/0004-pairing-codes.md) records the design.
+
 ## Who may use it
 
 Only cns. Every request must carry a `Cns-Client` header: an HMAC-SHA256, under the client
@@ -38,7 +44,8 @@ npx wrangler@4.151.3 deploy
 
 It needs no secrets. `wrangler.toml` gives the Worker the custom domain `cns.nothuman.work`,
 so Cloudflare manages its DNS record and certificate. The relay serves its paths under
-`/relay` there, and also at the root, as on its workers.dev address. Deploy before releasing a cns that depends on a change here. If the
+`/relay` there, and also at the root, as on its workers.dev address. Deploy before releasing a cns that depends on a change here: a relay without rooms answers
+`/v1/room` with 404, and cns then prints the long invite instead of a code. If the
 Worker's address changes, update `DEFAULT_RELAY` and release cns.
 
 ## Test locally
@@ -59,4 +66,8 @@ the relay off. Neither is a user setting.
 - 32 connections through the relay per device key at once, 8 of them from one address.
 - 1 MiB per WebSocket message (links send 64 KiB records).
 - A dialer waits up to 10 seconds for the device to answer.
-- The Worker keeps no data: a Durable Object holds only the sockets of one key.
+- Pairing rooms: up to 10,000 at once, numbered from 1 with no number reused within 2
+  minutes. A room lasts at most 60 minutes and takes one guest at a time, for 15 seconds;
+  one address may hold 4 guests at once. Room messages are at most 64 KiB.
+- The Worker keeps no data: a Durable Object holds only the sockets of one key, or of the
+  open rooms.

@@ -1,6 +1,6 @@
 /**
  * What src/secure.ts uses of libsodium-wrappers, for the gateway Worker: wrangler.toml
- * aliases libsodium-wrappers to this file. Workers forbid compiling WebAssembly at run
+ * aliases libsodium-wrappers-sumo to this file. Workers forbid compiling WebAssembly at run
  * time, which libsodium.js does when it loads, so this delegates to nacl.ts.
  */
 import * as nacl from "./nacl.js";

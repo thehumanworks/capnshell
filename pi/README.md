@@ -14,7 +14,7 @@ Hosts are devices paired with Pi's machine by `cns pair`. Pi reaches one at the 
 
 ```sh
 cns up                           # on the host, once
-cns pair                         # on the host; paste the invite on Pi's machine with cns pair 'cns1:...'
+cns pair                         # on the host; type the code it shows on Pi's machine with cns pair CODE
 # then in Pi: /cns attach studio
 ```
 

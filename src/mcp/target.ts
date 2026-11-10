@@ -1,10 +1,7 @@
 import { connectControl } from "../commands/daemon.js";
-import { builtInRelay } from "../relay-config.js";
-import { dialAddresses, isRelayAddress } from "../relay-hub.js";
 import type { PeerController, PeerSummary } from "../console.js";
+import { openDeviceLink } from "../device-link.js";
 import { fingerprint, loadIdentity } from "../identity.js";
-import { connectFirst, rpcSession } from "../secure.js";
-import { RefusingShell } from "../refusing-shell.js";
 import type { ShellApi } from "../shell.js";
 import { plain, type RemoteNamedPty } from "../terminal.js";
 
@@ -72,8 +69,9 @@ function limitCalls(open: (signal: AbortSignal) => Promise<Link>): (signal: Abor
 }
 
 /**
- * Reach one paired device, on a new encrypted connection for each call as `cns run`
- * does. Closing a call's connection makes the device kill its commands and end its waits.
+ * Reach one paired device for each call as `cns run` does: over the local daemon's standing
+ * link to it when there is one, else a new encrypted connection. Closing a call's connection
+ * makes the device kill its commands and end its waits.
  */
 export function pairedTarget(expect: { name: string; publicKey: string; addresses: string[] }, cwd?: string): McpTarget {
   return {
@@ -84,10 +82,10 @@ export function pairedTarget(expect: { name: string; publicKey: string; addresse
       // Prove this device's identity and require the saved one on the other end.
       const identity = loadIdentity();
       if (!identity) throw new Error("This device has no identity yet; run cns identity or cns up first.");
-      // An encrypted channel to the paired device, at the first saved address, or the relay, that answers as it.
-      const { channel, url } = await connectFirst(dialAddresses(expect, builtInRelay()), identity, { expect: expect.publicKey, signal });
-      const via = isRelayAddress(url) ? "relay" as const : "direct" as const;
-      const remote = rpcSession<ShellApi>(channel, new RefusingShell());
+      // The local daemon's standing link to the device, lent for this call, or else an encrypted
+      // channel to it at the first saved address, or the relay, that answers as it.
+      const link = await openDeviceLink(expect, identity, signal);
+      const { remote, via } = link;
       let closed = false;
       let lost = false;
       remote.onRpcBroken(() => { if (!closed) lost = true; });
@@ -117,7 +115,7 @@ export function pairedTarget(expect: { name: string; publicKey: string; addresse
           if (closed) return;
           closed = true;
           remote[Symbol.dispose]();
-          channel.close("MCP call ended");
+          link.close("MCP call ended");
         },
       };
     }),

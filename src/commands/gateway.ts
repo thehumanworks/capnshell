@@ -1,6 +1,7 @@
 import readline from "node:readline";
 import { describeGrants, expandGrants } from "../peers.js";
 import { loadIdentity } from "../identity.js";
+import { INVITE_PREFIX } from "../pairing.js";
 import { OWNER_HEADER, ownerProof } from "../owner-proof.js";
 import { TOOL_NAMES, type ToolName } from "../mcp/server.js";
 
@@ -75,9 +76,19 @@ export async function status(options: GatewayOptions): Promise<void> {
   ].join("\n"));
 }
 
-export async function pair(invite: string, options: GatewayOptions & { name?: string; request?: string }): Promise<void> {
+/** `cns gateway pair CODE` (or INVITE): resolve a pairing code here, then hand the gateway the invite behind it. */
+export async function pair(typed: string | readonly string[], options: GatewayOptions & { name?: string; request?: string }): Promise<void> {
+  const parts = typeof typed === "string" ? [typed] : [...typed];
   const requests = options.request === undefined ? undefined : expandGrants(options.request.split(","));
-  if (!options.json) console.error("The gateway is pairing; confirm on the device that printed the invite, after checking the gateway's fingerprint (cns gateway status).");
+  // The gateway is dialed through the relay either way; the code exchange runs on this device, so the gateway changes nothing.
+  let invite: string;
+  if (parts.length === 1 && parts[0]!.startsWith(INVITE_PREFIX)) invite = parts[0]!;
+  else {
+    const { inviteFromCode } = await import("./pairing-cli.js");
+    try { invite = await inviteFromCode(parts); }
+    catch (error) { process.exitCode = 3; throw error; }
+  }
+  if (!options.json) console.error("The gateway is pairing; confirm on the device that showed the code, after checking the gateway's fingerprint (cns gateway status).");
   const answer = await call<{ paired: boolean; reason?: string; name?: string; fingerprint?: string; granted?: string[] }>(options, "pair", { invite, ...options.name ? { name: options.name } : {}, ...requests ? { requests } : {} });
   if (!answer.paired) { process.exitCode = 3; print(options, answer, () => `Not paired: ${answer.reason}`); return; }
   print(options, answer, () => `The gateway paired with ${answer.name} (${answer.fingerprint}). It may use there: ${describeGrants(expandGrants(answer.granted ?? []))}.`);

@@ -16,8 +16,21 @@ export interface PeerSummary {
 /** A peer's file operations, as cns cp uses them. */
 export type RemoteFiles = Pick<RpcStub<ShellApi>, "stat" | "readdir" | "mkdir" | "readFile" | "writeFile" | "writeFileAt">;
 
+/** A daemon's standing link, lent to one local command; see PeerController.lend. */
+export interface LentLink {
+  /** A fork of the device's shell, or the shell itself when the device grants no shell. */
+  shell: RpcStub<ShellApi>;
+  via: "direct" | "relay";
+}
+
 export interface PeerController {
   peers(): Promise<PeerSummary[]>;
+  /**
+   * Lend a local command the daemon's standing link to the paired device with `publicKey`,
+   * so the command need not dial it: undefined when there is no such link. `lost` runs if
+   * the link ends before `released` aborts, which the borrower does when it is done.
+   */
+  lend?(publicKey: string, released: AbortSignal, lost: () => void): Promise<LentLink | undefined>;
   info(id: string): Promise<ShellInfo>;
   /** Aborting `signal` kills the command. */
   run(id: string, command: string, options: RunOptions, signal?: AbortSignal): Promise<RunResult>;
