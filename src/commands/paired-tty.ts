@@ -1,5 +1,4 @@
 import type { RpcStub } from "capnweb";
-import { AuthError } from "../auth.js";
 import { errorMessage, printable } from "../errors.js";
 import { ensureIdentity } from "../identity.js";
 import { explainDenial } from "../peers.js";
@@ -8,6 +7,7 @@ import { openDeviceLink } from "../device-link.js";
 import { secureReady } from "../secure.js";
 import type { PtySessionInfo, PtySessionOptions, ShellApi } from "../shell.js";
 import { attachTerminal, ConnectionLost, DETACH_KEY, plain, type RemoteNamedPty } from "../terminal.js";
+import { afterOpenFailure, RETRY_MIN_MS, sessionReplaced } from "../tty-recovery.js";
 import { commandExitCode, describeExit } from "./one-shot.js";
 
 /** `cns tty DEVICE` starts a session of its own, named tty-1, tty-2 and so on: the first name free on the device. */
@@ -18,41 +18,12 @@ const MAX_NAME_TRIES = 64;
 const END_MS = 3000;
 /** How long an attach keeps trying to get back to its session after the connection drops. */
 export const RECONNECT_MS = Number(process.env.CNS_RECONNECT_MS) > 0 ? Number(process.env.CNS_RECONNECT_MS) : 10 * 60 * 1000;
-const RETRY_MIN_MS = 500;
-const RETRY_MAX_MS = 15_000;
 const CTRL_C = 0x03;
 
 const say = (message: string) => process.stderr.write(`${process.stderr.isTTY ? "\r\n" : ""}[cns: ${message}]\n`);
 
-/** A failure that ends the attach for good, with its exit status. */
-class Final extends Error {
-  constructor(message: string, readonly code: number) { super(message); }
-}
 /** The device does not let this one start sessions, so `cns tty DEVICE` uses an unnamed terminal instead. */
 export const NO_SESSIONS = Symbol("no sessions");
-
-/** What a failure while connecting or reattaching means; on the first attempt nothing was ever granted or found. */
-function classify(error: unknown, device: string, name: string, first: boolean): Final | undefined {
-  const message = printable(errorMessage(error));
-  if (error instanceof AuthError && (error.code === "not-paired" || error.code === "identity-changed" || error.code === "invalid-proof")) {
-    return new Final(`${device} ${first ? "does not accept" : "no longer accepts"} this device (${message}).`, 3);
-  }
-  if (/^Permission denied/.test(message)) {
-    const explained = explainDenial(message, device);
-    return new Final(first ? `${device} does not let this device use that session: ${explained}` : `access to ${device}'s sessions was revoked: ${explained}`, 4);
-  }
-  if (/No PTY session named/.test(message)) {
-    return new Final(first ? `there is no session ${name} on ${device}; cns sessions ${device} lists them.` : `the session ${name} no longer exists on ${device}: it was killed, its time limit passed, or ${device}'s daemon restarted.`, 1);
-  }
-  if (/no longer exists/.test(message)) return new Final(`the session ${name} no longer exists on ${device}.`, 1);
-  if (/Too many named PTY sessions/.test(message)) {
-    return new Final(`${device} already holds as many named sessions as it keeps; cns sessions ${device} lists them, and cns kill ${device} NAME ends one.`, 1);
-  }
-  return undefined;
-}
-
-/** Whether the device refuses this one a new session, so a plain terminal is all `cns tty DEVICE` can give. */
-const noSessionAccess = (error: unknown) => /^Permission denied: sessions:(view|create) not granted/.test(errorMessage(error));
 
 /** Settle with `promise`, or reject once `ms` have passed. */
 async function within<T>(promise: Promise<T>, ms: number): Promise<T> {
@@ -182,18 +153,15 @@ export async function attachPaired(config: PeerConfig): Promise<number | typeof 
           connected = await open();
           break;
         } catch (error) {
-          if (interrupted.signal.aborted) return await stopped();
-          if (first && own && noSessionAccess(error)) return NO_SESSIONS;
-          const final = error instanceof Final ? error : classify(error, expect.name, name ?? "a new session", first);
-          if (final) { say(final.message); return final.code; }
-          if (first) throw error;
-          if (Date.now() > deadline) {
-            say(`gave up reaching ${expect.name} after ${Math.round(RECONNECT_MS / 60000)} minutes: ${printable(errorMessage(error))}`);
-            kept();
-            return 1;
-          }
-          await delay(wait);
-          wait = Math.min(RETRY_MAX_MS, wait * 2);
+          // Stop, end, fall back, give up or retry: tty-recovery.ts decides.
+          const next = afterOpenFailure(error, { device: expect.name, name, first, own, aborted: interrupted.signal.aborted, now: Date.now(), deadline, reconnectMs: RECONNECT_MS, wait });
+          if (next.kind === "stopped") return await stopped();
+          if (next.kind === "no-sessions") return NO_SESSIONS;
+          if (next.kind === "final") { say(next.message); return next.code; }
+          if (next.kind === "throw") throw error;
+          if (next.kind === "give-up") { say(next.message); kept(); return 1; }
+          await delay(next.waitMs);
+          wait = next.nextWaitMs;
         }
       }
       disconnectedInput(false);
@@ -271,10 +239,9 @@ export async function attachPaired(config: PeerConfig): Promise<number | typeof 
       const session = name;
       handle = await remote.ptySession(session) as unknown as RemoteNamedPty;
       const info = await plain(handle.info());
-      if (!original) original = { pid: info.pid, startedAt: info.startedAt };
-      else if (info.pid !== original.pid || info.startedAt !== original.startedAt) {
-        throw new Final(`${session} on ${expect.name} ended and was replaced while disconnected; ${own ? `cns tty ${expect.name} opens a new terminal` : `run cns tty ${expect.name} --attach ${session} again to attach to the new one`}.`, 1);
-      }
+      original ??= { pid: info.pid, startedAt: info.startedAt };
+      const replaced = sessionReplaced(original, info, expect.name, session, own);
+      if (replaced) throw replaced;
       const opened = handle;
       return {
         session: opened,
