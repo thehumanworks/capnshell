@@ -1,8 +1,8 @@
 # State machines in cns, and how to test them
 
 Status: survey of 10 November 2026. The first two candidates are explicit in
-`src/link-rules.ts` and `src/invites.ts`, and the third, already explicit, now has tests
-in `gateway/consent.test.ts`.
+`src/link-rules.ts` and `src/invites.ts`, the third, already explicit, now has tests
+in `gateway/consent.test.ts`, and the fourth's decisions are in `src/tty-recovery.ts`.
 
 Several of cns's lifecycles live in flags, timers, map membership and the order of
 callbacks rather than in a named state with named transitions. Their expected behaviour
@@ -26,9 +26,9 @@ transitions take the clock as an argument.
 | 1 | One standing link between two daemons | `src/commands/peer.ts` (`dial`, `accept`) | Races on every pairing, restart and outage; both sides must agree with no message between them. Behind a flaky test and the 2 s "stays single" sleeps. | Explicit in `src/link-rules.ts`, tested by tables and a two-daemon model |
 | 2 | A pairing invite on the inviting daemon | `src/commands/peer.ts` (`PendingInvite`, `pairingFor`, `pairing.*`), `ControlApi` | Security: the invite secret must work once, and neither side may keep half a pairing. Was only tested end to end. | Explicit in `src/invites.ts`, tested by a state × event table |
 | 3 | A connector's consent on the gateway | `gateway/object.ts` (`consents` table) | Security: gates OAuth access to devices. Already a status column, but had no tests. | Tested in `gateway/consent.test.ts` |
-| 4 | A `cns tty` client through outages | `src/commands/paired-tty.ts`, console footer words | The recovery words in docs/paired-peers.md section 7 are states. | After PR #57, which reworks it |
+| 4 | A `cns tty` client through outages | `src/commands/paired-tty.ts`, console footer words | The recovery words in docs/paired-peers.md section 7 are states. Revoked access and giving up had no test. | Decisions explicit in `src/tty-recovery.ts`, tested by a failure × situation table |
 | 5 | A daemon's relay registration | `src/commands/peer.ts` (`registerAtRelay`) | What `cns doctor` reports, and backoff against a relay that keeps dropping it. | Later |
-| 6 | The pairing code's host | `src/pairing-code.ts` (`hostCode`) | Security: three wrong codes end it. | Later |
+| 6 | The pairing code's host | `src/pairing-code.ts` (`hostCode`) | Security: three wrong codes end it. | Low: already checked in process |
 | 7 | The daemon process and its state file | `src/commands/daemon.ts`, `daemon-server.ts` | Start arbitration and stale state. Already well tested. | Low |
 | 8 | A named PTY session | `src/pty.ts` (`Pty`, `PtyControls`, `HandleScope`) | Partly explicit; its tests need real terminals anyway. | Low |
 
@@ -112,11 +112,34 @@ the pending check, expiry or the cap fails them. No gateway code changed, so no 
 
 ## 4. A `cns tty` client through outages
 
-The console words `connected`, `interrupted`, `reconnecting`, `reattached`,
-`access-revoked`, `session-expired` and `host-lost` (docs/paired-peers.md section 7) are
-the client's states. PR #57 reworks this client and its tests, so this waits until it is
-merged; then a reducer for the client's recovery lets `tty-paired.test.ts` and
-`reconnect-e2e.test.ts` keep one wiring test each and check the rest as transitions.
+**States**: connecting (the first try); attached; reconnecting, after the connection
+dropped, waiting 0.5 s between tries and doubling up to 15 s until ten minutes have
+passed; and the endings: stopped (Ctrl-C, a signal, or Ctrl-] while reconnecting), a plain
+terminal instead (the first try of `cns tty DEVICE` on a device that does not let this one
+start sessions), refused (not accepted, exit 3; access revoked, exit 4; the session missing,
+ended, replaced or over the cap, exit 1), given up (exit 1), and the program's exit or a
+detach. The words in docs/paired-peers.md section 7 (`interrupted`, `reconnecting`,
+`reattached`, `access-revoked`, `session-expired`, `host-lost`) name some of them.
+
+**What was implicit**: a `first` flag, a deadline and a doubling wait in the attach loop,
+and an ordered chain of checks in its `catch` that chose between these, with each error
+classified by its message.
+
+**Now.** `src/tty-recovery.ts` holds those decisions as pure functions: `afterOpenFailure`
+(stop, fall back to a plain terminal, end with a reason and exit status, report the error,
+give up, or retry after a wait), `classify`, and `sessionReplaced`, which keeps a reattach
+from joining another session that took the name. `paired-tty.ts` keeps the connecting, the
+terminal and its messages, and behaves as before. `src/tty-recovery.test.ts` takes twelve
+failures (each refusal, each missing session grant, the session missing, ended, replaced or
+over the cap, and an outage) through four situations (a terminal's own session or
+`--attach`, on the first try or reconnecting) and checks the outcome, exit status and
+message; then that stopping wins over any failure, the backoff and deadline, and the
+replaced-session check. It runs in about 50 ms, and each of 13 rules broken by hand (falling
+back to a plain terminal while reconnecting, giving up at the deadline rather than after it,
+an uncapped wait, a control character passed to the terminal, and so on) fails it.
+`tty-paired.test.ts` and `reconnect-e2e.test.ts` (17 s together) stay as the wiring checks:
+they show that the device's real error texts reach these rules, which a table of copied
+messages cannot.
 
 ## 5. A daemon's relay registration
 
@@ -130,8 +153,10 @@ same outage from being logged on every retry. A reducer with the clock passed in
 
 `hostCode` waits for a guest, sends it a hello, then delivers the invite to a correct
 reply, counts a wrong one and waits again, or forgets the guest that left; the third
-wrong code or a lost relay ends it. A reducer over the relay's messages would put the
-three-tries rule in a table rather than in `code-pairing-e2e.test.ts` alone.
+wrong code or a lost relay ends it. `pairing-code.test.ts` already runs it against an
+in-process relay in under 200 ms: delivery once, three wrong codes ending it, a mistyped
+word costing one try, and one guest at a time. A reducer over the relay's messages would
+add only a stray message and a guest leaving mid-exchange, so it ranks low.
 
 ## 7. The daemon process and its state file
 
