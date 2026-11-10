@@ -23,6 +23,7 @@ import { removeStaleState } from "./daemon.js";
 import { runOneShot } from "./one-shot.js";
 import { infoSchema } from "./connect-device.js";
 import { openDeviceLink, type DeviceLink } from "../device-link.js";
+import { afterDialFailure, dialTurn, keepsOutbound, onDialed, onInbound, redialDelay, worthDialing } from "../link-rules.js";
 
 /** CLI exit statuses for failures, as docs/paired-peers.md lists them: 3 unpaired or changed device, 4 permission denied, else 1. */
 export function authExitCode(error: unknown): number {
@@ -71,20 +72,6 @@ interface PendingInvite {
   waiters: Array<{ resolve: (value: { peer: PublicKey; fingerprint: string; proposal: Proposal }) => void; reject: (error: Error) => void }>;
   decision: ReturnType<typeof Promise.withResolvers<Decision>>;
 }
-/** The most recent attempt is tried first, then every saved address in turn. */
-const REDIAL_MIN_MS = 1000;
-const REDIAL_MAX_MS = 30_000;
-
-/**
- * Whether to keep a standing link to a paired device. A device that gave no address of its
- * own and lets this one do nothing, such as the gateway (gateway/), never answers through
- * the relay and offers nothing over a link: it dials when it needs this device, so dialing
- * it would only knock on the relay every 30 seconds for nothing.
- */
-export function worthDialing(entry: { publicKey: string; addresses: readonly string[]; grants: { outgoing: readonly string[] } }, relay: string | undefined): boolean {
-  if (!entry.addresses.length && !entry.grants.outgoing.length) return false;
-  return dialAddresses(entry, relay).length > 0;
-}
 /** How long the person on the inviting device has to decide once a proposal arrives. */
 const DECISION_MS = 10 * 60 * 1000;
 /** A daemon registered at a relay pings it this often, and re-registers if it hears nothing for three times as long. */
@@ -93,18 +80,6 @@ const RELAY_PING_MS = 30_000;
 const MAX_RELAY_ANSWERS = 32;
 /** A registration that stayed up this long resets the backoff, so a relay that keeps dropping it is not hammered. */
 const RELAY_STABLE_MS = 30_000;
-/**
- * Daemon links made within this long of each other count as both devices dialing at
- * once, settled by the key rule. A daemon dials only when it has no link, so a dial
- * that arrives later means the link this side holds is dead on the other.
- */
-const DIAL_RACE_MS = 5000;
-/**
- * A standing link through the relay is replaced by a direct one this long after it was made,
- * if the device can be dialed directly by then: twice the dial race, so that both daemons,
- * whose clocks for the link start a moment apart, agree that the race is over.
- */
-const UPGRADE_AFTER_MS = 2 * DIAL_RACE_MS;
 
 /**
  * Run the paired daemon, or one command on a paired device: the same link machinery, the
@@ -148,7 +123,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
     for (const link of [...links.values()]) if (link.publicKey === publicKey) link.stop();
   }
   /** When both devices dialed each other, the one with the smaller key keeps its outbound link. */
-  const keepsOutbound = (publicKey: PublicKey) => identity.publicKey < publicKey;
+  const keepsOwnOutbound = (publicKey: PublicKey) => keepsOutbound(identity.publicKey, publicKey);
 
   function describe(session: Session): string {
     const who = session.peer ? `${session.peer.name} (paired)` : session.info?.hostname;
@@ -467,7 +442,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
     const schedule = () => {
       if (stopped || stopping) return;
       clearTimeout(timer);
-      timer = setTimeout(() => void connect(), Math.min(REDIAL_MAX_MS, REDIAL_MIN_MS * 2 ** Math.min(attempt, 5)));
+      timer = setTimeout(() => void connect(), redialDelay(attempt));
       timer.unref?.();
       attempt++;
     };
@@ -488,40 +463,27 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
       const current = getPeer(name);
       const addresses = current && worthDialing(current, relay) ? dialAddresses(current, relay) : [];
       if (!current || current.publicKey !== expectedKey || !addresses.length) return stop();
-      let dialing = addresses;
+      // With a link up, wait, unless it runs through the relay while a direct one may work (link-rules.ts).
       const existing = linkTo(current.publicKey);
-      if (existing) {
-        // A link is up. Keep it, unless it runs through the relay while a direct one may work:
-        // a device that cannot be dialed, such as one in WSL behind its host's firewall, can
-        // still dial this one, and whichever daemon dialed first, typing then crosses the
-        // relay. Only once the link is past the dial race, which the other daemon also
-        // applies, so it takes the direct link as replacing the relayed one.
-        const direct = addresses.filter((url) => !isRelayAddress(url));
-        if (existing.via !== "relay" || !direct.length || Date.now() - existing.since < UPGRADE_AFTER_MS) return schedule();
-        dialing = direct;
-      }
+      const turn = dialTurn(existing, addresses, Date.now());
+      if (turn.action === "wait") return schedule();
       let channel: SecureChannel;
       let url: string;
       try {
-        ({ channel, url } = await connectFirst(dialing, identity, { expect: current.publicKey, mode: "daemon", signal: cancelled.signal }));
+        ({ channel, url } = await connectFirst(turn.addresses, identity, { expect: current.publicKey, mode: "daemon", signal: cancelled.signal }));
       } catch (error) {
-        // A direct address that answers wrongly while the relayed link works says nothing about the device.
-        if (!existing && error instanceof AuthError && (error.code === "identity-changed" || error.code === "not-paired")) {
-          announce(`${name}: ${error.message}`);
+        if (afterDialFailure(error instanceof AuthError ? error.code : undefined, turn.upgrade) === "stop") {
+          announce(`${name}: ${(error as Error).message}`);
           return stop();
         }
         return schedule();
       }
       if (stopped || stopping) { channel.close(); return; }
+      // Replacing the relayed link this dial set out to replace, or both devices dialed at once.
       const other = linkTo(current.publicKey);
-      if (other && other === existing) {
-        // The direct link replaces the relayed one, here and on the other device.
-        remove(existing);
-      } else if (other) {
-        // Both devices dialed at once: exactly one link survives, chosen the same way on both sides.
-        if (keepsOutbound(current.publicKey)) remove(other);
-        else { channel.close("Duplicate link"); return schedule(); }
-      }
+      const outcome = onDialed(other, turn.upgrade && other === existing, keepsOwnOutbound(current.publicKey));
+      if (outcome === "drop") { channel.close("Duplicate link"); return schedule(); }
+      if (outcome === "replace") remove(other!);
       attempt = 0;
       const via = isRelayAddress(url) ? "relay" : "direct";
       const grants: GrantHolder = { current: current.grants.incoming };
@@ -623,7 +585,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
         lastFailure = failure;
         announce(`Cannot register at the relay ${new URL(base).host}: ${failure} Retrying automatically.`);
       }
-      const timer = setTimeout(() => void register_(), Math.min(REDIAL_MAX_MS, REDIAL_MIN_MS * 2 ** Math.min(attempt++, 5)));
+      const timer = setTimeout(() => void register_(), redialDelay(attempt++));
       timer.unref?.();
     };
     void register_();
@@ -652,15 +614,15 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
   function accept(channel: SecureChannel, { peer, invite, mode }: Established, address: string, via: "direct" | "relay" = "direct"): Session | undefined {
     if (stopping) { channel.close("The daemon is stopping."); return undefined; }
     try {
-      const existing = !invite && mode === "daemon" ? linkTo(peer) : undefined;
-      // Both daemons dialed at once: the smaller key keeps the link it dialed. A link this
-      // side dialed longer ago is dead on the other side, which only dials without one.
-      if (existing && existing.outbound && keepsOutbound(peer) && Date.now() - existing.since < DIAL_RACE_MS) {
+      // Both daemons dialed at once, or the other one lost the link this side holds (link-rules.ts).
+      const held = linkTo(peer);
+      const outcome = onInbound(held, !invite && mode === "daemon", keepsOwnOutbound(peer), Date.now());
+      if (outcome === "refuse") {
         channel.close("Duplicate link");
         return undefined;
       }
       const offered = invite ? { local: pairingFor(invite.id, peer), name: undefined, grants: undefined } : offerTo(peer);
-      if (existing) remove(existing);
+      if (outcome === "replace") remove(held!);
       const remote = rpcSession<ShellApi>(channel, offered.local);
       const session = register({ close: (reason) => channel.close(reason), outbound: false, via }, offered.local, remote, address,
         offered.name ? { name: offered.name, publicKey: peer, daemon: mode === "daemon" } : undefined);
