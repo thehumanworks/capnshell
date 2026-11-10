@@ -1,8 +1,8 @@
 # State machines in cns, and how to test them
 
-Status: survey of 10 November 2026. The first candidate is explicit in
-`src/link-rules.ts`, and the third, already explicit, now has tests in
-`gateway/consent.test.ts`.
+Status: survey of 10 November 2026. The first two candidates are explicit in
+`src/link-rules.ts` and `src/invites.ts`, and the third, already explicit, now has tests
+in `gateway/consent.test.ts`.
 
 Several of cns's lifecycles live in flags, timers, map membership and the order of
 callbacks rather than in a named state with named transitions. Their expected behaviour
@@ -24,7 +24,7 @@ transitions take the clock as an argument.
 | # | Lifecycle | Where | Why it matters | Status |
 | --- | --- | --- | --- | --- |
 | 1 | One standing link between two daemons | `src/commands/peer.ts` (`dial`, `accept`) | Races on every pairing, restart and outage; both sides must agree with no message between them. Behind a flaky test and the 2 s "stays single" sleeps. | Explicit in `src/link-rules.ts`, tested by tables and a two-daemon model |
-| 2 | A pairing invite on the inviting daemon | `src/commands/peer.ts` (`PendingInvite`, `pairingFor`, `pairing.*`), `ControlApi` | Security: the invite secret must work once, and neither side may keep half a pairing. Only tested end to end. | Next |
+| 2 | A pairing invite on the inviting daemon | `src/commands/peer.ts` (`PendingInvite`, `pairingFor`, `pairing.*`), `ControlApi` | Security: the invite secret must work once, and neither side may keep half a pairing. Was only tested end to end. | Explicit in `src/invites.ts`, tested by a state × event table |
 | 3 | A connector's consent on the gateway | `gateway/object.ts` (`consents` table) | Security: gates OAuth access to devices. Already a status column, but had no tests. | Tested in `gateway/consent.test.ts` |
 | 4 | A `cns tty` client through outages | `src/commands/paired-tty.ts`, console footer words | The recovery words in docs/paired-peers.md section 7 are states. | After PR #57, which reworks it |
 | 5 | A daemon's relay registration | `src/commands/peer.ts` (`registerAtRelay`) | What `cns doctor` reports, and backoff against a relay that keeps dropping it. | Later |
@@ -79,16 +79,23 @@ to save (the other device is told no), expired unused, not decided in time, canc
 (the `cns pair` that asked for it went away), abandoned (the device left before the
 decision), and ended by the daemon stopping.
 
-**What is implicit**: membership in the `invites` map, whether `proposal` is set, the
-`waiters` array, a timer that is swapped from the invite's lifetime to the decision's, a
-deferred `decision`, and `secretFor` checking `expiresAt > now && !proposal`.
+**What was implicit**: membership in the `invites` map, whether `proposal` was set, the
+`waiters` array, a timer swapped from the invite's lifetime to the decision's, a deferred
+`decision`, and `secretFor` checking `expiresAt > now && !proposal`.
 
-**Test once explicit**: an `InviteBook` with the clock passed in, and a table of state and
-event (create, prove, propose, await, decide accept or decline, save fails, cancel, device
-leaves, time passes, stop) to the next state, whether `secretFor` answers, and what a
-waiting `awaitProposal` and the device's pending proposal get. This replaces the timing
-in `pairing-e2e.test.ts` for everything but the wiring. Touches pairing: behaviour must
-stay exactly as it is.
+**Now.** `InviteBook` in `src/invites.ts` holds the invites with a named phase (`open`,
+`proposed`; gone once ended) and takes the clock and timers as an argument; `peer.ts`
+keeps the saving, announcing and dialing, and behaves as before. `src/invites.test.ts`
+takes each phase through each event (the secret asked for, a device proposes, `cns pair`
+waits, accepts, accepts under another name, declines, saving fails, the proposing or
+another device leaves, `cns pair` goes away, the daemon stops, the invite's lifetime or
+the decision time passes) and checks what the event returns, the next phase, what the
+waiting `cns pair` and the proposing device are told, and what was saved; then that an
+invite ended any of six ways takes nothing more. Reusing the secret after a proposal,
+taking a second proposal, granting beyond the request, telling the device yes when saving
+failed, ending on another device's leaving, letting the lifetime end a proposed invite,
+or ignoring expiry each fails it. `pairing-e2e.test.ts` and `code-pairing-e2e.test.ts`
+stay as the wiring checks.
 
 ## 3. A connector's consent on the gateway
 

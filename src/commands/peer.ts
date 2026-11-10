@@ -15,7 +15,8 @@ import { closeSocket, forkShell, openSocket } from "../connect.js";
 import { AuthError, type Refusal } from "../auth.js";
 import { ensureIdentity, fingerprint, type Identity, type PublicKey } from "../identity.js";
 import { GrantedShell, type GrantHolder } from "../granted-shell.js";
-import { createInvite, decisionSchema, PairingApi, suggestedName, type Decision, type Proposal } from "../pairing.js";
+import { createInvite, decisionSchema, PairingApi, suggestedName } from "../pairing.js";
+import { InviteBook } from "../invites.js";
 import { advertisedSchema, describeGrants, explainDenial, findPairedPeer, getPeer, grantsSchema, learnAddresses, listPeers, savePairedPeer, updatePairedPeer } from "../peers.js";
 import { listeningAddresses } from "../addresses.js";
 import { serveControl, type PairingController } from "./daemon-server.js";
@@ -64,16 +65,6 @@ interface Session {
   /** Local commands borrowing this link, told when it ends. */
   borrowers: Set<() => void>;
 }
-interface PendingInvite {
-  secret: Uint8Array;
-  expiresAt: number;
-  timer: ReturnType<typeof setTimeout>;
-  proposal?: { peer: PublicKey; proposal: Proposal };
-  waiters: Array<{ resolve: (value: { peer: PublicKey; fingerprint: string; proposal: Proposal }) => void; reject: (error: Error) => void }>;
-  decision: ReturnType<typeof Promise.withResolvers<Decision>>;
-}
-/** How long the person on the inviting device has to decide once a proposal arrives. */
-const DECISION_MS = 10 * 60 * 1000;
 /** A daemon registered at a relay pings it this often, and re-registers if it hears nothing for three times as long. */
 const RELAY_PING_MS = 30_000;
 /** Dialers the relay announced that the daemon is answering at once; more are ignored. */
@@ -113,7 +104,8 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
     const owner = fingerprint(publicKey);
     return { local: new GrantedShell(new ShellApi(ptys, { owner }), grants, entry.name, owner, advertisedToPeers), name: entry.name, grants };
   }
-  const invites = new Map<string, PendingInvite>();
+  /** Invites handed out and not yet settled (invites.ts). */
+  const invites = new InviteBook();
   const links = new Map<string, { stop: () => void; publicKey: PublicKey }>();
   /** The standing daemon link to a paired device, if any, answered yet or not; one command's connection does not count. */
   const linkTo = (publicKey: PublicKey) => [...sessions.values()].find((session) => session.peer?.publicKey === publicKey && session.peer.daemon);
@@ -152,7 +144,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
     for (const link of links.values()) link.stop();
     for (const channel of relayAnswers.values()) channel?.close("The daemon is stopping");
     relayAnswers.clear();
-    for (const invite of invites.values()) expireInvite(invite, "The daemon stopped.");
+    invites.endAll();
     for (const session of sessions.values()) remove(session);
     ptys[Symbol.dispose]();
     try {
@@ -314,45 +306,23 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
     }
   }
 
-  function expireInvite(invite: PendingInvite, why: string) {
-    clearTimeout(invite.timer);
-    for (const [id, pending] of invites) if (pending === invite) invites.delete(id);
-    const error = new Error(why);
-    for (const waiter of invite.waiters) waiter.reject(error);
-    invite.waiters = [];
-    invite.decision.reject(error);
-    invite.decision.promise.catch(() => {});
-  }
   /** The responder's view of who may connect: paired devices, and devices that hold a live invite. */
   function authorize(peer: PublicKey, invite?: { id: string }): Refusal | undefined {
     if (invite) return undefined;
     if (findPairedPeer(peer)) return undefined;
     return { code: "not-paired", reason: "Not paired with this device. Run cns pair on it and type the code it shows here with cns pair CODE." };
   }
-  function secretFor(id: string): Uint8Array | undefined {
-    const invite = invites.get(id);
-    return invite && invite.expiresAt > Date.now() && !invite.proposal ? invite.secret : undefined;
-  }
+  const secretFor = (id: string) => invites.secretFor(id);
   /** What an invited device gets instead of a shell: one chance to propose a pairing. */
   function pairingFor(inviteId: string, peer: PublicKey): PairingApi {
     // A device that leaves before the decision would never save its side: end the invite instead.
-    const left = () => {
-      const invite = invites.get(inviteId);
-      if (invite?.proposal?.peer === peer) expireInvite(invite, "The other device left before the pairing was decided.");
-    };
     return new PairingApi(async (proposal) => {
-      const invite = invites.get(inviteId);
-      if (!invite || invite.proposal) throw new Error("This invite is no longer open.");
-      invite.proposal = { peer, proposal };
-      clearTimeout(invite.timer);
-      invite.timer = setTimeout(() => expireInvite(invite, "Nobody answered the pairing proposal in time."), DECISION_MS);
-      for (const waiter of invite.waiters) waiter.resolve({ peer, fingerprint: fingerprint(peer), proposal });
-      invite.waiters = [];
+      const decided = invites.propose(inviteId, peer, proposal);
       announce(`Pairing proposal from ${proposal.name} (${fingerprint(peer)}); waiting for cns pair to decide.`);
       // The alias chosen here stays here.
-      const { accept, granted, reason } = await invite.decision.promise;
+      const { accept, granted, reason } = await decided;
       return { accept, ...granted ? { granted } : {}, ...reason ? { reason } : {} };
-    }, left);
+    }, () => invites.left(inviteId, peer));
   }
   const pairing: PairingController | undefined = daemon ? {
     identity: () => ({ publicKey: identity.publicKey, fingerprint: identity.fingerprint }),
@@ -360,44 +330,18 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
     relayRegistered: () => relay ? relayRegistered : undefined,
     async invite(ttlMs) {
       const invite = createInvite(identity.publicKey, advertised(), ttlMs, suggestedName(os.hostname()));
-      const pending: PendingInvite = {
-        secret: invite.secret, expiresAt: invite.expiresAt, waiters: [], decision: Promise.withResolvers<Decision>(),
-        timer: setTimeout(() => expireInvite(pending, "The invite expired before another device used it."), ttlMs),
-      };
-      pending.timer.unref?.();
-      invites.set(invite.id, pending);
+      invites.open(invite.id, invite.secret, invite.expiresAt, ttlMs);
       return { id: invite.id, text: invite.text, expiresAt: invite.expiresAt };
     },
-    awaitProposal(id) {
-      const invite = invites.get(id);
-      if (!invite) return Promise.reject(new Error("Unknown or expired invite."));
-      if (invite.proposal) return Promise.resolve({ ...invite.proposal, fingerprint: fingerprint(invite.proposal.peer) });
-      return new Promise((resolve, reject) => invite.waiters.push({ resolve, reject }));
-    },
+    awaitProposal: (id) => invites.awaitProposal(id),
     async decide(id, decision) {
-      const invite = invites.get(id);
-      if (!invite?.proposal) throw new Error("The other device left, or the invite expired; nothing was saved.");
+      invites.proposal(id);
       const parsed = decisionSchema.parse(decision);
-      const { peer, proposal } = invite.proposal;
-      let result: Decision = { accept: false, reason: parsed.reason ?? "The other device declined." };
-      let failure: unknown;
-      if (parsed.accept) {
-        const name = parsed.name ?? proposal.name;
-        const granted = (parsed.granted ?? []).filter((permission) => proposal.requests.includes(permission));
-        try {
-          savePairedPeer(name, { publicKey: peer, addresses: proposal.addresses ?? [], pairedAt: new Date().toISOString(), grants: { incoming: granted, outgoing: proposal.offers } });
-          result = { accept: true, name, granted };
-          announce(`Paired with ${name} (${fingerprint(peer)}).`);
-        } catch (error) {
-          // Answer the waiting device either way, so neither side is left with half a pairing.
-          failure = error;
-          result = { accept: false, reason: "The other device could not save the pairing." };
-        }
-      }
-      clearTimeout(invite.timer);
-      invites.delete(id);
-      invite.decision.resolve(result);
-      if (failure) throw failure;
+      // The device is answered either way, so neither side is left with half a pairing.
+      const result = invites.decide(id, parsed, ({ peer, proposal }, name, granted) => {
+        savePairedPeer(name, { publicKey: peer, addresses: proposal.addresses ?? [], pairedAt: new Date().toISOString(), grants: { incoming: granted, outgoing: proposal.offers } });
+        announce(`Paired with ${name} (${fingerprint(peer)}).`);
+      });
       if (result.accept && result.name) void dial(result.name);
       return result;
     },
@@ -422,10 +366,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
       dial(name);
     },
     async forget(publicKey) { forget(publicKey); },
-    cancel(id) {
-      const invite = invites.get(id);
-      if (invite) expireInvite(invite, "The inviting device stopped waiting.");
-    },
+    cancel: (id) => invites.cancel(id),
   } : undefined;
 
   /** Keep a link to a paired device, redialing its saved addresses, and this daemon's relay, with backoff while this daemon runs. */
