@@ -22,6 +22,8 @@ function inTerminal(t: TestContext, args: string[], env: Record<string, string>)
   t.after(() => { if (child.exitCode === null) child.kill(); });
   return {
     write: (text: string) => child.terminal!.write(text),
+    /** Close the terminal, as closing its window does: cns gets SIGHUP. */
+    close: () => child.terminal!.close(),
     get output() { return output; },
     exited: child.exited,
     waitFor: (needle: string, from = 0) => new Promise<void>((resolve, reject) => {
@@ -32,7 +34,7 @@ function inTerminal(t: TestContext, args: string[], env: Record<string, string>)
   };
 }
 
-test("cns tty DEVICE at a terminal: the main session, outages, blind typing, races and grants", { skip: !posix, timeout: 120000 }, async (t) => {
+test("cns tty DEVICE at a terminal: a session per terminal, outages, blind typing, races and grants", { skip: !posix, timeout: 120000 }, async (t) => {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-tty-paired-")));
   // Hooks run in the order they were added: stop the daemon and proxy, then remove the directory.
   const cleanups: Array<() => Promise<unknown>> = [];
@@ -84,9 +86,23 @@ test("cns tty DEVICE at a terminal: the main session, outages, blind typing, rac
   await writeFile(file, JSON.stringify({ ...record, addresses: [`ws://127.0.0.1:${proxyPort}`] }), { mode: 0o600 });
   const cut = () => { for (const socket of sockets.splice(0)) socket.destroy(); };
 
-  // At a terminal, cns tty studio starts and attaches the session main.
+  /** The names of studio's sessions now, as laptop lists them. */
+  const sessions = async () => {
+    const listed = await cli(laptop, ["sessions", "studio", "--json"]);
+    assert.equal(listed.code, 0, listed.stderr);
+    return (JSON.parse(listed.stdout) as Array<{ name: string }>).map((session) => session.name).sort();
+  };
+  const gone = async (name: string) => {
+    for (let tries = 0; (await sessions()).includes(name); tries++) {
+      if (tries > 50) assert.fail(`${name} is still listed on studio`);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  };
+  const named = (output: string) => /as session (tty-\d+)/.exec(output)?.[1];
+
+  // At a terminal, cns tty studio starts a session of its own and attaches it.
   const first = inTerminal(t, ["tty", "studio"], laptop.env);
-  await first.waitFor("started a login shell on studio as session main");
+  await first.waitFor("started a login shell on studio as session tty-1");
   first.write("echo hi-$((40+2))\r");
   await first.waitFor("hi-42");
 
@@ -98,52 +114,81 @@ test("cns tty DEVICE at a terminal: the main session, outages, blind typing, rac
   first.write(`touch ${blind}\r`);
   await new Promise((resolve) => setTimeout(resolve, 800));
   refusing = false;
-  await first.waitFor("reattached to studio/main via a direct link");
+  await first.waitFor("reattached to studio/tty-1 via a direct link");
   await first.waitFor("bytes typed while disconnected");
   const from = first.output.length;
   first.write("echo after-$((1+1))\r");
   await first.waitFor("after-2", from);
   assert.equal(existsSync(blind), false, "the blind command never ran");
 
-  // Ctrl-] detaches and leaves main running.
+  // Ctrl-] detaches, leaves tty-1 running and says how to get back to it.
   first.write("\x1d");
   assert.equal(await first.exited, 0);
-  assert.match(first.output, /detached from main; it keeps running on studio/);
+  assert.match(first.output, /detached from tty-1; it keeps running on studio: cns tty studio --attach tty-1 returns to it/);
+  assert.deepEqual(await sessions(), ["tty-1"]);
 
-  // Two terminals starting main at once both get it.
-  assert.equal((await cli(laptop, ["kill", "studio", "main"])).code, 0);
+  // Two terminals starting at once each get a session of their own; neither sees the other's.
   const [a, b] = [inTerminal(t, ["tty", "studio"], laptop.env), inTerminal(t, ["tty", "studio"], laptop.env)];
-  await Promise.all([a.waitFor("session main"), b.waitFor("session main")]);
-  a.write("echo shared-$((2+3))\r");
-  await Promise.all([a.waitFor("shared-5"), b.waitFor("shared-5")]);
-  a.write("\x1d");
-  b.write("\x1d");
-  assert.deepEqual([await a.exited, await b.exited], [0, 0]);
+  await Promise.all([a.waitFor("Ctrl-] detaches"), b.waitFor("Ctrl-] detaches")]);
+  const [nameA, nameB] = [named(a.output)!, named(b.output)!];
+  assert.deepEqual([nameA, nameB].sort(), ["tty-2", "tty-3"]);
+  a.write("echo only-$((2+3))-in-a\r");
+  b.write("echo only-$((3+4))-in-b\r");
+  await Promise.all([a.waitFor("only-5-in-a"), b.waitFor("only-7-in-b")]);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.doesNotMatch(b.output, /only-5-in-a/);
+  assert.doesNotMatch(a.output, /only-7-in-b/);
+  assert.deepEqual(await sessions(), ["tty-1", "tty-2", "tty-3"]);
 
-  // A device granted only shell gets a terminal of its own instead.
+  // A terminal's session ends with its program, and is removed with it.
+  a.write("exit 3\r");
+  assert.equal(await a.exited, 3);
+  await gone(nameA);
+
+  // Closing a terminal ends the session it started, as closing an ssh window does.
+  b.close();
+  assert.equal(await b.exited, 129);
+  await gone(nameB);
+  assert.deepEqual(await sessions(), ["tty-1"]);
+
+  // --attach rejoins a session, and the next new terminal takes the first free name.
+  const rejoined = inTerminal(t, ["tty", "studio", "--attach", "tty-1"], laptop.env);
+  const next = inTerminal(t, ["tty", "studio"], laptop.env);
+  await rejoined.waitFor("session tty-1");
+  await next.waitFor("started a login shell on studio as session tty-2");
+  rejoined.write("echo back-$((4+4))\r");
+  await rejoined.waitFor("back-8");
+  assert.doesNotMatch(next.output, /back-8/);
+  rejoined.write("\x1d");
+  next.write("exit\r");
+  assert.deepEqual([await rejoined.exited, await next.exited], [0, 0]);
+  await gone("tty-2");
+
+  // A device granted only shell gets a terminal of its own that ends with the connection.
   const plain = inTerminal(t, ["tty", "studio"], shellOnly.env);
-  await plain.waitFor("grants this device no sessions; opening a terminal");
+  await plain.waitFor("does not let this device start sessions; opening a terminal");
   plain.write("exit 5\r");
   assert.equal(await plain.exited, 5);
 
   // A device that may only watch is told so when it types.
-  const watching = inTerminal(t, ["tty", "studio", "--attach", "main"], viewer.env);
-  await watching.waitFor("session main");
+  const watching = inTerminal(t, ["tty", "studio", "--attach", "tty-1"], viewer.env);
+  await watching.waitFor("session tty-1");
   watching.write("x");
-  await watching.waitFor("lets this device watch main but not type into it");
+  await watching.waitFor("lets this device watch tty-1 but not type into it");
   watching.write("\x1d");
   assert.equal(await watching.exited, 0);
 
   // A session replaced while disconnected is not silently joined.
   const again = inTerminal(t, ["tty", "studio"], laptop.env);
-  await again.waitFor("session main");
+  await again.waitFor("Ctrl-] detaches");
+  const replaced = named(again.output)!;
   refusing = true;
   cut();
   await again.waitFor("reconnecting");
   await writeFile(file, JSON.stringify(record), { mode: 0o600 });
-  assert.equal((await cli(laptop, ["kill", "studio", "main"])).code, 0);
-  assert.equal((await cli(laptop, ["tty", "studio", "--name", "main", "--", "sleep 30"])).code, 0);
+  assert.equal((await cli(laptop, ["kill", "studio", replaced])).code, 0);
+  assert.equal((await cli(laptop, ["tty", "studio", "--name", replaced, "--", "sleep 30"])).code, 0);
   refusing = false;
   assert.equal(await again.exited, 1);
-  assert.match(again.output, /main on studio ended and was replaced while disconnected/);
+  assert.match(again.output, new RegExp(`${replaced} on studio ended and was replaced while disconnected; cns tty studio opens a new terminal`));
 });

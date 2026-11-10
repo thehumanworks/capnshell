@@ -1,3 +1,4 @@
+import type { RpcStub } from "capnweb";
 import { AuthError } from "../auth.js";
 import { errorMessage, printable } from "../errors.js";
 import { ensureIdentity } from "../identity.js";
@@ -5,12 +6,16 @@ import { explainDenial } from "../peers.js";
 import type { PeerConfig } from "../options.js";
 import { openDeviceLink } from "../device-link.js";
 import { secureReady } from "../secure.js";
-import type { PtySessionInfo } from "../shell.js";
+import type { PtySessionInfo, PtySessionOptions, ShellApi } from "../shell.js";
 import { attachTerminal, ConnectionLost, DETACH_KEY, plain, type RemoteNamedPty } from "../terminal.js";
 import { commandExitCode, describeExit } from "./one-shot.js";
 
-/** The session `cns tty DEVICE` uses on a paired device when no other is named. */
-export const DEFAULT_SESSION = "main";
+/** `cns tty DEVICE` starts a session of its own, named tty-1, tty-2 and so on: the first name free on the device. */
+export const SESSION_PREFIX = "tty-";
+/** How many taken names a new terminal tries before giving up; the device's own session limit usually ends it first. */
+const MAX_NAME_TRIES = 64;
+/** How long a terminal that is stopping waits for its device to end the session it started. */
+const END_MS = 3000;
 /** How long an attach keeps trying to get back to its session after the connection drops. */
 export const RECONNECT_MS = Number(process.env.CNS_RECONNECT_MS) > 0 ? Number(process.env.CNS_RECONNECT_MS) : 10 * 60 * 1000;
 const RETRY_MIN_MS = 500;
@@ -23,7 +28,7 @@ const say = (message: string) => process.stderr.write(`${process.stderr.isTTY ? 
 class Final extends Error {
   constructor(message: string, readonly code: number) { super(message); }
 }
-/** The device grants this one no session access, so `cns tty DEVICE` uses an unnamed terminal instead. */
+/** The device does not let this one start sessions, so `cns tty DEVICE` uses an unnamed terminal instead. */
 export const NO_SESSIONS = Symbol("no sessions");
 
 /** What a failure while connecting or reattaching means; on the first attempt nothing was ever granted or found. */
@@ -40,41 +45,90 @@ function classify(error: unknown, device: string, name: string, first: boolean):
     return new Final(first ? `there is no session ${name} on ${device}; cns sessions ${device} lists them.` : `the session ${name} no longer exists on ${device}: it was killed, its time limit passed, or ${device}'s daemon restarted.`, 1);
   }
   if (/no longer exists/.test(message)) return new Final(`the session ${name} no longer exists on ${device}.`, 1);
+  if (/Too many named PTY sessions/.test(message)) {
+    return new Final(`${device} already holds as many named sessions as it keeps; cns sessions ${device} lists them, and cns kill ${device} NAME ends one.`, 1);
+  }
   return undefined;
 }
 
-/** Whether the device grants no session access at all, so a plain terminal is all `cns tty DEVICE` can give. */
+/** Whether the device refuses this one a new session, so a plain terminal is all `cns tty DEVICE` can give. */
 const noSessionAccess = (error: unknown) => /^Permission denied: sessions:(view|create) not granted/.test(errorMessage(error));
 
+/** Settle with `promise`, or reject once `ms` have passed. */
+async function within<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([promise, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("timed out")), ms); })]);
+  } finally { clearTimeout(timer); }
+}
+
 /**
- * `cns tty DEVICE [--attach NAME]` for a paired device: attach to a named session, by
- * default `main`, starting a login shell there if it does not exist yet. When the
- * connection drops, keep trying to reach the device again for RECONNECT_MS, then
- * reattach to the same session, reporting how much output was written meanwhile and
- * whether input may have been lost. Input in flight is never sent twice; at a terminal,
- * keys typed while disconnected are read and discarded, except Ctrl-C (stop) and
- * Ctrl-] (give up and leave the session running).
+ * Start a login shell under the first free name of tty-1, tty-2, ... and return the name.
+ * Listing needs sessions:list; without it, taken names are found by trying them. Two
+ * terminals starting at once both try the same name, and the one refused takes the next.
+ */
+async function startTerminal(remote: RpcStub<ShellApi>, options: PtySessionOptions): Promise<string> {
+  let taken = new Set<string>();
+  try { taken = new Set((await plain(remote.ptySessions() as unknown as Promise<PtySessionInfo[]>)).map((session) => session.name)); }
+  catch (error) { if (!/^Permission denied/.test(errorMessage(error))) throw error; }
+  for (let number = 1, tries = 0; ; number++) {
+    const name = `${SESSION_PREFIX}${number}`;
+    if (taken.has(name)) continue;
+    try {
+      using started = await remote.startPtySession(name, options);
+      void started;
+      return name;
+    } catch (error) {
+      if (!/already exists/.test(errorMessage(error)) || ++tries >= MAX_NAME_TRIES) throw error;
+    }
+  }
+}
+
+/**
+ * `cns tty DEVICE` at a terminal, and `cns tty DEVICE --attach NAME`, for a paired device.
  *
- * Returns NO_SESSIONS when the default session was asked for and the device grants no
- * session access, so the caller can open an unnamed terminal instead.
+ * Without --attach, each invocation starts a login shell of its own in a new named session
+ * (tty-1, tty-2, ...), so several terminals on one device each get their own. The session
+ * belongs to this terminal: it is removed when its program exits, and ended when cns stops
+ * or its terminal closes (SIGHUP, SIGTERM, SIGINT) while the device can be reached. Ctrl-]
+ * detaches and leaves it running, to rejoin with --attach NAME. --attach joins a session
+ * that may be shared and never ends it.
+ *
+ * Either way, when the connection drops, keep trying to reach the device again for
+ * RECONNECT_MS, then reattach to the same session, reporting how much output was written
+ * meanwhile and whether input may have been lost. Input in flight is never sent twice;
+ * at a terminal, keys typed while disconnected are read and discarded, except Ctrl-C
+ * (stop) and Ctrl-] (give up and leave the session running).
+ *
+ * Returns NO_SESSIONS when a new session was asked for and the device does not let this
+ * one start sessions, so the caller can open an unnamed terminal instead.
  */
 export async function attachPaired(config: PeerConfig): Promise<number | typeof NO_SESSIONS> {
   const expect = config.expect!;
-  const name = config.name ?? DEFAULT_SESSION;
-  const create = !config.attach;
+  const own = !config.attach;
+  /** The session, once this terminal has started it or from --attach. */
+  let name: string | undefined = own ? undefined : config.name;
   const { identity } = ensureIdentity();
   await secureReady();
   const interrupted = new AbortController();
   let exitOnSignal = 130;
-  const onSigint = () => { exitOnSignal = 130; interrupted.abort(); };
-  const onSigterm = () => { exitOnSignal = 143; interrupted.abort(); };
-  process.once("SIGINT", onSigint);
-  process.once("SIGTERM", onSigterm);
+  const signals = { SIGINT: 130, SIGTERM: 143, SIGHUP: 129 } as const;
+  const handlers = Object.entries(signals).map(([signal, code]) => {
+    const handler = () => { exitOnSignal = code; interrupted.abort(); };
+    // A closed terminal sends SIGHUP. A platform that lacks one of these signals never sends it.
+    try { process.once(signal, handler); } catch {}
+    return [signal, handler] as const;
+  });
   const input = process.stdin;
   const terminal = !!(input.isTTY && process.stdout.isTTY);
   const originalRaw = input.isTTY ? input.isRaw : false;
-  const restore = () => { if (input.isTTY) input.setRawMode(originalRaw); };
+  // A terminal that has closed refuses to change mode; there is nothing left to restore.
+  const restore = () => { try { if (input.isTTY) input.setRawMode(originalRaw); } catch {} };
   process.once("exit", restore);
+  // Writing to a terminal that has closed fails; that must not stop cns from ending its session.
+  const ignore = () => {};
+  process.stdout.on("error", ignore);
+  process.stderr.on("error", ignore);
   let seen: number | undefined;
   /** The session as first attached: a reattach must reach this one, not a later one that took its name. */
   let original: Pick<PtySessionInfo, "pid" | "startedAt"> | undefined;
@@ -99,24 +153,45 @@ export async function attachPaired(config: PeerConfig): Promise<number | typeof 
     const timer = setTimeout(done, ms);
     interrupted.signal.addEventListener("abort", done, { once: true });
   });
-  const stopped = () => gaveUp ? (say(`stopped reconnecting; ${name} keeps running on ${expect.name}`), 0) : exitOnSignal;
+  const rejoin = (session: string) => `cns tty ${expect.name} --attach ${session} returns to it`;
+  /** This terminal's session outlives it: say how to get back to it or end it. */
+  const kept = () => { if (own && name !== undefined) say(`${name} keeps running on ${expect.name}: ${rejoin(name)}, cns kill ${expect.name} ${name} ends it`); };
+  /** End and remove the session this terminal started; false when the device could not do it in time. */
+  const end = async (connected: Connected) => {
+    try { await within(plain(connected.session.kill()), END_MS); return true; }
+    catch { return false; }
+  };
+  /** cns was stopped: end this terminal's session when it is still reachable. */
+  const stopped = async (connected?: Connected) => {
+    if (gaveUp) {
+      // Only possible once attached, so the session has its name.
+      say(`stopped reconnecting; ${name} keeps running on ${expect.name}: ${rejoin(name!)}`);
+      return 0;
+    }
+    if (own && name !== undefined && !(connected && await end(connected))) kept();
+    return exitOnSignal;
+  };
   try {
     for (;;) {
       const deadline = Date.now() + RECONNECT_MS;
       let wait = RETRY_MIN_MS;
-      let connected: Awaited<ReturnType<typeof open>>;
+      let connected: Connected;
       for (;;) {
-        if (interrupted.signal.aborted) return stopped();
+        if (interrupted.signal.aborted) return await stopped();
         try {
-          connected = await open(name, first && create);
+          connected = await open();
           break;
         } catch (error) {
-          if (interrupted.signal.aborted) return stopped();
-          if (first && create && noSessionAccess(error)) return NO_SESSIONS;
-          const final = error instanceof Final ? error : classify(error, expect.name, name, first);
+          if (interrupted.signal.aborted) return await stopped();
+          if (first && own && noSessionAccess(error)) return NO_SESSIONS;
+          const final = error instanceof Final ? error : classify(error, expect.name, name ?? "a new session", first);
           if (final) { say(final.message); return final.code; }
           if (first) throw error;
-          if (Date.now() > deadline) { say(`gave up reaching ${expect.name} after ${Math.round(RECONNECT_MS / 60000)} minutes: ${printable(errorMessage(error))}`); return 1; }
+          if (Date.now() > deadline) {
+            say(`gave up reaching ${expect.name} after ${Math.round(RECONNECT_MS / 60000)} minutes: ${printable(errorMessage(error))}`);
+            kept();
+            return 1;
+          }
           await delay(wait);
           wait = Math.min(RETRY_MAX_MS, wait * 2);
         }
@@ -126,6 +201,7 @@ export async function attachPaired(config: PeerConfig): Promise<number | typeof 
         say(`discarded ${dropped} byte${dropped === 1 ? "" : "s"} typed while disconnected`);
         dropped = 0;
       }
+      const session = name!;
       const reattaching = !first;
       let reported = false;
       // The first chunk of an attachment is the redraw, at the offset it shows.
@@ -133,12 +209,12 @@ export async function attachPaired(config: PeerConfig): Promise<number | typeof 
         if (!reported) {
           reported = true;
           if (reattaching && seen !== undefined && end !== undefined && end > seen) {
-            say(`reattached to ${expect.name}/${name} via ${connected.via}; ${end - seen} bytes of output were written while disconnected and are shown as the current screen`);
-          } else if (reattaching) say(`reattached to ${expect.name}/${name} via ${connected.via}`);
+            say(`reattached to ${expect.name}/${session} via ${connected.via}; ${end - seen} bytes of output were written while disconnected and are shown as the current screen`);
+          } else if (reattaching) say(`reattached to ${expect.name}/${session} via ${connected.via}`);
         }
         if (end !== undefined) seen = end;
       };
-      if (first && process.stderr.isTTY) say(`connected to ${expect.name} via ${connected.via}; session ${name}. Ctrl-] detaches.`);
+      if (first && process.stderr.isTTY) say(`connected to ${expect.name} via ${connected.via}; session ${session}. Ctrl-] detaches.`);
       first = false;
       try {
         const sized = !!process.stdout.isTTY || config.cols !== undefined || config.rows !== undefined;
@@ -146,17 +222,19 @@ export async function attachPaired(config: PeerConfig): Promise<number | typeof 
           ...(sized ? { cols: options.cols, rows: options.rows } : {}), answers: !options.respond,
         }), { cols: config.cols, rows: config.rows }, {
           signal: interrupted.signal, detachKey: DETACH_KEY, alternateScreen: true, onOutput: report,
-          onInputRefused: (reason) => say(`${expect.name} lets this device watch ${name} but not type into it (${explainDenial(printable(reason), expect.name)})`),
+          onInputRefused: (reason) => say(`${expect.name} lets this device watch ${session} but not type into it (${explainDenial(printable(reason), expect.name)})`),
         });
         if (result.exit) {
-          if (process.stdout.isTTY) say(`${name} ${describeExit(result.exit)}`);
+          // This terminal's session ends with its program; one joined with --attach keeps its final screen for others.
+          if (own && !await end(connected)) say(`${session} has ended, but ${expect.name} still lists it; cns kill ${expect.name} ${session} removes it`);
+          if (process.stdout.isTTY) say(`${session} ${describeExit(result.exit)}`);
           return commandExitCode(result.exit);
         }
-        if (result.detached) { say(printable(result.detached)); return 1; }
-        if (process.stdout.isTTY) say(`detached from ${name}; it keeps running on ${expect.name}`);
+        if (result.detached) { say(printable(result.detached)); kept(); return 1; }
+        if (process.stdout.isTTY) say(`detached from ${session}; it keeps running on ${expect.name}${own ? `: ${rejoin(session)}` : ""}`);
         return 0;
       } catch (error) {
-        if (interrupted.signal.aborted) return stopped();
+        if (interrupted.signal.aborted) return await stopped(connected);
         // A link that broke during the attach call itself is a lost connection too.
         const lost = error instanceof ConnectionLost ? error : connected.lost() ? new ConnectionLost(errorMessage(error), 0) : undefined;
         if (!lost) throw error;
@@ -171,61 +249,31 @@ export async function attachPaired(config: PeerConfig): Promise<number | typeof 
     disconnectedInput(false);
     restore();
     process.off("exit", restore);
-    process.off("SIGINT", onSigint);
-    process.off("SIGTERM", onSigterm);
+    process.stdout.off("error", ignore);
+    process.stderr.off("error", ignore);
+    for (const [signal, handler] of handlers) process.off(signal, handler);
   }
 
-  async function open(session: string, startIfMissing: boolean) {
+  async function open() {
     // The local daemon's standing link when it has one, else a connection of its own; after
     // an outage too, so the daemon's link, once it is back, serves the reattach.
     const link = await openDeviceLink(expect, identity, interrupted.signal);
     const { remote } = link;
     const close = () => { remote[Symbol.dispose](); link.close("Attachment ended"); };
-    let startedNow = false;
-    const start = async () => {
-      startedNow = true;
-      try {
-        using started = await remote.startPtySession(session, { cwd: config.cwd, cols: config.cols ?? process.stdout.columns, rows: config.rows ?? process.stdout.rows, term: config.term, timeoutMs: config.timeoutMs });
-        void started;
-        say(`started a login shell on ${expect.name} as session ${session}`);
-      } catch (error) {
-        // Another client started it a moment ago: use theirs.
-        if (!/already exists/.test(errorMessage(error))) throw error;
-        startedNow = false;
-      }
-      return await remote.ptySession(session) as unknown as RemoteNamedPty;
-    };
+    let started = false;
+    let handle: RemoteNamedPty | undefined;
     try {
-      let handle: RemoteNamedPty;
-      try { handle = await remote.ptySession(session) as unknown as RemoteNamedPty; }
-      catch (error) {
-        if (!startIfMissing || !/No PTY session named/.test(errorMessage(error))) throw error;
-        handle = await start();
+      if (name === undefined) {
+        name = await startTerminal(remote, { cwd: config.cwd, cols: config.cols ?? process.stdout.columns, rows: config.rows ?? process.stdout.rows, term: config.term, timeoutMs: config.timeoutMs });
+        started = true;
+        say(`started a login shell on ${expect.name} as session ${name}`);
       }
-      let info = await plain(handle.info());
-      if (startIfMissing && !info.running) {
-        // A finished default session is replaced by a fresh shell, when this device may end it.
-        try {
-          await plain(handle.kill());
-          handle[Symbol.dispose]();
-          handle = await start();
-          info = await plain(handle.info());
-          say(`the previous ${session} had ended; started a new login shell`);
-        } catch (error) {
-          const message = errorMessage(error);
-          if (/no longer exists/.test(message)) { handle[Symbol.dispose](); handle = await remote.ptySession(session) as unknown as RemoteNamedPty; info = await plain(handle.info()); }
-          else if (/^Permission denied/.test(message)) say(`${session} on ${expect.name} has ended, and this device may not replace it; showing its last screen`);
-          else throw error;
-        }
-      }
-      if (!original) {
-        original = { pid: info.pid, startedAt: info.startedAt };
-        if (startIfMissing && !startedNow && (config.cwd !== undefined || config.term !== undefined || config.timeoutMs !== undefined)) {
-          say(`${session} already runs on ${expect.name}; --cwd, --term and --timeout apply only when it starts`);
-        }
-      } else if (info.pid !== original.pid || info.startedAt !== original.startedAt) {
-        handle[Symbol.dispose]();
-        throw new Final(`${session} on ${expect.name} ended and was replaced while disconnected; run cns tty ${expect.name}${config.attach ? ` --attach ${session}` : ""} again to attach to the new one.`, 1);
+      const session = name;
+      handle = await remote.ptySession(session) as unknown as RemoteNamedPty;
+      const info = await plain(handle.info());
+      if (!original) original = { pid: info.pid, startedAt: info.startedAt };
+      else if (info.pid !== original.pid || info.startedAt !== original.startedAt) {
+        throw new Final(`${session} on ${expect.name} ended and was replaced while disconnected; ${own ? `cns tty ${expect.name} opens a new terminal` : `run cns tty ${expect.name} --attach ${session} again to attach to the new one`}.`, 1);
       }
       const opened = handle;
       return {
@@ -236,8 +284,21 @@ export async function attachPaired(config: PeerConfig): Promise<number | typeof 
         close: () => { opened[Symbol.dispose](); close(); },
       };
     } catch (error) {
+      // A terminal that never attached to the session it just started does not leave it behind.
+      if (started && handle) {
+        try { await within(plain(handle.kill()), END_MS); name = undefined; } catch {}
+      }
+      handle?.[Symbol.dispose]();
       close();
       throw error;
     }
   }
 }
+
+type Connected = {
+  session: RemoteNamedPty;
+  info: PtySessionInfo;
+  via: string;
+  lost: () => boolean;
+  close: () => void;
+};
