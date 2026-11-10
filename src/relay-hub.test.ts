@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { startRelay } from "./relay-server.js";
 import { generateIdentity } from "./identity.js";
-import { challengeBytes, CLIENT_HEADER, CLIENT_KEY, CLIENT_SKEW_MS, clientProof, dialAddresses, isRelayAddress, isRelayRequest, MAX_DIALS_PER_ADDRESS, MAX_GUESTS_PER_ADDRESS, PairingRooms, relayEndpoint, roomEndpoint, route, verifyClient, type RelaySocket } from "./relay-hub.js";
+import { challengeBytes, CLIENT_HEADER, CLIENT_KEY, CLIENT_SKEW_MS, clientProof, dialAddresses, isRelayAddress, isRelayRequest, MAX_DIALS_PER_ADDRESS, MAX_GUESTS_PER_ADDRESS, PairingRooms, RELAY_HEALTH, relayEndpoint, roomEndpoint, route, verifyClient, type RelaySocket } from "./relay-hub.js";
 import { LOOPBACK } from "./test-support.js";
+import manifest from "../package.json" with { type: "json" };
 
 /** The client header cns sends, made for `url`, or for `host` in its place, as a relay behind a proxy sees it. */
 async function client(url: string, host?: string): Promise<Record<string, string>> {
@@ -158,7 +159,9 @@ test("a daemon registers by proving its key, and the relay forwards dialers to i
     base = relay.url;
   }
   const studio = generateIdentity();
-  assert.equal(await (await fetch(base.replace("ws", "http"))).text(), "cns relay\n");
+  // Its root names the version it was built from, so a relay nobody redeployed shows it.
+  assert.equal(await (await fetch(base.replace("ws", "http"))).text(), RELAY_HEALTH);
+  assert.equal(RELAY_HEALTH, `cns relay ${manifest.version}\n`);
 
   // Nobody registered yet: dialing is refused before a socket is accepted.
   assert.equal(await dialStatus(relayEndpoint(base, "dial", studio.publicKey)), 404);

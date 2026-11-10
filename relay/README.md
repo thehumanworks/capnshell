@@ -42,7 +42,8 @@ cd relay
 npx wrangler@4.151.3 deploy
 ```
 
-It needs no secrets. `wrangler.toml` gives the Worker the custom domain `cns.nothuman.work`,
+It needs no secrets. Once deployed, `curl https://cns.nothuman.work/relay` prints `cns relay`
+and the version in package.json when it was deployed, so a relay that missed a deploy shows it. `wrangler.toml` gives the Worker the custom domain `cns.nothuman.work`,
 so Cloudflare manages its DNS record and certificate. The relay serves its paths under
 `/relay` there, and also at the root, as on its workers.dev address. Deploy before releasing a cns that depends on a change here: a relay without rooms answers
 `/v1/room` with 404, and cns then prints the long invite instead of a code. If the

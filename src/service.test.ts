@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { installService, installedService, launchdPlist, serviceEnvironment, serviceFailed, serviceFile, servicePath, systemdUnit, uninstallService, type Runner, type ServiceSpec } from "./service.js";
+import { installService, installedService, installedServiceRuns, launchdPlist, serviceEnvironment, serviceFailed, serviceFile, servicePath, systemdUnit, uninstallService, type Runner, type ServiceSpec } from "./service.js";
 import { launchCli, unusedPort } from "./test-support.js";
 
 const spec: ServiceSpec = {
@@ -143,7 +143,7 @@ test("cns up --install runs the daemon from the unit; cns up starts it again aft
   assert.equal(installed.code, 0, installed.stderr);
   assert.match(installed.stderr, /Stopped the running daemon; the service runs it from now on\./);
   assert.match(installed.stderr, /Installed a systemd user service at .*\/systemd\/user\/cns\.service/);
-  assert.match(installed.stdout, /^Running as \S+ \(pid \d+, a systemd user service\), listening at ws:\/\/127\.0\.0\.1:\d+\./);
+  assert.match(installed.stdout, /^Running as \S+ \(cns [\d.]+, pid \d+, a systemd user service\), listening at ws:\/\/127\.0\.0\.1:\d+\./);
   assert.ok(installed.stdout.includes(`ws://127.0.0.1:${port}`));
   const unit = await readFile(path.join(home, ".config", "systemd", "user", "cns.service"), "utf8");
   assert.match(unit, /"daemon" "--service" "--state"/);
@@ -154,7 +154,7 @@ test("cns up --install runs the daemon from the unit; cns up starts it again aft
   assert.equal((await cli(["stop", "--state", state])).code, 0);
   const again = await cli(["up", "--state", state]);
   assert.equal(again.code, 0, again.stderr);
-  assert.match(again.stdout, /^Started as \S+ \(pid \d+, a systemd user service\)/);
+  assert.match(again.stdout, /^Started as \S+ \(cns [\d.]+, pid \d+, a systemd user service\)/);
   assert.match(await readFile(log, "utf8"), /^--user start cns\.service$/m);
 
   const removed = await cli(["up", "--uninstall", "--state", state]);
@@ -181,4 +181,31 @@ test("a systemd service that failed, or waits to restart after failing, is repor
   assert.equal(serviceFailed("systemd", shows("ActiveState=active\nSubState=running")), false);
   assert.equal(serviceFailed("systemd", () => ({ code: 1, output: "Failed to connect to bus" })), undefined);
   assert.equal(serviceFailed("launchd", shows("")), undefined);
+});
+
+test("what an installed service runs: this executable or another, and whether Nix owns its file", { skip: process.platform === "win32" }, async (t) => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-service-runs-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (const kind of ["systemd", "launchd"] as const) {
+    const home = path.join(root, kind);
+    const file = serviceFile(kind, spec, home, {});
+    await mkdir(path.dirname(file.path), { recursive: true });
+    await writeFile(file.path, file.contents);
+    const service = { kind, path: file.path };
+    // Matched as the service file writes it, escapes and all, never as a bare substring of another path.
+    assert.deepEqual(installedServiceRuns(service, spec.program.file), { managedByNix: false, runsThis: true }, kind);
+    assert.deepEqual(installedServiceRuns(service, "/opt/cns & co/bin/cn"), { managedByNix: false, runsThis: false }, kind);
+    assert.deepEqual(installedServiceRuns(service, "/opt/other/cns"), { managedByNix: false, runsThis: false }, kind);
+
+    // Home Manager links the file into the Nix store; cns must not rewrite it.
+    const store = path.join(root, "store") + path.sep;
+    const owned = path.join(store, `${kind}-unit`);
+    await mkdir(store, { recursive: true });
+    await writeFile(owned, file.contents);
+    await rm(file.path);
+    await symlink(owned, file.path);
+    assert.deepEqual(installedServiceRuns(service, spec.program.file, store), { managedByNix: true, runsThis: true }, kind);
+    await rm(file.path);
+    assert.deepEqual(installedServiceRuns(service, spec.program.file, store), { managedByNix: false, runsThis: false }, `${kind}: gone`);
+  }
 });

@@ -4,9 +4,9 @@ import { selfCheck, type SelfFacts } from "./self-check.js";
 
 const key = "K".repeat(43);
 const identity = { fingerprint: "abcd-efgh", publicKey: key };
-const base = { identity, identityPath: "/cfg/identity.json", paired: 1 } satisfies Partial<SelfFacts>;
+const base = { identity, identityPath: "/cfg/identity.json", self: { version: "1.4.0", executable: "/opt/cns" }, paired: 1 } satisfies Partial<SelfFacts>;
 const daemon = (extra: Partial<Extract<SelfFacts["daemon"], { running: true }>> = {}): SelfFacts["daemon"] =>
-  ({ running: true, pid: 42, url: "ws://0.0.0.0:47381", identity, addresses: ["ws://192.168.1.5:47381"], ...extra });
+  ({ running: true, pid: 42, url: "ws://0.0.0.0:47381", identity, addresses: ["ws://192.168.1.5:47381"], version: "1.4.0", ...extra });
 
 test("a device with only private addresses and the relay off is ready, with a warning that names the fix", () => {
   const { report, lines, exitCode } = selfCheck({ ...base, daemon: daemon() });
@@ -14,7 +14,7 @@ test("a device with only private addresses and the relay off is ready, with a wa
   assert.equal(report.reachableBeyondNetwork, false);
   assert.deepEqual(report.problems, []);
   assert.match(report.warnings.join("\n"), /Every address here is private and the relay is off.*Unset CNS_RELAY/);
-  assert.match(lines.join("\n"), /^Identity: +abcd-efgh \(\/cfg\/identity\.json\)\nDaemon: +pid 42 at ws:\/\/0\.0\.0\.0:47381\nRelay: +off \(CNS_RELAY=off\)\nAddresses:\n  ws:\/\/192\.168\.1\.5:47381: private, this network only\nPaired: +1 device\n/);
+  assert.match(lines.join("\n"), /^Identity: +abcd-efgh \(\/cfg\/identity\.json\)\nVersion: +cns 1\.4\.0 \(\/opt\/cns\)\nDaemon: +pid 42 at ws:\/\/0\.0\.0\.0:47381, cns 1\.4\.0\nRelay: +off \(CNS_RELAY=off\)\nAddresses:\n  ws:\/\/192\.168\.1\.5:47381: private, this network only\nPaired: +1 device\n/);
 });
 
 test("a registered public relay or a public direct address makes the device reachable from elsewhere", () => {
@@ -50,4 +50,20 @@ test("no identity, no daemon, a daemon with another identity and no address are 
   const other = selfCheck({ ...base, daemon: daemon({ identity: { fingerprint: "zzzz", publicKey: "Z".repeat(43) } }) });
   assert.deepEqual([other.exitCode, other.report.daemon?.matchesIdentity], [3, false]);
   assert.equal(selfCheck({ ...base, daemon: daemon({ addresses: [] }) }).exitCode, 5);
+});
+
+test("a daemon on another version is a warning that says what to run, not a problem", () => {
+  const drift = "The daemon runs cns 1.2.0 (/old/cns), but this cns is 1.4.0 (/opt/cns), so paired devices and commands that use the daemon get the older one. Restart it: cns stop, then cns up.";
+  const stale = selfCheck({ ...base, daemon: daemon({ version: "1.2.0", drift }) });
+  assert.equal(stale.exitCode, 0);
+  assert.deepEqual(stale.report.problems, []);
+  assert.equal(stale.report.daemon?.version, "1.2.0");
+  assert.equal(stale.report.version, "1.4.0");
+  assert.ok(stale.report.warnings.includes(drift));
+  assert.ok(stale.lines.includes(`Warning: ${drift}`));
+  const ancient = selfCheck({ ...base, daemon: daemon({ version: undefined }) });
+  assert.match(ancient.lines.join("\n"), /^Daemon: +pid 42 at ws:\/\/0\.0\.0\.0:47381, a cns too old to report its version$/m);
+  assert.equal(ancient.report.daemon?.version, null);
+  const current = selfCheck({ ...base, daemon: daemon() });
+  assert.ok(!current.report.warnings.some((warning) => /The daemon runs/.test(warning)));
 });

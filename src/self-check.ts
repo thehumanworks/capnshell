@@ -1,15 +1,24 @@
 import { isPrivateAddress } from "./addresses.js";
 import { isRelayAddress } from "./relay-hub.js";
+import { describeVersion } from "./version.js";
 
 /** What `cns doctor` with no argument found out about this device, gathered before judging it. */
 export interface SelfFacts {
   /** This device's identity file: its fingerprint, absent, or why it cannot be read. */
   identity: { fingerprint: string; publicKey: string } | { missing: true } | { error: string };
   identityPath: string;
+  /** This cns: its version and the file it runs from. */
+  self: { version: string; executable: string };
   /** The running daemon, or why there is none. */
   daemon:
     | { running: false; error?: string }
-    | { running: true; pid: number; url: string; identity?: { publicKey: string; fingerprint: string }; addresses: string[]; relay?: string; relayRegistered?: boolean };
+    | {
+      running: true; pid: number; url: string; identity?: { publicKey: string; fingerprint: string }; addresses: string[]; relay?: string; relayRegistered?: boolean;
+      /** The cns version it runs; absent from daemons too old to report it. */
+      version?: string;
+      /** Why it does not run this cns and what to run, from daemonDrift; absent when it does. */
+      drift?: string;
+    };
   /** The relay a daemon started now would use: the built-in one, unless CNS_RELAY changes it. */
   relay?: string;
   /** How many paired devices are saved. */
@@ -19,8 +28,11 @@ export interface SelfFacts {
 export interface AddressCheck { address: string; relay: boolean; private: boolean; host: string }
 
 export interface SelfReport {
+  /** This cns's version. */
+  version: string;
   identity: { fingerprint: string; publicKey: string; path: string } | null;
-  daemon: { pid: number; url: string; matchesIdentity: boolean | null } | null;
+  /** `version` is null for a daemon too old to report it. */
+  daemon: { pid: number; url: string; matchesIdentity: boolean | null; version: string | null } | null;
   relay: { url: string; registered: boolean } | null;
   addresses: AddressCheck[];
   /** Whether a device on another network has an address here it could reach: a public direct address or a registered relay that is not private. */
@@ -56,6 +68,7 @@ export function selfCheck(facts: SelfFacts): { report: SelfReport; lines: string
     problems.push(`The identity file cannot be used: ${reason}`);
     exitCode = 5;
   }
+  lines.push(`Version:   cns ${facts.self.version} (${facts.self.executable})`);
 
   const daemon = facts.daemon;
   let reportDaemon: SelfReport["daemon"] = null;
@@ -67,8 +80,10 @@ export function selfCheck(facts: SelfFacts): { report: SelfReport; lines: string
     exitCode = 5;
   } else {
     const matches = identity && daemon.identity ? daemon.identity.publicKey === identity.publicKey : null;
-    reportDaemon = { pid: daemon.pid, url: daemon.url, matchesIdentity: matches };
-    lines.push(`Daemon:    pid ${daemon.pid} at ${daemon.url}`);
+    reportDaemon = { pid: daemon.pid, url: daemon.url, matchesIdentity: matches, version: daemon.version ?? null };
+    lines.push(`Daemon:    pid ${daemon.pid} at ${daemon.url}, ${describeVersion(daemon.version)}`);
+    // Not a problem: paired devices still reach it, but not with this cns's fixes and features.
+    if (daemon.drift) warnings.push(daemon.drift);
     if (matches === false) {
       lines.push(`           runs as ${daemon.identity!.fingerprint}, not this device's identity`);
       problems.push("The daemon runs with a different identity than the file on disk, so paired devices see another device. Restart it with cns stop, then cns up.");
@@ -112,7 +127,7 @@ export function selfCheck(facts: SelfFacts): { report: SelfReport; lines: string
   if (!problems.length) lines.push(warnings.length ? "Ready for paired devices, with the warnings above." : "Ready for paired devices.");
 
   return {
-    report: { identity, daemon: reportDaemon, relay, addresses, reachableBeyondNetwork, paired: facts.paired, problems, warnings },
+    report: { version: facts.self.version, identity, daemon: reportDaemon, relay, addresses, reachableBeyondNetwork, paired: facts.paired, problems, warnings },
     lines,
     exitCode,
   };

@@ -12,3 +12,9 @@ export function selfInvocation(args: string[]): { file: string; args: string[] }
   const script = IS_BUNDLED ? fileURLToPath(import.meta.url) : fileURLToPath(new URL("cli.ts", import.meta.url));
   return { file: process.execPath, args: [script, ...args] };
 }
+
+/** The file this cns runs from: its executable, or its script when Bun runs it from source. */
+export function selfPath(): string {
+  const { file, args } = selfInvocation([]);
+  return args[0] ?? file;
+}

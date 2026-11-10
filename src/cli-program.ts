@@ -1,10 +1,12 @@
 import { Command } from "commander";
 import { addDaemonCommand, addMcpCommand, addPeerCommands } from "./options.js";
+import { CNS_VERSION } from "./version.js";
 
 export function createCli(): Command {
   const program = new Command()
     .name("cns")
     .description("Shells, terminals and files on your paired devices, on Linux, macOS and Windows")
+    .version(CNS_VERSION, "-V, --version", "Print this cns's version; cns status shows the daemon's")
     .exitOverride()
     .showHelpAfterError();
   addPeerCommands(program, async (config) => {

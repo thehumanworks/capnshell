@@ -1,5 +1,5 @@
 import { serve, type Server } from "bun";
-import { ACCEPTED_CLIENT_KEYS, CLIENT_HEADER, MAX_RELAY_MESSAGE_BYTES, PairingRooms, RelayRoom, route, verifyClient, type RelayData, type RelayHandlers } from "./relay-hub.js";
+import { ACCEPTED_CLIENT_KEYS, CLIENT_HEADER, MAX_RELAY_MESSAGE_BYTES, PairingRooms, RELAY_HEALTH, RelayRoom, route, verifyClient, type RelayData, type RelayHandlers } from "./relay-hub.js";
 import { endpointUrl } from "./options.js";
 
 interface Data { handlers?: RelayHandlers; key: string; kind: "accept" | "dial" | "answer" | "room" | "join"; id?: string; room?: number; host: string; address: string }
@@ -50,7 +50,7 @@ export function startRelay(options: RelayOptions): { url: string; server: Server
       const url = new URL(request.url);
       const target = route(url);
       if (!target) return new Response("Not found", { status: 404 });
-      if (target.kind === "health") return new Response("cns relay\n");
+      if (target.kind === "health") return new Response(RELAY_HEALTH);
       if (request.headers.has("Origin")) return new Response("Browser origins are not allowed", { status: 401 });
       const host = options.publicHost ?? url.host;
       // Only cns: anything without a valid client header is refused before it reaches a room.

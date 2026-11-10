@@ -61,7 +61,8 @@ From this directory, in your Cloudflare account (the zone for the hostname must 
    npx wrangler deploy
    ```
 
-5. On an owner device, check it: `cns gateway status` prints the gateway's fingerprint.
+5. On an owner device, check it: `cns gateway status` prints the gateway's fingerprint, and
+   `curl https://gateway.cns.nothuman.work/` prints the cns version it was deployed from.
    Set `CNS_GATEWAY=https://your-host` first if you changed the hostname.
 
 ## Use

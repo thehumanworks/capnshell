@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import os from "node:os";
 import { RpcTarget } from "capnweb";
 import treeKill from "tree-kill";
+import { CNS_VERSION } from "./version.js";
 import {
   accessPath, globFiles, makeDirectory, readDirectory, readFileChunk, statPath, writeFileAt, writeWholeFile,
   type AccessOptions, type GlobOptions, type ReadFileOptions, type WriteAtOptions,
@@ -41,6 +42,8 @@ export interface ShellInfo {
   hostname: string;
   cwd: string;
   pid: number;
+  /** The cns version the peer runs; absent from releases before it was reported. */
+  version?: string;
 }
 export interface RunResult {
   stdout: string;
@@ -94,6 +97,7 @@ export function localShellInfo(): ShellInfo {
     hostname: os.hostname(),
     cwd: os.homedir(),
     pid: process.pid,
+    version: CNS_VERSION,
   };
 }
 

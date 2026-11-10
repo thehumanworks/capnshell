@@ -6,12 +6,15 @@ import { ensureIdentity } from "../identity.js";
 import type { ExpectedPeer } from "../options.js";
 import { openDeviceLink, type DeviceLink } from "../device-link.js";
 import type { ShellApi, ShellInfo } from "../shell.js";
+import { reportedVersion } from "../version.js";
 
 /** What a peer's handshake must report about it. */
 export const infoSchema = z.object({
   platform: z.enum(["aix", "android", "darwin", "freebsd", "haiku", "linux", "openbsd", "sunos", "win32", "cygwin", "netbsd"]),
   name: z.string().max(128), shell: z.enum(["PowerShell", "Bash"]),
   hostname: z.string().max(256), cwd: z.string().max(32768), pid: z.int().positive(),
+  // Older releases send none. A value that is not a version is dropped rather than refused, so it cannot break a link.
+  version: z.unknown().optional().transform((value) => reportedVersion(value)),
 });
 
 /** One more encrypted connection, to a paired device, for a command that uses two: cns cp DEVICE:PATH OTHER:PATH. */

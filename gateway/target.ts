@@ -5,6 +5,7 @@ import { dialAddresses, isRelayAddress } from "../src/relay-hub.js";
 import { connectFirst, rpcSession, type SecureChannel } from "../src/secure.js";
 import type { ShellApi, ShellInfo } from "../src/shell.js";
 import { plain, type RemoteNamedPty } from "../src/terminal.js";
+import { CNS_VERSION } from "../src/version.js";
 import { RpcTarget } from "capnweb";
 
 /** A device paired with the gateway. */
@@ -25,7 +26,7 @@ const DEVICE_ANSWER_MS = 10_000;
  */
 export class GatewayMain extends RpcTarget {
   info(): ShellInfo {
-    return { platform: "linux", name: "gateway", shell: "Bash", hostname: "cns-gateway", cwd: "/", pid: 1 };
+    return { platform: "linux", name: "gateway", shell: "Bash", hostname: "cns-gateway", cwd: "/", pid: 1, version: CNS_VERSION };
   }
 }
 

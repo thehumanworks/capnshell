@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { lstat, mkdir, rename, unlink, writeFile } from "node:fs/promises";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { configDirectory } from "./config.js";
@@ -192,6 +192,19 @@ export function installedService(state: string, home?: string, env?: NodeJS.Proc
   catch { return undefined; }
   const needle = kind === "launchd" ? `<string>${xml(state)}</string>` : systemdQuote(state);
   return contents.includes(needle) ? { kind, path: file } : undefined;
+}
+
+/**
+ * What an installed service runs, for advice on restarting it: whether its file is a link into the
+ * Nix store, as Home Manager installs it, and whether it runs `executable`.
+ */
+export function installedServiceRuns(service: { kind: ServiceKind; path: string }, executable: string, store = "/nix/store/"): { managedByNix: boolean; runsThis: boolean } {
+  let contents = "";
+  try { contents = readFileSync(service.path, "utf8"); } catch { /* Gone since it was found: it runs nothing. */ }
+  let target = service.path;
+  try { target = realpathSync(service.path); } catch { /* A broken link: not the Nix store's. */ }
+  const needle = service.kind === "launchd" ? `<string>${xml(executable)}</string>` : systemdQuote(executable);
+  return { managedByNix: target.startsWith(store), runsThis: contents.includes(needle) };
 }
 
 /** Start an installed daemon that is not running, as after cns stop. */

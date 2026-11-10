@@ -23,8 +23,14 @@
  * This file uses only WebCrypto and WebSocket-like objects, so the Cloudflare Worker
  * (relay/worker.ts) and the Bun relay the tests run (relay-server.ts) share the same code.
  */
+import { CNS_VERSION } from "./version.js";
 
 export const RELAY_PROTOCOL = "cns-relay-1";
+/**
+ * What the relay answers at its root, for anyone checking it: its name and the cns version it was
+ * built from, so a relay that was not deployed after a change shows it.
+ */
+export const RELAY_HEALTH = `cns relay ${CNS_VERSION}\n`;
 /** Dialers waiting for, or connected through, one registered daemon. */
 export const MAX_PIPES_PER_KEY = 32;
 /** How long a dialer waits for the daemon to answer. */

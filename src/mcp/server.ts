@@ -1,9 +1,9 @@
 import path from "node:path";
 import { McpServer, type CallToolResult, type ServerContext } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import manifest from "../../package.json" with { type: "json" };
 import { DEFAULT_UNTIL_MS, describeExit, formatSessions } from "../session-text.js";
 import { errorMessage } from "../errors.js";
+import { CNS_VERSION, reportedVersion } from "../version.js";
 import { explainDenial } from "../peers.js";
 import { MAX_KEYS } from "../keys.js";
 import { commandSchema } from "../platform.js";
@@ -84,6 +84,7 @@ const peerSchema = z.object({
   shell: z.string().describe("Bash or PowerShell: the syntax run_command and sessions use."),
   home: z.string().describe("The default working directory."),
   pid: z.int().describe("Process ID of cns on the peer."),
+  version: z.string().optional().describe("The cns version the peer runs; absent for a release too old to report it."),
 });
 const runInput = z.strictObject({
   command: commandSchema.describe("One command string in the peer shell's syntax, up to 8192 characters."),
@@ -426,7 +427,7 @@ export interface McpServerOptions {
 
 /** A fresh server for one MCP connection or HTTP request, with tools that reach `target`'s peers. */
 export function createMcpServer(target: McpTarget, options: McpServerOptions = {}): McpServer {
-  const mcp = new McpServer({ name: "cns", title: "Cap'n Shell", version: manifest.version }, { instructions });
+  const mcp = new McpServer({ name: "cns", title: "Cap'n Shell", version: CNS_VERSION }, { instructions });
   const { tools, onCall } = options;
   // Tools left out are never registered, so a client cannot list or call them.
   const server = {
@@ -458,9 +459,11 @@ export function createMcpServer(target: McpTarget, options: McpServerOptions = {
     const peers = (await link.controller.peers()).map(({ id, info, peer }) => ({
       id, hostname: info.hostname, platform: info.platform, os: info.name, shell: info.shell, home: info.cwd, pid: info.pid,
       ...peer ? { name: peer.name, fingerprint: peer.fingerprint } : {},
+      // A device sends what it likes here; only a version is passed on.
+      ...reportedVersion(info.version) ? { version: reportedVersion(info.version) } : {},
     }));
     const text = peers.length
-      ? peers.map((p) => `${p.name ? `${p.name} (paired; ID ${p.id} until it reconnects)` : p.id}  ${p.hostname}  ${p.os}  ${p.shell}  home: ${p.home}`).join("\n")
+      ? peers.map((p) => `${p.name ? `${p.name} (paired; ID ${p.id} until it reconnects)` : p.id}  ${p.hostname}  ${p.os}  ${p.shell}  home: ${p.home}  ${p.version ? `cns ${p.version}` : "older cns"}`).join("\n")
       : "No peers are connected.";
     return { text, structured: { peers } };
   }));
