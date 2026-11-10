@@ -5,6 +5,8 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
+import { Client, type CallToolResult } from "@modelcontextprotocol/client";
+import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { cliEnvironment, cliInvocation, launchCli, unusedPort } from "./test-support.js";
 
 const posix = process.platform !== "win32";
@@ -185,6 +187,51 @@ test("a device that may only watch sessions does not land in another terminal's 
 });
 
 // What stayed: reconnecting, discarding keys typed blind, grants and replaced sessions.
+
+test("a terminal's session can be attached, captured and typed into from elsewhere while it runs", { skip: !posix, timeout: 60000 }, async (t) => {
+  const { cli, laptop, sessions, terminal } = await pairedStudio(t);
+  const shell = terminal(laptop, ["tty", "studio"]);
+  const name = await shell.attached();
+  shell.write("echo marker-$((6*7))\r");
+  await shell.waitFor("marker-42");
+
+  // cns screen captures its screen, and cns keys types into it.
+  const screen = await cli(laptop, ["screen", "studio", name, "--until", "marker-42"]);
+  assert.equal(screen.code, 0, screen.stderr);
+  assert.match(screen.stdout, /marker-42/);
+  assert.equal((await cli(laptop, ["keys", "studio", name, "echo keys-$((2+2))", "Enter"])).code, 0);
+  await shell.waitFor("keys-4");
+
+  // A second terminal joins it with --attach: it is redrawn there, and what it types reaches the first.
+  const second = terminal(laptop, ["tty", "studio", "--attach", name]);
+  assert.equal(await second.attached(), name);
+  await second.waitFor("marker-42");
+  const from = shell.output.length;
+  second.write("echo second-$((3+3))\r");
+  await shell.waitFor("second-6", from);
+
+  // The MCP session tools reach it by its name too.
+  const invocation = cliInvocation(["mcp", "studio"]);
+  const client = new Client({ name: "cns-tests", version: "1" });
+  await client.connect(new StdioClientTransport({ command: invocation.file, args: invocation.args, env: cliEnvironment(laptop.env) as Record<string, string>, stderr: "pipe" }));
+  t.after(async () => { await client.close(); });
+  const listed = await client.callTool({ name: "list_sessions", arguments: {} }) as CallToolResult;
+  assert.deepEqual((listed.structuredContent as { sessions: Array<{ name: string }> }).sessions.map((session) => session.name), [name]);
+  const read = await client.callTool({ name: "read_screen", arguments: { name, until: "second-6" } }) as CallToolResult;
+  assert.equal(read.isError, undefined, JSON.stringify(read.content));
+  assert.match((read.structuredContent as { screen: { text: string } }).screen.text, /second-6/);
+  const sent = await client.callTool({ name: "send_keys", arguments: { name, keys: ["echo mcp-$((4+5))", "Enter"], until: "mcp-9" } }) as CallToolResult;
+  assert.equal(sent.isError, undefined, JSON.stringify(sent.content));
+  await shell.waitFor("mcp-9");
+
+  // The second terminal detaches and leaves the session running for the terminal that started it.
+  second.write("\x1d");
+  assert.equal(await second.exited, 0);
+  assert.deepEqual(await sessions(), [name]);
+  const after = shell.output.length;
+  shell.write("echo still-$((5+5))\r");
+  await shell.waitFor("still-10", after);
+});
 
 test("a terminal survives an outage and discards keys typed while disconnected", { skip: !posix, timeout: 60000 }, async (t) => {
   const { root, laptop, throughProxy, terminal } = await pairedStudio(t);
