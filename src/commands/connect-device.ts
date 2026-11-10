@@ -4,10 +4,7 @@ import { AuthError } from "../auth.js";
 import { errorMessage } from "../errors.js";
 import { ensureIdentity } from "../identity.js";
 import type { ExpectedPeer } from "../options.js";
-import { RefusingShell } from "../refusing-shell.js";
-import { builtInRelay } from "../relay-config.js";
-import { dialAddresses } from "../relay-hub.js";
-import { connectFirst, rpcSession } from "../secure.js";
+import { openDeviceLink, type DeviceLink } from "../device-link.js";
 import type { ShellApi, ShellInfo } from "../shell.js";
 
 /** What a peer's handshake must report about it. */
@@ -27,19 +24,19 @@ export interface DeviceConnection {
 /** Connect to `expect` at the first of its addresses, or the relay, that answers as it, and read its handshake. */
 export async function connectDevice(expect: ExpectedPeer, signal: AbortSignal): Promise<DeviceConnection> {
   const { identity } = ensureIdentity();
-  let connected: Awaited<ReturnType<typeof connectFirst>>;
+  let link: DeviceLink;
   try {
-    connected = await connectFirst(dialAddresses(expect, builtInRelay()), identity, { expect: expect.publicKey, signal });
+    // The local daemon's standing link when it has one; else, like any one command's connection,
+    // one that only uses the other device and offers nothing back.
+    link = await openDeviceLink(expect, identity, signal);
   } catch (error) {
     if (error instanceof AuthError) throw error;
     throw new Error(`Cannot connect to ${expect.name}: ${errorMessage(error)}`, { cause: error });
   }
-  const { channel } = connected;
-  // Like any one command's connection, it only uses the other device and offers nothing back.
-  const remote = rpcSession<ShellApi>(channel, new RefusingShell());
+  const { remote } = link;
   const close = () => {
     remote[Symbol.dispose]();
-    channel.close("Command ended");
+    link.close("Command ended");
   };
   try {
     const reported = await remote.info();

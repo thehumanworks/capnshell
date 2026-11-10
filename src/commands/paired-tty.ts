@@ -3,12 +3,10 @@ import { errorMessage, printable } from "../errors.js";
 import { ensureIdentity } from "../identity.js";
 import { explainDenial } from "../peers.js";
 import type { PeerConfig } from "../options.js";
-import { RefusingShell } from "../refusing-shell.js";
-import { dialAddresses, isRelayAddress } from "../relay-hub.js";
-import { connectFirst, rpcSession, secureReady } from "../secure.js";
-import type { PtySessionInfo, ShellApi } from "../shell.js";
+import { openDeviceLink } from "../device-link.js";
+import { secureReady } from "../secure.js";
+import type { PtySessionInfo } from "../shell.js";
 import { attachTerminal, ConnectionLost, DETACH_KEY, plain, type RemoteNamedPty } from "../terminal.js";
-import { builtInRelay } from "../relay-config.js";
 import { commandExitCode, describeExit } from "./one-shot.js";
 
 /** The session `cns tty DEVICE` uses on a paired device when no other is named. */
@@ -65,8 +63,6 @@ export async function attachPaired(config: PeerConfig): Promise<number | typeof 
   const name = config.name ?? DEFAULT_SESSION;
   const create = !config.attach;
   const { identity } = ensureIdentity();
-  // Saved addresses, and the built-in relay when the record names none.
-  const addresses = dialAddresses(expect, builtInRelay());
   await secureReady();
   const interrupted = new AbortController();
   let exitOnSignal = 130;
@@ -180,9 +176,11 @@ export async function attachPaired(config: PeerConfig): Promise<number | typeof 
   }
 
   async function open(session: string, startIfMissing: boolean) {
-    const { channel, url } = await connectFirst(addresses, identity, { expect: expect.publicKey, signal: interrupted.signal });
-    const remote = rpcSession<ShellApi>(channel, new RefusingShell());
-    const close = () => { remote[Symbol.dispose](); channel.close("Attachment ended"); };
+    // The local daemon's standing link when it has one, else a connection of its own; after
+    // an outage too, so the daemon's link, once it is back, serves the reattach.
+    const link = await openDeviceLink(expect, identity, interrupted.signal);
+    const { remote } = link;
+    const close = () => { remote[Symbol.dispose](); link.close("Attachment ended"); };
     let startedNow = false;
     const start = async () => {
       startedNow = true;
@@ -233,8 +231,8 @@ export async function attachPaired(config: PeerConfig): Promise<number | typeof 
       return {
         session: opened,
         info,
-        via: isRelayAddress(url) ? "the relay" : "a direct link",
-        lost: () => !channel.open,
+        via: link.lent ? `this device's daemon (${link.via === "relay" ? "through the relay" : "directly"})` : link.via === "relay" ? "the relay" : "a direct link",
+        lost: () => !link.open,
         close: () => { opened[Symbol.dispose](); close(); },
       };
     } catch (error) {
