@@ -97,27 +97,43 @@ test("commands reach a device that cannot be dialed over the link it dialed to t
   assert.equal(existsSync(marker), false, "the command was killed on wsl");
   assert.deepEqual(await links(studio, wsl), ["direct"], "the link outlives the command");
 
-  // cns tty at a terminal attaches through the link too.
-  const invocation = cliInvocation(["tty", "wsl"]);
-  let screen = "";
-  let notify = () => {};
-  const terminal = Bun.spawn([invocation.file, ...invocation.args], {
-    env: cliEnvironment(studio.env) as Record<string, string>,
-    terminal: { cols: 100, rows: 30, name: "xterm-256color", data: (_terminal, data) => { screen += decoder.decode(data, { stream: true }); notify(); } },
-  });
-  t.after(() => { if (terminal.exitCode === null) terminal.kill(); });
-  const waitFor = (needle: string, from = 0) => new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`Waiting for ${JSON.stringify(needle)} in ${JSON.stringify(screen.slice(-600))}`)), 15000);
-    notify = () => { if (screen.indexOf(needle, from) >= 0) { clearTimeout(timer); resolve(); } };
-    notify();
-  });
-  await waitFor("connected to wsl via this device's daemon (directly)");
+  // cns tty at a terminal attaches through the link too, and two terminals get a shell each.
+  const inTerminal = () => {
+    const invocation = cliInvocation(["tty", "wsl"]);
+    let screen = "";
+    let notify = () => {};
+    const terminal = Bun.spawn([invocation.file, ...invocation.args], {
+      env: cliEnvironment(studio.env) as Record<string, string>,
+      terminal: { cols: 100, rows: 30, name: "xterm-256color", data: (_terminal, data) => { screen += decoder.decode(data, { stream: true }); notify(); } },
+    });
+    t.after(() => { if (terminal.exitCode === null) terminal.kill(); });
+    return {
+      write: (text: string) => terminal.terminal!.write(text),
+      exited: terminal.exited,
+      get screen() { return screen; },
+      waitFor: (needle: string, from = 0) => new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`Waiting for ${JSON.stringify(needle)} in ${JSON.stringify(screen.slice(-600))}`)), 15000);
+        notify = () => { if (screen.indexOf(needle, from) >= 0) { clearTimeout(timer); resolve(); } };
+        notify();
+      }),
+    };
+  };
+  const [one, two] = [inTerminal(), inTerminal()];
+  await Promise.all([one.waitFor("connected to wsl via this device's daemon (directly)"), two.waitFor("connected to wsl via this device's daemon (directly)")]);
+  const [nameOne, nameTwo] = [one, two].map((terminal) => /session (\S+)\. Ctrl-\] detaches/.exec(terminal.screen)?.[1]);
+  assert.notEqual(nameOne, nameTwo, `both terminals attached to the session ${nameOne}`);
+  assert.deepEqual([nameOne, nameTwo].sort(), ["tty-1", "tty-2"]);
   await new Promise((resolve) => setTimeout(resolve, 500));
-  const from = screen.length;
-  terminal.terminal!.write("echo $((6 * 7))\r");
-  await waitFor("42", from);
-  terminal.terminal!.write("\x1d");
-  assert.equal(await terminal.exited, 0);
+  const [fromOne, fromTwo] = [one.screen.length, two.screen.length];
+  one.write("echo $((6 * 7))\r");
+  two.write("echo $((6 * 8))\r");
+  await Promise.all([one.waitFor("42", fromOne), two.waitFor("48", fromTwo)]);
+  assert.doesNotMatch(two.screen.slice(fromTwo), /42/);
+  one.write("\x1d");
+  two.write("exit\r");
+  assert.deepEqual([await one.exited, await two.exited], [0, 0]);
+  const listed = await cli(studio, ["sessions", "wsl", "--json"]);
+  assert.deepEqual((JSON.parse(listed.stdout) as Array<{ name: string }>).map((session) => session.name), [nameOne], "the exited terminal's session is gone, the detached one runs");
 
   // The link ends while a command runs: the command ends too, rather than waiting on it.
   const running = launchCli(t, ["run", "wsl", "--", "echo started; sleep 30"], { env: studio.env });

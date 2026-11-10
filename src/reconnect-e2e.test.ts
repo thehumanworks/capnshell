@@ -35,11 +35,11 @@ test("an attached session survives losing the connection and reports what it mis
   assert.equal((await cli(laptop, ["pair", invite, "--yes", "--name", "studio", "--request", "all"])).code, 0);
   assert.equal(await inviting.exited, 0);
 
-  // Piped input to `cns tty studio` gets a terminal of its own, never the shared session main.
+  // Piped input to `cns tty studio` gets an unnamed terminal of its own, never a named session.
   const shell = await cli(laptop, ["tty", "studio"], "echo hi-$((40+2))\nexit 7\n");
   assert.equal(shell.code, 7, shell.stderr);
   assert.match(shell.stdout, /hi-42/);
-  assert.doesNotMatch(shell.stderr, /session main/);
+  assert.doesNotMatch(shell.stderr, /as session/);
 
   // Laptop reaches studio through a proxy that can cut connections and refuse new ones.
   let refusing = false;

@@ -140,7 +140,8 @@ export async function attachTerminal(open: OpenPty, options: PtyOptions, { signa
   pty.onRpcBroken?.((error) => failed(new ConnectionLost(`PTY connection lost: ${error instanceof Error ? error.message : String(error)}`, inFlight)));
 
   const wasRaw = input.isTTY ? input.isRaw : false;
-  const restore = () => { if (interactive) input.setRawMode(wasRaw); };
+  // A terminal that has closed (EIO) has no mode left to restore.
+  const restore = () => { try { if (interactive) input.setRawMode(wasRaw); } catch {} };
   // Never leave the user's terminal raw, even if the process exits abruptly.
   process.once("exit", restore);
   let writing = Promise.resolve();
