@@ -11,7 +11,7 @@ import { connectControl } from "../commands/daemon.js";
 import { GrantedShell } from "../granted-shell.js";
 import type { Permission } from "../peers.js";
 import { ShellApi, type FileChunk } from "../shell.js";
-import { cliEnvironment, cliInvocation, launchCli, testDevices, unusedPort } from "../test-support.js";
+import { cliEnvironment, cliInvocation, launchCli, settledLink, testDevices, unusedPort } from "../test-support.js";
 import { LegacySessions, MAX_SESSIONS } from "./legacy-sessions.js";
 import { clip, createMcpServer, MAX_RESULT_CHARS, readLines } from "./server.js";
 import { daemonTarget, type McpTarget, type PeerFiles, type ToolController } from "./target.js";
@@ -467,15 +467,23 @@ test("the daemon target chooses among linked devices and kills cancelled command
   assert.equal(none.isError, true);
   assert.match(text(none), /No peers are connected/);
 
-  /** A device whose daemon links to studio's and lets studio use all of it. */
+  /**
+   * A device whose daemon links to studio's and lets studio use all of it. After pairing,
+   * both daemons dial each other and keep one link (src/link-rules.ts); until that settles,
+   * the device's link ID can change, and while one link replaces the other the device is
+   * briefly missing from the daemon's peers.
+   */
+  const watcher = await connectControl(studio.state);
+  t.after(() => watcher.close());
   const linked = async (name: string, marker: string) => {
     const device = await devices.device(name, { CNS_TEST_PEER: marker });
     await devices.up(device);
     await devices.pair(studio, device, { hostGrants: "none", guestGrants: "all" });
+    await settledLink(watcher, name);
     return device;
   };
   await linked("first", "FIRST");
-  await eventually(async () => succeeded(await client.callTool({ name: "list_peers", arguments: {} })).peers.length === 1, "the first link");
+  assert.equal(succeeded(await client.callTool({ name: "list_peers", arguments: {} })).peers.length, 1);
   const only = succeeded(await client.callTool({ name: "run_command", arguments: { command: `printf "$CNS_TEST_PEER"` } }));
   assert.equal(only.stdout, "FIRST");
   assert.match(only.peer, /^p\d+$/);
@@ -486,7 +494,7 @@ test("the daemon target chooses among linked devices and kills cancelled command
   assert.deepEqual(succeeded(await client.callTool({ name: "glob", arguments: { pattern: "**/*.txt", path: directory } })).paths, [noteFile]);
 
   await linked("second", "SECOND");
-  await eventually(async () => succeeded(await client.callTool({ name: "list_peers", arguments: {} })).peers.length === 2, "both links");
+  assert.equal(succeeded(await client.callTool({ name: "list_peers", arguments: {} })).peers.length, 2);
   const ambiguous = await client.callTool({ name: "run_command", arguments: { command: print("x") } });
   assert.equal(ambiguous.isError, true);
   assert.match(text(ambiguous), /Several peers are connected \(first \(p\d+\), second \(p\d+\)\); pass peer/);
