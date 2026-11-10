@@ -1,5 +1,5 @@
 import { connectControl } from "../commands/daemon.js";
-import type { PeerController } from "../console.js";
+import type { PeerController, PeerSummary } from "../console.js";
 import { openDeviceLink } from "../device-link.js";
 import { fingerprint, loadIdentity } from "../identity.js";
 import type { ShellApi } from "../shell.js";
@@ -137,6 +137,29 @@ function olderDaemon(error: unknown, statePath: string | undefined): unknown {
 }
 
 /**
+ * The ID of the daemon peer `requested` names, as an ID or a paired device's name,
+ * else the only one connected.
+ */
+export function resolvePeer(connected: readonly PeerSummary[], requested: string | undefined): string {
+  const ids = connected.map((peer) => peer.id);
+  if (requested !== undefined) {
+    if (ids.includes(requested)) return requested;
+    // A paired device's name selects its standing link to the daemon; a command's one-off connection offers nothing.
+    const named = connected.find((peer) => peer.peer?.name === requested && peer.peer.daemon);
+    if (named) return named.id;
+    const hint = connected.some((peer) => peer.peer?.daemon) ? " Pass a paired device's name: its ID changes whenever it reconnects." : "";
+    throw new Error(`Unknown peer ${requested}. ${ids.length ? `Connected peers: ${listPeers(connected)}.${hint}` : "No peers are connected to the daemon."}`);
+  }
+  if (ids.length === 1) return ids[0]!;
+  throw new Error(ids.length ? `Several peers are connected (${listPeers(connected)}); pass peer to choose one.` : "No peers are connected to the daemon.");
+}
+
+/** Each peer by the name to pass as `peer`, with its ID for now: `studio (p4), p7`. */
+function listPeers(connected: readonly PeerSummary[]): string {
+  return connected.map((peer) => peer.peer?.daemon ? `${peer.peer.name} (${peer.id})` : peer.id).join(", ");
+}
+
+/**
  * Reach the peers connected to the local daemon. Each call reads the daemon's
  * state afresh, so a restarted daemon is found again. Closing a call's control
  * connection makes the daemon kill its commands and end its waits.
@@ -179,17 +202,7 @@ export function daemonTarget(statePath?: string, cwd?: string): McpTarget {
         },
         get lost() { return lost; },
         async peer(requested) {
-          const connected = await connection.controller.peers();
-          const ids = connected.map((peer) => peer.id);
-          if (requested !== undefined) {
-            if (ids.includes(requested)) return requested;
-            // A paired device's name selects its standing link to the daemon; a command's one-off connection offers nothing.
-            const named = connected.find((peer) => peer.peer?.name === requested && peer.peer.daemon);
-            if (named) return named.id;
-            throw new Error(`Unknown peer ${requested}. ${ids.length ? `Connected peers: ${ids.join(", ")}.` : "No peers are connected to the daemon."}`);
-          }
-          if (ids.length === 1) return ids[0]!;
-          throw new Error(ids.length ? `Several peers are connected (${ids.join(", ")}); pass peer to choose one.` : "No peers are connected to the daemon.");
+          return resolvePeer(await connection.controller.peers(), requested);
         },
         close() {
           if (closed) return;

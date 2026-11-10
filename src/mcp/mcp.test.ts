@@ -489,7 +489,7 @@ test("the daemon target chooses among linked devices and kills cancelled command
   await eventually(async () => succeeded(await client.callTool({ name: "list_peers", arguments: {} })).peers.length === 2, "both links");
   const ambiguous = await client.callTool({ name: "run_command", arguments: { command: print("x") } });
   assert.equal(ambiguous.isError, true);
-  assert.match(text(ambiguous), /Several peers are connected \(p\d+, p\d+\); pass peer/);
+  assert.match(text(ambiguous), /Several peers are connected \(first \(p\d+\), second \(p\d+\)\); pass peer/);
   assert.equal(succeeded(await client.callTool({ name: "run_command", arguments: { command: `printf "$CNS_TEST_PEER"`, peer: "second" } })).stdout, "SECOND");
 
   const controller = new AbortController();
