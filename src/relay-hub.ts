@@ -10,6 +10,8 @@
  *   GET /v1/dial/KEY        A device dials the daemon registered for KEY. The relay asks it to
  *                           answer and holds the dialer's first messages until it does.
  *   GET /v1/answer/KEY/ID   The daemon answers one dialer; the relay then forwards both ways.
+ *   GET /v1/room            A device showing a pairing code opens a room; the relay gives it a number.
+ *   GET /v1/room/N          A device given that code joins room N, one at a time; see PairingRooms.
  *
  * Every request must come from the cns binary: it carries the Cns-Client header, an HMAC
  * of the request under a client key built into cns (see clientProof). Anything else is
@@ -52,6 +54,7 @@ export interface RelayHandlers {
 const encoder = new TextEncoder();
 const keyPattern = /^[A-Za-z0-9_-]{43}$/;
 const idPattern = /^[A-Za-z0-9_-]{22}$/;
+const roomPattern = /^[1-9][0-9]{0,5}$/;
 
 export function base64url(bytes: Uint8Array): string {
   let binary = "";
@@ -271,11 +274,154 @@ export class RelayRoom {
   }
 }
 
+/** How long a device that joined a pairing room has to finish the code exchange. */
+export const ROOM_GUEST_MS = 15_000;
+/** How long a pairing room stays open at most: as long as the longest invite. */
+export const ROOM_MS = 60 * 60 * 1000;
+/** A room's number is not given out again for this long after it closes, so a late guest does not reach a newer room. */
+export const ROOM_REUSE_MS = 2 * 60 * 1000;
+/** Messages in a pairing room are small: two points, two tags and a sealed invite. */
+export const MAX_ROOM_MESSAGE_BYTES = 64 * 1024;
+/** Rooms open at once, and guests one address may hold at once across all rooms. */
+export const MAX_ROOMS = 10_000;
+export const MAX_GUESTS_PER_ADDRESS = 4;
+
+interface Guest { socket: RelaySocket; address: string; timer: ReturnType<typeof setTimeout> }
+interface Room { host: RelaySocket; timer: ReturnType<typeof setTimeout>; guest?: Guest }
+
+/**
+ * Rooms where two devices exchange a pairing code (src/pairing-code.ts). The device that
+ * shows the code opens a room and gets its number; a device given the code joins it by
+ * number. The relay pipes their messages and nothing else: the code itself never reaches
+ * it, and what passes through is a password-authenticated key exchange and an invite
+ * sealed under its key. One guest at a time, for ROOM_GUEST_MS; the host decides whether
+ * a guest knew the code and ends it either way.
+ *
+ *   host  -> relay: { t: "send", m }   m goes to the guest as it is
+ *                   { t: "end", reason } the guest is closed
+ *                   { t: "ping" }       answered with { t: "pong" }
+ *   relay -> host:  { t: "room", room } once; then { t: "guest" }, { t: "msg", m } for each guest message, { t: "left" }
+ *   guest <-> relay: the host's messages and the guest's own, as text
+ *
+ * The Worker (relay/worker.ts) runs one instance in a Durable Object and the Bun relay one
+ * in memory, so both behave the same.
+ */
+export class PairingRooms {
+  #rooms = new Map<number, Room>();
+  #released = new Map<number, number>();
+  get size(): number { return this.#rooms.size; }
+
+  /** The lowest number not in use and not closed within ROOM_REUSE_MS. */
+  #free(now: number): number {
+    for (const [room, at] of this.#released) if (now - at >= ROOM_REUSE_MS) this.#released.delete(room);
+    for (let room = 1; ; room++) if (!this.#rooms.has(room) && !this.#released.has(room)) return room;
+  }
+
+  /** A device that shows a code opening a room. */
+  open(socket: RelaySocket, now = Date.now()): RelayHandlers {
+    if (this.#rooms.size >= MAX_ROOMS) {
+      safeClose(socket, 4029, "The relay has too many pairing codes open. Try again later.");
+      return { message() {}, close() {} };
+    }
+    const number = this.#free(now);
+    const room: Room = { host: socket, timer: setTimeout(() => this.#close(number, room, 4000, "The pairing code expired."), ROOM_MS) };
+    this.#rooms.set(number, room);
+    json(socket, { t: "room", room: number });
+    return {
+      message: (data) => {
+        if (this.#rooms.get(number) !== room) return;
+        const message = parseRoomMessage(data);
+        if (!message) { this.#close(number, room, 4008, "Invalid relay message."); return; }
+        if (message.t === "ping") { json(socket, { t: "pong" }); return; }
+        if (message.t === "send" && typeof message.m === "string") {
+          if (room.guest) { try { room.guest.socket.send(message.m); } catch { this.#endGuest(room, 4000, "The connection failed."); } }
+          return;
+        }
+        if (message.t === "end") {
+          this.#endGuest(room, 4001, typeof message.reason === "string" ? message.reason.slice(0, 120) : "The other device ended the exchange.");
+          return;
+        }
+        this.#close(number, room, 4008, "Invalid relay message.");
+      },
+      close: () => this.#close(number, room, 4004, "The device showing this code is gone."),
+    };
+  }
+
+  /** Whether a device from `address` could join room `number` now, and why not. */
+  joinable(number: number, address = ""): { ok: true } | { ok: false; code: number; reason: string } {
+    const room = this.#rooms.get(number);
+    if (!room) return { ok: false, code: 4004, reason: "No device is showing this code. It may have expired or been used: run cns pair on the other device for a new one." };
+    if (room.guest) return { ok: false, code: 4009, reason: "Another device is using this code right now. Try again in a few seconds." };
+    if (address && [...this.#rooms.values()].filter((other) => other.guest?.address === address).length >= MAX_GUESTS_PER_ADDRESS) {
+      return { ok: false, code: 4029, reason: "Too many pairing codes in use from this address." };
+    }
+    return { ok: true };
+  }
+
+  /** A device given the code joining room `number` from `address`. */
+  join(number: number, socket: RelaySocket, address = ""): RelayHandlers {
+    const check = this.joinable(number, address);
+    if (!check.ok) {
+      safeClose(socket, check.code, check.reason);
+      return { message() {}, close() {} };
+    }
+    const room = this.#rooms.get(number)!;
+    const guest: Guest = { socket, address, timer: setTimeout(() => this.#endGuest(room, 4008, "The code exchange took too long."), ROOM_GUEST_MS) };
+    room.guest = guest;
+    json(room.host, { t: "guest" });
+    return {
+      message: (data) => {
+        if (room.guest !== guest) return;
+        if (typeof data !== "string" || size(data) > MAX_ROOM_MESSAGE_BYTES) { this.#endGuest(room, 4008, "Invalid relay message."); return; }
+        json(room.host, { t: "msg", m: data });
+      },
+      close: () => {
+        if (room.guest !== guest) return;
+        clearTimeout(guest.timer);
+        room.guest = undefined;
+        if (this.#rooms.get(number) === room) json(room.host, { t: "left" });
+      },
+    };
+  }
+
+  #endGuest(room: Room, code: number, reason: string) {
+    const guest = room.guest;
+    if (!guest) return;
+    clearTimeout(guest.timer);
+    room.guest = undefined;
+    safeClose(guest.socket, code, reason);
+    json(room.host, { t: "left" });
+  }
+
+  #close(number: number, room: Room, code: number, reason: string) {
+    if (this.#rooms.get(number) !== room) return;
+    this.#rooms.delete(number);
+    this.#released.set(number, Date.now());
+    clearTimeout(room.timer);
+    if (room.guest) {
+      clearTimeout(room.guest.timer);
+      safeClose(room.guest.socket, code === 4008 ? 4004 : code, reason);
+      room.guest = undefined;
+    }
+    safeClose(room.host, code, reason);
+  }
+}
+
+function parseRoomMessage(data: RelayData): { t?: unknown; m?: unknown; reason?: unknown } | undefined {
+  if (typeof data !== "string" || size(data) > MAX_ROOM_MESSAGE_BYTES + 1024) return undefined;
+  try {
+    const value: unknown = JSON.parse(data);
+    return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
+  } catch { return undefined; }
+}
+
 /** A request the relay understands, from its path and query. */
 export type RelayRoute =
   | { kind: "accept"; key: string }
   | { kind: "dial"; key: string }
   | { kind: "answer"; key: string; id: string }
+  | { kind: "room" }
+  | { kind: "join"; room: number }
   | { kind: "health" };
 
 /**
@@ -288,6 +434,11 @@ export function route(url: URL): RelayRoute | undefined {
   if (parts[0] === "relay") parts = parts.slice(1);
   if (!parts.length) return { kind: "health" };
   if (parts[0] !== "v1") return undefined;
+  if (parts[1] === "room") {
+    if (parts.length === 2) return { kind: "room" };
+    if (parts.length === 3 && roomPattern.test(parts[2]!)) return { kind: "join", room: Number(parts[2]) };
+    return undefined;
+  }
   const [, kind, key, id] = parts;
   if (!key || !keyPattern.test(key)) return undefined;
   if (kind === "accept" && parts.length === 3) return { kind, key };
@@ -308,9 +459,19 @@ export function relayEndpoint(base: string, kind: "accept" | "dial" | "answer", 
   return url.href;
 }
 
-/** Whether a URL is a request to a relay: registering, dialing or answering. */
+/** The relay endpoint for pairing codes: opening a room, or with `room`, joining it. */
+export function roomEndpoint(base: string, room?: number): string {
+  const url = new URL(relayEndpoint(base, "accept", "A".repeat(43)));
+  url.pathname = url.pathname.replace(/\/v1\/accept\/[A-Za-z0-9_-]{43}$/, `/v1/room${room === undefined ? "" : `/${room}`}`);
+  return url.href;
+}
+
+/** Whether a URL is a request to a relay: registering, dialing, answering, or a pairing room. */
 export function isRelayRequest(address: string): boolean {
-  try { return /\/v1\/(accept|dial|answer)\/[A-Za-z0-9_-]{43}(\/[A-Za-z0-9_-]{22})?\/?$/.test(new URL(address).pathname); } catch { return false; }
+  try {
+    const { pathname } = new URL(address);
+    return /\/v1\/(accept|dial|answer)\/[A-Za-z0-9_-]{43}(\/[A-Za-z0-9_-]{22})?\/?$/.test(pathname) || /\/v1\/room(\/[1-9][0-9]{0,5})?\/?$/.test(pathname);
+  } catch { return false; }
 }
 
 /** Whether a saved address reaches a device through a relay rather than directly. */

@@ -352,7 +352,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
   function authorize(peer: PublicKey, invite?: { id: string }): Refusal | undefined {
     if (invite) return undefined;
     if (findPairedPeer(peer)) return undefined;
-    return { code: "not-paired", reason: "Not paired with this device. Run cns pair on it and paste the invite here with cns pair <invite>." };
+    return { code: "not-paired", reason: "Not paired with this device. Run cns pair on it and type the code it shows here with cns pair CODE." };
   }
   function secretFor(id: string): Uint8Array | undefined {
     const invite = invites.get(id);

@@ -9,7 +9,8 @@ import { errorMessage } from "../errors.js";
 import { ensureIdentity, fingerprint as fingerprintOf, identityPath, loadIdentity } from "../identity.js";
 import { allPrivate } from "../addresses.js";
 import { endpointUrl } from "../options.js";
-import { decisionSchema, decodeInvite, DEFAULT_INVITE_MS, MAX_INVITE_MS, suggestedName, type Decision, type Invite, type PairingApi, type Proposal } from "../pairing.js";
+import { decisionSchema, decodeInvite, DEFAULT_INVITE_MS, INVITE_PREFIX, MAX_INVITE_MS, suggestedName, type Decision, type Invite, type PairingApi, type Proposal } from "../pairing.js";
+import { hostCode, inviteForCode, isPairingCode, MAX_WRONG_CODES, PairingCodeError, parseCode, type HostedCode } from "../pairing-code.js";
 import { peerFileExists, peerNamePattern, removePeerFile, validatePeerUrl } from "../peer-files.js";
 import { describeGrants, expandGrants, findPairedPeer, getPeer, listPeers, savePairedPeer, updatePairedPeer, PERMISSIONS, type Permission } from "../peers.js";
 import { plain } from "../terminal.js";
@@ -25,7 +26,7 @@ import { describeService, installService, installedService, lingering, serviceEn
 const PROPOSAL_WAIT_MS = 10 * 60 * 1000;
 
 export interface UpOptions { bind?: string; port?: string; state?: string; install?: boolean; uninstall?: boolean }
-export interface PairOptions { name?: string; yes?: boolean; request?: string; grant?: string; expires?: string; state?: string }
+export interface PairOptions { name?: string; yes?: boolean; request?: string; grant?: string; expires?: string; state?: string; long?: boolean }
 export interface PeersOptions { json?: boolean; state?: string }
 export interface StatusOptions { json?: boolean; state?: string }
 export interface DoctorOptions { json?: boolean; state?: string }
@@ -177,7 +178,7 @@ export async function up(options: UpOptions): Promise<void> {
     const paired = listPeers();
     console.log(paired.length
       ? `Paired devices: ${paired.map((peer) => `${peer.name}${peers.some((connected) => connected.peer?.daemon && connected.peer.fingerprint === peer.fingerprint) ? " (online)" : ""}`).join(", ")}.`
-      : "No paired devices yet. Run cns pair here and paste the invite on the other device.");
+      : "No paired devices yet. Run cns pair here and type the code it shows on the other device.");
   } finally { control.close(); }
 }
 
@@ -235,10 +236,33 @@ async function uninstall(options: UpOptions): Promise<void> {
   else console.log(`No ${serviceName(kind)} is installed.`);
 }
 
-/** `cns pair`: print an invite and wait for the other device; `cns pair INVITE`: pair with the device that printed it. */
-export async function pair(invite: string | undefined, options: PairOptions): Promise<void> {
-  if (invite === undefined) await inviteAndWait(options);
-  else await acceptInvite(invite, options);
+/**
+ * `cns pair`: show a pairing code (or with --long, print an invite) and wait for the other
+ * device; `cns pair CODE` or `cns pair INVITE`: pair with the device that showed it.
+ */
+export async function pair(typed: string | readonly string[] | undefined, options: PairOptions): Promise<void> {
+  const parts = typed === undefined ? [] : typeof typed === "string" ? [typed] : [...typed];
+  if (!parts.length) { await inviteAndWait(options); return; }
+  if (parts.length === 1 && parts[0]!.startsWith(INVITE_PREFIX)) { await acceptInvite(parts[0]!, options); return; }
+  // A code works once: check what can fail here before using it up.
+  if (!options.yes && !process.stdin.isTTY) throw new Error("Pairing asks for confirmation on a terminal. Pass --yes to accept without asking.");
+  if (options.name !== undefined) checkFreeName(options.name);
+  let text: string;
+  try { text = await inviteFromCode(parts); }
+  catch (error) {
+    process.exitCode = error instanceof PairingCodeError && (error.code === "relay" || error.code === "busy") ? 1 : 3;
+    throw error;
+  }
+  await acceptInvite(text, options);
+}
+
+/** The invite behind a pairing code the other device shows, exchanged with it through the relay. */
+export async function inviteFromCode(parts: readonly string[]): Promise<string> {
+  if (!isPairingCode(parts[0] ?? "")) throw new Error("Type the code cns pair shows on the other device, such as 42-orbit-canyon-velvet, or paste a whole cns1: invite.");
+  const code = parseCode(parts);
+  const relay = builtInRelay();
+  if (!relay) throw new PairingCodeError("relay", "Pairing codes go through the relay, which is off here (CNS_RELAY=off). Run cns pair --long on the other device and paste its invite here.");
+  return await inviteForCode(relay, code);
 }
 
 async function inviteAndWait(options: PairOptions): Promise<void> {
@@ -249,16 +273,49 @@ async function inviteAndWait(options: PairOptions): Promise<void> {
   if (options.name !== undefined) checkFreeName(options.name);
   let prompt: Prompt | undefined;
   let control: ControlConnection | undefined;
+  let hosted: HostedCode | undefined;
   try {
     prompt = prompter(options.yes);
     ({ control } = await pairedDaemon(options));
     const created = await control.remote.invite(minutes * 60_000);
-    console.log(`Invite: ${created.text}`);
-    // An invite that only names private addresses reaches nothing beyond this network; say so now, not after it expires unused.
-    const invited = decodeInvite(created.text).addresses;
-    if (!invited.some(isRelayAddress) && allPrivate(invited)) console.error(`This invite lists only private addresses (${invited.join(", ") || "none"}). A device on another network cannot reach them: the relay is off (CNS_RELAY=off).`);
-    console.error(`On the other device, run: cns pair '${created.text}'\nWaiting for it (the invite expires in ${minutes} minute${minutes === 1 ? "" : "s"})...`);
-    const { peer, fingerprint, proposal } = await control.remote.awaitProposal(created.id) as { peer: string; fingerprint: string; proposal: Proposal };
+    const expiry = `${minutes} minute${minutes === 1 ? "" : "s"}`;
+    // A short code to type on the other device, unless --long asks for the invite itself or there is no relay to exchange it.
+    const relay = builtInRelay();
+    if (!options.long && relay) {
+      try { hosted = await hostCode(relay, created.text, { wrong: (tries) => console.error(`A device typed a wrong code (${tries} of ${MAX_WRONG_CODES} tries).`) }); }
+      catch (error) { console.error(`Cannot get a pairing code from the relay (${errorMessage(error)}), so here is the invite to paste instead.`); }
+    }
+    const printInvite = () => {
+      console.log(`Invite: ${created.text}`);
+      // An invite that only names private addresses reaches nothing beyond this network; say so now, not after it expires unused.
+      const invited = decodeInvite(created.text).addresses;
+      if (!invited.some(isRelayAddress) && allPrivate(invited)) console.error(`This invite lists only private addresses (${invited.join(", ") || "none"}). A device on another network cannot reach them: the relay is off (CNS_RELAY=off).`);
+      console.error(`On the other device, run: cns pair '${created.text}'`);
+    };
+    if (hosted) {
+      console.log(`Code: ${hosted.code}`);
+      console.error(`On the other device, run: cns pair ${hosted.code}\nWaiting for it (the code works once and expires in ${expiry})...`);
+    } else {
+      printInvite();
+      console.error(`Waiting for it (the invite expires in ${expiry})...`);
+    }
+    const proposed = Promise.resolve(control.remote.awaitProposal(created.id) as Promise<{ peer: string; fingerprint: string; proposal: Proposal }>);
+    proposed.catch(() => {});
+    // Three wrong codes end the pairing; a room the relay lost leaves the invite, which still works.
+    const codeFailed = new Promise<never>((_resolve, reject) => {
+      hosted?.delivered.catch((error: unknown) => {
+        if (error instanceof PairingCodeError && error.code === "wrong") { reject(error); return; }
+        console.error(`${errorMessage(error)} Paste this invite on the other device instead:`);
+        printInvite();
+      });
+    });
+    let answered: { peer: string; fingerprint: string; proposal: Proposal };
+    try { answered = await Promise.race([proposed, codeFailed]); }
+    catch (error) {
+      if (error instanceof PairingCodeError) process.exitCode = 3;
+      throw error;
+    } finally { hosted?.close(); }
+    const { peer, fingerprint, proposal } = answered;
     console.error([
       `\n${proposal.name} (fingerprint ${fingerprint}) wants to pair.`,
       `  It asks to use this machine's: ${describeGrants(proposal.requests)}`,
@@ -289,6 +346,7 @@ async function inviteAndWait(options: PairOptions): Promise<void> {
     catch (error) { process.exitCode = 3; throw error; }
     console.log(`Paired with ${decision.name} (${fingerprint}). It may use this machine's: ${describeGrants(decision.granted ?? [])}. This machine may use its: ${describeGrants(proposal.offers)}.`);
   } finally {
+    hosted?.close();
     prompt?.close();
     control?.close();
   }

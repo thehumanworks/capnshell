@@ -1,4 +1,4 @@
-import sodium from "libsodium-wrappers";
+import sodium from "libsodium-wrappers-sumo";
 import { RpcSession, type RpcStub, type RpcTransport } from "capnweb";
 import type { ServerWebSocket } from "bun";
 import { AuthError, Initiator, refusalFor, Responder, type InitiatorOptions, type LinkMode, type ResponderOptions, type Step } from "./auth.js";

@@ -8,11 +8,12 @@
  */
 import {
   ACCEPTED_CLIENT_KEYS, ANSWER_MS, CHALLENGE_MS, CLIENT_HEADER, MAX_DIALS_PER_ADDRESS, MAX_HELD_BYTES, MAX_HELD_MESSAGES, MAX_PIPES_PER_KEY, MAX_RELAY_MESSAGE_BYTES,
-  randomId, route, size, verifyClient, verifyProof, type RelayData,
+  PairingRooms, randomId, route, size, verifyClient, verifyProof, type RelayData,
 } from "../src/relay-hub.js";
 
 // The few Workers runtime types this file uses, so it typechecks without @cloudflare/workers-types.
 interface CfWebSocket extends WebSocket {
+  accept(): void;
   serializeAttachment(value: unknown): void;
   deserializeAttachment(): unknown;
 }
@@ -27,7 +28,7 @@ interface DurableObjectNamespace {
   idFromName(name: string): unknown;
   get(id: unknown): { fetch(request: Request): Promise<Response> };
 }
-interface Env { RELAY_KEYS: DurableObjectNamespace }
+interface Env { RELAY_KEYS: DurableObjectNamespace; RELAY_ROOMS: DurableObjectNamespace }
 
 type Attachment =
   | { role: "listener"; key: string; nonce: string; host: string; proved: boolean; since: number }
@@ -50,6 +51,8 @@ export default {
     // Only cns: anything without a valid client header is refused before it reaches a Durable Object, so it costs nothing.
     if (!(await verifyClient(request.headers.get(CLIENT_HEADER), url.host, url.pathname, ACCEPTED_CLIENT_KEYS))) return new Response("Only cns may use this relay", { status: 401 });
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") return new Response("WebSocket upgrade required", { status: 426 });
+    // Pairing rooms are numbered across the relay, so one object holds them all.
+    if (target.kind === "room" || target.kind === "join") return env.RELAY_ROOMS.get(env.RELAY_ROOMS.idFromName("rooms")).fetch(request);
     return env.RELAY_KEYS.get(env.RELAY_KEYS.idFromName(target.key)).fetch(request);
   },
 };
@@ -74,7 +77,7 @@ export class RelayKey {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const target = route(url);
-    if (!target || target.kind === "health") return new Response("Not found", { status: 404 });
+    if (!target || target.kind === "health" || target.kind === "room" || target.kind === "join") return new Response("Not found", { status: 404 });
     if (target.kind === "dial") {
       const listener = this.#listener();
       if (!listener) return new Response("No device with this key is registered at this relay.", { status: 404 });
@@ -172,5 +175,29 @@ export class RelayKey {
     const held = this.#held.get(id);
     if (held) { clearTimeout(held.timer); this.#held.delete(id); }
     for (const socket of [...this.#ctx.getWebSockets(`dial:${id}`), ...this.#ctx.getWebSockets(`answer:${id}`)]) safeClose(socket, code, reason);
+  }
+}
+
+/**
+ * The pairing rooms of src/relay-hub.ts (PairingRooms), in one object for the whole relay
+ * so that room numbers stay short. Rooms last minutes and are rare, so these sockets do not
+ * hibernate: the object keeps the same in-memory rooms the Bun relay does, and a room's
+ * host pings it to keep the connection up.
+ */
+export class RelayRooms {
+  #rooms = new PairingRooms();
+
+  async fetch(request: Request): Promise<Response> {
+    const target = route(new URL(request.url));
+    if (target?.kind !== "room" && target?.kind !== "join") return new Response("Not found", { status: 404 });
+    const { 0: client, 1: server } = new WebSocketPair();
+    server.accept();
+    const socket = { send: (data: RelayData) => server.send(data), close: (code: number, reason: string) => safeClose(server, code, reason) };
+    // Refusals of a join arrive as close reasons, which the joining device shows as they are.
+    const handlers = target.kind === "room" ? this.#rooms.open(socket) : this.#rooms.join(target.room, socket, request.headers.get("CF-Connecting-IP") ?? "");
+    server.addEventListener("message", (event) => handlers.message((event as MessageEvent).data as string | ArrayBuffer));
+    server.addEventListener("close", () => handlers.close());
+    server.addEventListener("error", () => handlers.close());
+    return upgrade(client);
   }
 }

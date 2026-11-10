@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import sodium from "libsodium-wrappers";
+import sodium from "libsodium-wrappers-sumo";
 import * as nacl from "./nacl.js";
 import shim from "./sodium.js";
 
