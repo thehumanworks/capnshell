@@ -120,7 +120,8 @@ test("commands reach a device that cannot be dialed over the link it dialed to t
   };
   const [one, two] = [inTerminal(), inTerminal()];
   await Promise.all([one.waitFor("connected to wsl via this device's daemon (directly)"), two.waitFor("connected to wsl via this device's daemon (directly)")]);
-  const [nameOne, nameTwo] = [one, two].map((terminal) => /as session (tty-\d+)/.exec(terminal.screen)?.[1]);
+  const [nameOne, nameTwo] = [one, two].map((terminal) => /session (\S+)\. Ctrl-\] detaches/.exec(terminal.screen)?.[1]);
+  assert.notEqual(nameOne, nameTwo, `both terminals attached to the session ${nameOne}`);
   assert.deepEqual([nameOne, nameTwo].sort(), ["tty-1", "tty-2"]);
   await new Promise((resolve) => setTimeout(resolve, 500));
   const [fromOne, fromTwo] = [one.screen.length, two.screen.length];
