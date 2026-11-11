@@ -19,6 +19,11 @@ const PTY_CHUNK_BYTES = 64 * 1024;
 export const MAX_PTYS = 4;
 /** Named PTY sessions per process, running or finished. */
 export const MAX_NAMED_PTYS = 16;
+/**
+ * How long a named session stays listed after its program ends, so its final screen and
+ * exit status can still be read. Then it is removed, as `kill` would.
+ */
+export const FINISHED_SESSION_MS = 60 * 60 * 1000;
 /** Lines of scrollback each PTY's screen keeps for capture(). */
 export const MAX_SCREEN_HISTORY = 1000;
 const MAX_WAITERS = 8;
@@ -681,20 +686,76 @@ function describe(name: string, pty: Pty): PtySessionInfo {
 
 /**
  * Named sessions belong to this process, not to a connection, so later commands and
- * other peers can reach them. They last until killed or this process stops.
+ * other peers can reach them. A running session lasts until it is killed or this process
+ * stops. A finished one is removed `finishedMs` after its program ended, or sooner when
+ * every place is taken and a new session needs one: the session that ended first goes.
+ * Sessions someone is attached to are never removed this way.
  */
 export class PtyRegistry {
   #sessions = new Map<string, Pty>();
+  /** When each finished session's program ended, in milliseconds since the epoch. */
+  #ended = new Map<Pty, number>();
+  #timers = new Set<ReturnType<typeof setTimeout>>();
+  #finishedMs: number;
+  #disposed = false;
+
+  constructor({ finishedMs = FINISHED_SESSION_MS }: { finishedMs?: number } = {}) {
+    this.#finishedMs = finishedMs;
+  }
 
   start(name: string, options: PtySessionOptions = {}, owner: string | null = null): Pty {
     sessionNameSchema.parse(name);
     const parsed = programOptionsSchema.parse(options);
     if (this.#sessions.has(name)) throw new Error(`A PTY session named ${name} already exists. Kill it first.`);
-    if (this.#sessions.size >= MAX_NAMED_PTYS) throw new Error("Too many named PTY sessions; kill finished ones first.");
+    if (this.#sessions.size >= MAX_NAMED_PTYS && !this.#evictFinished()) {
+      throw new Error(`Too many named PTY sessions: all ${MAX_NAMED_PTYS} are running or in use. Kill one first.`);
+    }
     const pty = new Pty(parsed);
     pty.owner = owner;
     this.#sessions.set(name, pty);
+    void pty.exited.then(() => {
+      if (this.#disposed || !this.#holds(pty)) return;
+      this.#ended.set(pty, Date.now());
+      this.#later(pty, this.#finishedMs);
+    });
     return pty;
+  }
+
+  /** Remove `pty` once nobody is attached, checking again a little later while someone is. */
+  #later(pty: Pty, ms: number) {
+    const timer = setTimeout(() => {
+      this.#timers.delete(timer);
+      if (this.#disposed || !this.#holds(pty)) return;
+      if (pty.viewers) this.#later(pty, Math.min(this.#finishedMs, 60_000));
+      else this.#remove(pty);
+    }, ms);
+    // A finished session must not keep this process alive.
+    (timer as { unref?: () => void }).unref?.();
+    this.#timers.add(timer);
+  }
+
+  #holds(pty: Pty): boolean {
+    for (const held of this.#sessions.values()) if (held === pty) return true;
+    return false;
+  }
+
+  #remove(pty: Pty) {
+    for (const [name, held] of this.#sessions) {
+      if (held === pty) this.#sessions.delete(name);
+    }
+    this.#ended.delete(pty);
+    pty.dispose();
+  }
+
+  /** Make room by removing the finished session that ended first and has nobody attached; false when there is none. */
+  #evictFinished(): boolean {
+    let oldest: Pty | undefined;
+    for (const [pty, at] of this.#ended) {
+      if (!pty.viewers && (oldest === undefined || at < this.#ended.get(oldest)!)) oldest = pty;
+    }
+    if (!oldest) return false;
+    this.#remove(oldest);
+    return true;
   }
 
   get(name: string): Pty {
@@ -717,13 +778,18 @@ export class PtyRegistry {
   async kill(name: string, pty: Pty): Promise<PtyExit> {
     this.resolve(name, pty);
     this.#sessions.delete(name);
+    this.#ended.delete(pty);
     pty.dispose();
     return await pty.exited;
   }
 
   [Symbol.dispose]() {
+    this.#disposed = true;
+    for (const timer of this.#timers) clearTimeout(timer);
+    this.#timers.clear();
     for (const pty of this.#sessions.values()) pty.dispose();
     this.#sessions.clear();
+    this.#ended.clear();
   }
 }
 

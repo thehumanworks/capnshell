@@ -118,7 +118,7 @@ A grant lists the operations one device may perform on another. The granting dev
 
 ## 6. Session ownership and continuity
 
-- Named sessions are hosted by the peer daemon, in both roles: a session exists in the host's `PtyRegistry` and ends only when killed, when its `--timeout` passes, or when the daemon stops. That is today's behavior, made symmetric because both devices run the same daemon.
+- Named sessions are hosted by the peer daemon, in both roles: a session exists in the host's `PtyRegistry` and ends only when killed, when its `--timeout` passes, or when the daemon stops. Once its program has ended, the host removes it an hour later, or sooner when a new session needs its place. That is today's behavior, made symmetric because both devices run the same daemon.
 - Each session records its **owner**: the device (public key) that created it, or `local` for sessions created from the host's own console. `sessions:list` shows every session on the host; `sessions:kill` is needed to kill another device's session, while an owner may always kill its own.
 - Viewers remain many; writers are not coordinated beyond today's "last keystroke wins" (**Decision 6**: whether to add an exclusive-control lease, recommended no for the first release).
 - Handles follow PR 19: they belong to the issuing shell, which now means to one device's link. When the link drops, the device's handles are revoked and its viewers detached; the session keeps running. Reconnection (section 7) obtains new handles.
