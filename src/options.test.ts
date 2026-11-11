@@ -66,7 +66,7 @@ test("every command names a paired device, which it must reach as that device", 
     ["screen", "studio", "build"], ["kill", "studio", "build"], ["cp", "a", "studio:/b"],
   ]) assert.deepEqual(parseOptions(args).expect, expected, args.join(" "));
   for (const args of [
-    ["run", "missing", "--", "pwd"], ["tty", "ws://localhost:47381"], ["sessions"], ["tty"], ["run", "--", "pwd"],
+    ["run", "missing", "--", "pwd"], ["tty", "ws://localhost:47381"], ["tty"], ["run", "--", "pwd"],
     ["keys", "build", "Enter"], ["screen", "build"], ["kill", "build"], ["cp", "a", ":/b"], ["cp", "a", "missing:/b"],
   ]) assert.throws(() => parseOptions(args), `Expected rejection: ${args.join(" ")}`);
   assert.throws(() => parseOptions(["run", "missing", "--", "pwd"]), /No paired device is saved as missing/);
@@ -201,6 +201,10 @@ test("named session commands take the device, a session name and their own optio
   assert.deepEqual([screen.name, screen.screen, screen.until, screen.timeoutMs], ["build", { history: 20 }, "PASS", 0]);
   assert.deepEqual(parseOptions(["screen", "studio", "build"]).screen, { history: 0 });
   assert.equal(parseOptions(["sessions", "studio", "--json"]).json, true);
+  // Without a device, sessions lists every paired device's.
+  assert.deepEqual(parseOptions(["sessions"]) as unknown, { role: "sessions", everywhere: true, json: false });
+  assert.deepEqual(parseOptions(["sessions", "--json"]) as unknown, { role: "sessions", everywhere: true, json: true });
+  assert.throws(() => parseOptions(["sessions", "--literal"]));
   assert.equal(parseOptions(["kill", "studio", "build"]).name, "build");
 
   for (const args of [
