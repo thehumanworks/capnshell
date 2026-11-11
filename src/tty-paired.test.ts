@@ -154,6 +154,85 @@ test("cns sessions without a device lists every paired device's sessions, and na
   assert.match(refused.stderr, /^cns: studio: not listed: studio does not let this device list its sessions \(sessions:list\); cns doctor studio checks what it grants now\n$/);
 });
 
+test("cns ui moves between sessions with its switch key, starts new ones and detaches leaving them all running", { skip: !posix, timeout: 60000 }, async (t) => {
+  const { cli, laptop, sessions, terminal } = await pairedStudio(t);
+  assert.equal((await cli(laptop, ["tty", "studio", "--name", "build", "--", "exec bash --noprofile --norc"])).code, 0);
+  const ui = terminal(laptop, ["ui"]);
+  await ui.waitFor("cns ui · 1 device · 1 session");
+  await ui.waitFor("1 build");
+  // A digit opens that numbered session.
+  ui.write("1");
+  await pause(300);
+  ui.write("echo from-$((6*7))\r");
+  await ui.waitFor("from-42");
+  // The switch key brings the switcher back over the session, which keeps running.
+  let mark = ui.output.length;
+  ui.write("\x1d");
+  await ui.waitFor("cns ui · 1 device", mark);
+  await ui.waitFor("Esc studio/build", mark);
+  // n starts the next tty-N there and opens it.
+  ui.write("n");
+  await pause(500);
+  ui.write("echo in-new-$((1+1))\r");
+  await ui.waitFor("in-new-2", mark);
+  // Tab goes back to the session before, which redraws as it was.
+  mark = ui.output.length;
+  ui.write("\x1d");
+  await ui.waitFor("Tab studio/build", mark);
+  ui.write("\t");
+  await ui.waitFor("from-42", mark);
+  // d detaches: cns ui ends, and both sessions keep running.
+  mark = ui.output.length;
+  ui.write("\x1d");
+  await ui.waitFor("Esc studio/build", mark);
+  ui.write("d");
+  await ui.waitFor("left cns ui; every session keeps running", mark);
+  assert.equal(await ui.exited, 0);
+  assert.deepEqual(await sessions(), ["build", "tty-1"]);
+  const listed = await cli(laptop, ["sessions", "studio", "--json"]);
+  assert.ok((JSON.parse(listed.stdout) as Array<{ running: boolean }>).every((session) => session.running));
+});
+
+test("cns ui opens a session named on the command line, and the switcher's x kills after asking", { skip: !posix, timeout: 60000 }, async (t) => {
+  const { cli, laptop, sessions, gone, terminal } = await pairedStudio(t);
+  assert.equal((await cli(laptop, ["tty", "studio", "--name", "work", "--", "printf 'work-ready\\n'; exec bash --noprofile --norc"])).code, 0);
+  assert.equal((await cli(laptop, ["tty", "studio", "--name", "spare", "--", "sleep 60"])).code, 0);
+  const ui = terminal(laptop, ["ui", "studio/work", "--key", "C-b"]);
+  await ui.waitFor("work-ready");
+  let mark = ui.output.length;
+  // With --key C-b, Ctrl-] goes to the session, and Ctrl-B opens the switcher.
+  ui.write("\x02");
+  await ui.waitFor("Esc studio/work", mark);
+  // Numbers come with the listing, which the switcher asks for as it opens.
+  await ui.waitFor("2 spare", mark);
+  mark = ui.output.length;
+  ui.write("2");
+  await pause(300);
+  ui.write("\x02");
+  await ui.waitFor("Esc studio/spare", mark);
+  mark = ui.output.length;
+  ui.write("x");
+  await ui.waitFor("Kill studio/spare?", mark);
+  ui.write("y");
+  await ui.waitFor("Killed studio/spare.", mark);
+  await gone("spare");
+  assert.deepEqual(await sessions(), ["work"]);
+  ui.write("q");
+  assert.equal(await ui.exited, 0);
+});
+
+test("cns ui refuses to run without a terminal, and names what to use instead", { skip: !posix, timeout: 60000 }, async (t) => {
+  const { cli, laptop } = await pairedStudio(t);
+  const result = await cli(laptop, ["ui"]);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /cns ui needs a terminal\. Without one, cns sessions lists sessions/);
+  // What was asked for is checked first, so a mistake there is named rather than the missing terminal.
+  assert.match((await cli(laptop, ["ui", "nowhere"])).stderr, /No paired device is saved as nowhere/);
+  assert.match((await cli(laptop, ["ui", "studio/bad:name"])).stderr, /Session names have/);
+  assert.match((await cli(laptop, ["ui", "studio/a/b"])).stderr, /cns ui takes DEVICE or DEVICE\/SESSION/);
+  assert.match((await cli(laptop, ["ui", "--key", "C-c"])).stderr, /--key cannot be Ctrl-C: the session needs it/);
+});
+
 test("a terminal's session is removed when its shell exits", { skip: !posix, timeout: 60000 }, async (t) => {
   const { laptop, sessions, gone, terminal } = await pairedStudio(t);
   const shell = terminal(laptop, ["tty", "studio"]);

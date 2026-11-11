@@ -38,7 +38,7 @@ async function within<T>(promise: Promise<T>, ms: number): Promise<T> {
  * Listing needs sessions:list; without it, taken names are found by trying them. Two
  * terminals starting at once both try the same name, and the one refused takes the next.
  */
-async function startTerminal(remote: RpcStub<ShellApi>, options: PtySessionOptions): Promise<string> {
+export async function startTerminal(remote: RpcStub<ShellApi>, options: PtySessionOptions): Promise<string> {
   let taken = new Set<string>();
   try { taken = new Set((await plain(remote.ptySessions() as unknown as Promise<PtySessionInfo[]>)).map((session) => session.name)); }
   catch (error) { if (!/^Permission denied/.test(errorMessage(error))) throw error; }

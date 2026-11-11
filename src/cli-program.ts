@@ -137,6 +137,28 @@ export function createCli(): Command {
       if (created) console.error(`Created this device's identity at ${identityPath()}. Keep the file private; losing it means pairing again.`);
       console.log(`Fingerprint: ${identity.fingerprint}\nPublic key:  ${identity.publicKey}`);
     });
+  program.command("ui")
+    .description("Move between named sessions on every paired device: one on screen, a switcher between them")
+    .argument("[target]", "DEVICE to open the switcher on, or DEVICE/SESSION to open that session at once")
+    .option("--key <key>", "The key that opens the switcher, such as C-b (default: CNS_KEY, else C-])")
+    .addHelpText("after", [
+      "",
+      "A session fills the terminal. Ctrl-] opens the switcher: every paired device and its sessions,",
+      "with the selected session's screen beside them. In the switcher:",
+      "  Enter   open the selected session         1-9   open that numbered session",
+      "  Tab     the session before the last one   Esc   back to the session you came from",
+      "  n       start the next tty-N on the selected device",
+      "  x       kill the selected session (asks first)",
+      "  d, q    detach: leave cns ui",
+      "Detaching, or closing the terminal, leaves every session running; cns ui returns to them.",
+      "A device removes a session an hour after its program ends. Each device's grants apply as",
+      "with cns sessions, cns tty --attach and cns kill.",
+      "Examples: cns ui    cns ui studio    cns ui studio/build    cns ui --key C-b",
+    ].join("\n"))
+    .action(async (target: string | undefined, options: { key?: string }) => {
+      const { ui } = await import("./commands/ui.js");
+      process.exitCode = await ui({ target, key: options.key });
+    });
   program.command("attach")
     .description("Attach an interactive console to a local daemon")
     .option("--state <path>", "Local daemon state file")
