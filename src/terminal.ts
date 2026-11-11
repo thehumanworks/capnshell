@@ -72,7 +72,7 @@ export type AttachResult =
 const RESET_MODES = "\x1b[0m\x1b[?25h\x1b[?1l\x1b>\x1b[?66l\x1b[?2004l\x1b[?1004l\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?7h\x1b[4l";
 
 /** Receives remote output by reference. Acknowledging after the local write is the flow control. */
-class OutputSink extends RpcTarget implements PtySink {
+export class OutputSink extends RpcTarget implements PtySink {
   #exit: (result: PtyExit) => void;
   #detached: (reason: string) => void;
   #write: (data: Uint8Array) => Promise<void>;

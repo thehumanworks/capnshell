@@ -67,6 +67,18 @@ const cases: Record<string, { from?: Partial<SwitcherState>; press: Key[]; effec
     then: (after) => assert.deepEqual([after.confirmKill, after.message], [null, "Kept thestudio/build."]),
   },
   "x on a device kills nothing": { from: { selected: "lf" }, press: [char("x"), char("y")], effects: [], then: (after) => assert.equal(after.confirmKill, null) },
+  "+ adds the selected session as a pane": { from: { selected: "thestudio/agent", panes: ["lf/tty-1"] }, press: [char("+")], effects: [{ kind: "add-pane", ref: ref("thestudio", "agent") }] },
+  "+ on a device starts a session there in a pane of its own": { from: { selected: "beelink", panes: ["lf/tty-1"] }, press: [char("+")], effects: [{ kind: "new", device: "beelink", pane: true }] },
+  "+ on a session already in a pane says so": {
+    from: { selected: "lf/tty-2", panes: ["lf/tty-1", "lf/tty-2"] }, press: [char("+")], effects: [],
+    then: (after) => assert.equal(after.message, "lf/tty-2 is already in a pane."),
+  },
+  "+ with every pane taken says how to free one": {
+    from: { selected: "thestudio/agent", panes: ["a/1", "a/2", "a/3", "a/4"] }, press: [char("+")], effects: [],
+    then: (after) => assert.match(after.message!, /up to 4 panes; - removes/),
+  },
+  "- closes the current session's pane when there are several": { from: { panes: ["lf/tty-1", "lf/tty-2"] }, press: [char("-")], effects: [{ kind: "remove-pane" }] },
+  "- with one session on screen says how to leave": { from: { panes: ["lf/tty-1"] }, press: [char("-")], effects: [], then: (after) => assert.match(after.message!, /Only one session is on screen/) },
   "d detaches": { press: [char("d")], effects: [{ kind: "detach" }] },
   "q detaches": { press: [char("q")], effects: [{ kind: "detach" }] },
   "Ctrl-C detaches, even while asking to kill": { from: { selected: "lf/tty-1" }, press: [char("x"), key("interrupt")], effects: [{ kind: "detach" }] },
@@ -127,21 +139,21 @@ const plain = (frame: string) => {
 
 test("the switcher draws devices, numbered sessions, the selected screen and the keys", () => {
   const frame = draw(
-    { ...state({ selected: "thestudio/agent", current: ref("lf", "tty-2"), previous: ref("lf", "tty-1") }), preview: { key: "thestudio/agent", text: "> fix the tests\n\n  Running bun test…\n" } },
+    { ...state({ selected: "thestudio/agent", current: ref("lf", "tty-2"), previous: ref("lf", "tty-1"), panes: ["lf/tty-2", "thestudio/build"] }), preview: { key: "thestudio/agent", text: "> fix the tests\n\n  Running bun test…\n" } },
     { cols: 120, rows: 14, switchLabel: "Ctrl-]" },
   );
   const screen = plain(frame);
   assert.equal(screen.length, 14);
   assert.match(screen[0]!, /^ cns ui · 3 devices · 4 sessions +Esc lf\/tty-2 · Tab lf\/tty-1$/);
   assert.match(screen[1]!, /^ lf +direct · 2 sessions +│thestudio\/agent · 120x40 · 0 attached · running$/);
-  assert.match(screen[2]!, /^ {2}1 tty-1 +bun test +running +│$/);
-  assert.match(screen[3]!, /^ {2}2 tty-2 +vim src\/pty.ts +running +│> fix the tests$/);
+  assert.match(screen[2]!, /^ 1 {2}tty-1 +bun test +running +│$/);
+  assert.match(screen[3]!, /^ 2▪ tty-2 +vim src\/pty.ts +running +│> fix the tests$/, "a session on screen is marked");
   assert.match(screen[4]!, /^ beelink +may not list +│$/);
   assert.match(screen[5]!, /^ {3}beelink does not let this device list.*│  Running bun test…$/);
-  assert.match(screen[7]!, /^ {2}3 build +nix build +exited 0 +│$/);
-  assert.match(screen[8]!, /^ {2}4 agent +Claude Code +running +│$/);
-  assert.match(frame, /\x1b\[7m {2}4 agent/, "the selected row is drawn in reverse");
-  assert.equal(screen[13], " Enter open · 1-9 jump · Tab previous · Esc back · n new · x kill · d detach · Ctrl-] in a session returns here");
+  assert.match(screen[7]!, /^ 3▪ build +nix build +exited 0 +│$/);
+  assert.match(screen[8]!, /^ 4 {2}agent +Claude Code +running +│$/);
+  assert.match(frame, /\x1b\[7m 4 {2}agent/, "the selected row is drawn in reverse");
+  assert.equal(screen[13], " Enter open · 1-9 jump · Tab previous · Esc back · + pane · - unpane · n new · x kill · d detach · Ctrl-] returns here");
   assert.match(frame, /^\x1b\[\?25l/, "the cursor is hidden while the switcher shows");
 });
 
