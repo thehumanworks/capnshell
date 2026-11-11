@@ -64,12 +64,19 @@ jobs:
             exit 1
           fi
       - name: Create a draft release
+        # A tag the first step just created can take a few seconds to reach the releases API,
+        # whose --verify-tag then says it does not exist (seen releasing v1.6.0), so try again.
         run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG exists; its assets are replaced."
-          else
-            gh release create "$TAG" --draft --verify-tag --generate-notes --title "$TAG"
-          fi
+          for attempt in 1 2 3 4 5 6; do
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              echo "Release $TAG exists; its assets are replaced."
+              exit 0
+            fi
+            gh release create "$TAG" --draft --verify-tag --generate-notes --title "$TAG" && exit 0
+            [ "$attempt" = 6 ] || sleep 5
+          done
+          echo "::error::Could not create a draft release for $TAG; see the errors above."
+          exit 1
 
   build:
     needs: draft
