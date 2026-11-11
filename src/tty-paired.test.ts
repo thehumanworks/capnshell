@@ -159,7 +159,7 @@ test("cns ui moves between sessions with its switch key, starts new ones and det
   assert.equal((await cli(laptop, ["tty", "studio", "--name", "build", "--", "exec bash --noprofile --norc"])).code, 0);
   const ui = terminal(laptop, ["ui"]);
   await ui.waitFor("cns ui · 1 device · 1 session");
-  await ui.waitFor("1 build");
+  await ui.waitFor("1  build");
   // A digit opens that numbered session.
   ui.write("1");
   await pause(300);
@@ -204,7 +204,7 @@ test("cns ui opens a session named on the command line, and the switcher's x kil
   ui.write("\x02");
   await ui.waitFor("Esc studio/work", mark);
   // Numbers come with the listing, which the switcher asks for as it opens.
-  await ui.waitFor("2 spare", mark);
+  await ui.waitFor("2  spare", mark);
   mark = ui.output.length;
   ui.write("2");
   await pause(300);
@@ -219,6 +219,53 @@ test("cns ui opens a session named on the command line, and the switcher's x kil
   assert.deepEqual(await sessions(), ["work"]);
   ui.write("q");
   assert.equal(await ui.exited, 0);
+});
+
+test("cns ui shows sessions side by side: + adds a pane, keys go to the current one, - removes it", { skip: !posix, timeout: 60000 }, async (t) => {
+  const { cli, laptop, sessions, terminal } = await pairedStudio(t);
+  for (const name of ["left", "right"]) assert.equal((await cli(laptop, ["tty", "studio", "--name", name, "--", "exec bash --noprofile --norc"])).code, 0);
+  const screen = async (name: string) => (await cli(laptop, ["screen", "studio", name])).stdout;
+  const ui = terminal(laptop, ["ui", "studio/left"]);
+  await pause(300);
+  ui.write("echo L$((1+1))X\r");
+  await ui.waitFor("L2X");
+  // In the switcher, select right and add it as a pane: it gets the keys, and left stays beside it.
+  let mark = ui.output.length;
+  ui.write("\x1d");
+  await ui.waitFor("2  right", mark);
+  ui.write("j+");
+  // A pane's title is drawn in reverse while it has the keys.
+  await ui.waitFor("\x1b[7m studio/right", mark);
+  await ui.waitFor("L2X", mark);
+  ui.write("echo R$((2*3))X\r");
+  await ui.waitFor("R6X", mark);
+  assert.match(await screen("right"), /R6X/);
+  assert.doesNotMatch(await screen("left"), /R6X/);
+  // Tab gives the keys back to left, in its pane.
+  mark = ui.output.length;
+  ui.write("\x1d");
+  await ui.waitFor("Tab studio/left", mark);
+  ui.write("\t");
+  await ui.waitFor("\x1b[7m studio/left", mark);
+  ui.write("echo L$((3*3))X\r");
+  await ui.waitFor("L9X", mark);
+  assert.match(await screen("left"), /L9X/);
+  assert.doesNotMatch(await screen("right"), /L9X/);
+  // - closes left's pane: right fills the terminal again, and both sessions keep running.
+  mark = ui.output.length;
+  ui.write("\x1d");
+  await ui.waitFor("Esc studio/left", mark);
+  ui.write("-");
+  await pause(500);
+  ui.write("echo only$((4*4))X\r");
+  await ui.waitFor("only16X", mark);
+  assert.match(await screen("right"), /only16X/);
+  mark = ui.output.length;
+  ui.write("\x1d");
+  await ui.waitFor("Esc studio/right", mark);
+  ui.write("d");
+  assert.equal(await ui.exited, 0);
+  assert.deepEqual(await sessions(), ["left", "right"]);
 });
 
 test("cns ui refuses to run without a terminal, and names what to use instead", { skip: !posix, timeout: 60000 }, async (t) => {

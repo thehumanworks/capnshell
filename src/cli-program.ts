@@ -138,7 +138,7 @@ export function createCli(): Command {
       console.log(`Fingerprint: ${identity.fingerprint}\nPublic key:  ${identity.publicKey}`);
     });
   program.command("ui")
-    .description("Move between named sessions on every paired device: one on screen, a switcher between them")
+    .description("Move between named sessions on every paired device, one at a time or side by side in panes")
     .argument("[target]", "DEVICE to open the switcher on, or DEVICE/SESSION to open that session at once")
     .option("--key <key>", "The key that opens the switcher, such as C-b (default: CNS_KEY, else C-])")
     .addHelpText("after", [
@@ -148,6 +148,8 @@ export function createCli(): Command {
       "  Enter   open the selected session         1-9   open that numbered session",
       "  Tab     the session before the last one   Esc   back to the session you came from",
       "  n       start the next tty-N on the selected device",
+      "  +       add the selected session in a pane, up to four side by side",
+      "  -       close the current session's pane; the session keeps running",
       "  x       kill the selected session (asks first)",
       "  d, q    detach: leave cns ui",
       "Detaching, or closing the terminal, leaves every session running; cns ui returns to them.",

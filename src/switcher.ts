@@ -8,10 +8,14 @@ import type { PtySessionInfo } from "./shell.js";
  * draws on a terminal of a given size. src/commands/ui.ts does the connecting, the reading of
  * keys and the attaching; switcher.test.ts checks the keys as a table and the drawing as text.
  *
- *   session ──switch key──▶ switcher ──Enter, 1-9, Tab, Esc──▶ session
+ *   session ──switch key──▶ switcher ──Enter, 1-9, Tab, Esc──▶ session (or panes)
  *                              │ n starts a session, x kills one (after y)
+ *                              │ + adds the selected session as a pane, - removes the current one
  *                              └ d, q, Ctrl-C ──▶ detached: every session keeps running
  */
+
+/** The most panes cns ui shows at once. */
+export const MAX_PANES = 4;
 
 /** A session on a device, as the switcher remembers it. pid and startedAt tell a session from a later one with its name. */
 export interface SessionRef { device: string; name: string; pid?: number; startedAt?: string }
@@ -33,12 +37,14 @@ export interface SwitcherState {
   previous: SessionRef | null;
   /** The selected session's screen as text, once it has been fetched. */
   preview: { key: string; text: string } | null;
+  /** The sessions on screen, by key: one, or several in panes. */
+  panes: string[];
 }
 
 export function initialState(devices: readonly string[]): SwitcherState {
   return {
     devices: devices.map((device) => ({ device, state: "loading" })), selected: devices[0] ?? null,
-    confirmKill: null, message: null, current: null, previous: null, preview: null,
+    confirmKill: null, message: null, current: null, previous: null, preview: null, panes: [],
   };
 }
 
@@ -65,9 +71,13 @@ const refOf = (row: Extract<Row, { kind: "session" }>): SessionRef => ({ device:
 /** What the switcher asks src/commands/ui.ts to do after a key. */
 export type Effect =
   | { kind: "none" }
+  /** Show a session: the pane it is in, or in place of the current one. */
   | { kind: "attach"; ref: SessionRef }
-  /** Start the next free tty-N on `device` and attach to it. */
-  | { kind: "new"; device: string }
+  /** Start the next free tty-N on `device` and show it, in a pane of its own with `pane`. */
+  | { kind: "new"; device: string; pane?: true }
+  | { kind: "add-pane"; ref: SessionRef }
+  /** Close the current session's pane; the session keeps running. */
+  | { kind: "remove-pane" }
   | { kind: "kill"; ref: SessionRef }
   /** Leave cns ui; every session keeps running. */
   | { kind: "detach" };
@@ -145,6 +155,15 @@ export function press(state: SwitcherState, key: Key): { state: SwitcherState; e
     case "x":
       if (row?.kind === "session") return done({ confirmKill: refOf(row) });
       return done({ message: "Select a session to kill." });
+    case "+":
+      if (state.panes.length >= MAX_PANES) return done({ message: `cns ui shows up to ${MAX_PANES} panes; - removes the one you came from.` });
+      if (row?.kind === "device") return done({}, { kind: "new", device: row.device, pane: true });
+      if (row?.kind !== "session") return done({});
+      if (state.panes.includes(row.key)) return done({ message: `${row.key} is already in a pane.` });
+      return done({}, { kind: "add-pane", ref: refOf(row) });
+    case "-":
+      if (state.panes.length > 1) return done({}, { kind: "remove-pane" });
+      return done({ message: "Only one session is on screen; d detaches." });
     case "d": case "q": return done({}, { kind: "detach" });
     default: return done({});
   }
@@ -257,7 +276,7 @@ export function draw(state: SwitcherState, { cols, rows: height, switchLabel }: 
       }
     } else {
       const session = row.session;
-      const text = fit(`  ${row.number ?? " "} `, 4) + fit(session.name, nameWidth) + fit(label(session), Math.max(0, listWidth - 4 - nameWidth - 11)) + fit(status(session), 11);
+      const text = fit(` ${row.number ?? " "}${state.panes.includes(row.key) ? "▪" : " "} `, 4) + fit(session.name, nameWidth) + fit(label(session), Math.max(0, listWidth - 4 - nameWidth - 11)) + fit(status(session), 11);
       listLines.push({ text, selected });
     }
   }
@@ -285,7 +304,7 @@ export function draw(state: SwitcherState, { cols, rows: height, switchLabel }: 
   // The message line, then the keys.
   const message = state.confirmKill ? `Kill ${refKey(state.confirmKill)}? It ends the program. y to kill, any other key keeps it.` : state.message ?? "";
   lines.push(fit(` ${message}`, cols));
-  lines.push(style.dim + fit(` Enter open · 1-9 jump · Tab previous · Esc back · n new · x kill · d detach · ${switchLabel} in a session returns here`, cols) + style.reset);
+  lines.push(style.dim + fit(` Enter open · 1-9 jump · Tab previous · Esc back · + pane · - unpane · n new · x kill · d detach · ${switchLabel} returns here`, cols) + style.reset);
 
   return `${ESC}?25l` + lines.slice(0, height).map((text, index) => `${ESC}${index + 1};1H${text}${ESC}K`).join("") + style.reset;
 }

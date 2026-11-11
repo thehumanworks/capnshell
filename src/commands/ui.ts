@@ -13,6 +13,7 @@ import {
 import { attachTerminal, ConnectionLost, plain, type RemoteNamedPty } from "../terminal.js";
 import { classify, sessionReplaced } from "../tty-recovery.js";
 import { startTerminal } from "./paired-tty.js";
+import { showPanes } from "./ui-panes.js";
 
 /** How often the switcher asks every device for its sessions while it is open. */
 const REFRESH_MS = 3000;
@@ -204,6 +205,30 @@ export async function ui(options: UiOptions = {}): Promise<number> {
     }
   };
 
+  // What is on screen: one session, or several in panes, with the keys going to panes[focus].
+  let panes: SessionRef[] = [];
+  let focus = 0;
+  /** Put a session on screen: focus its pane if it has one, else add a pane or take the current one's place. */
+  const place = (ref: SessionRef, add: boolean) => {
+    const index = panes.findIndex((pane) => refKey(pane) === refKey(ref));
+    if (index >= 0) focus = index;
+    else if (add || !panes.length) focus = panes.push(ref) - 1;
+    else panes[focus] = ref;
+  };
+  /** Show what is on screen until the switch key; the message for the switcher afterwards. */
+  const show = async (): Promise<string | null> => {
+    if (panes.length === 1) return await visit(panes[0]!);
+    state = entered(state, panes[focus]!);
+    const result = await showPanes(panes, focus, { open, switchKey, signal: stop.signal });
+    if (result.kind !== "failed" || stop.signal.aborted) return null;
+    const ref = panes[result.index]!;
+    focus = result.index;
+    state = entered(state, ref);
+    if (!(result.error instanceof ConnectionLost)) return `${explain(result.error, ref)} - removes its pane.`;
+    links.drop(ref.device);
+    return `Lost the connection to ${ref.device}. ${refKey(ref)} keeps running there; Esc tries again, - removes its pane.`;
+  };
+
   /** Start the next free tty-N, at this terminal's size. */
   const create = async (deviceName: string): Promise<SessionRef | string> => {
     try {
@@ -220,7 +245,12 @@ export async function ui(options: UiOptions = {}): Promise<number> {
       try { await plain(handle.kill()); }
       finally { handle[Symbol.dispose](); }
       const gone = (other: SessionRef | null) => other && refKey(other) === refKey(ref) ? null : other;
-      state = { ...state, message: `Killed ${refKey(ref)}.`, current: gone(state.current), previous: gone(state.previous) };
+      const index = panes.findIndex((pane) => refKey(pane) === refKey(ref));
+      if (index >= 0) {
+        panes.splice(index, 1);
+        focus = Math.max(0, focus > index ? focus - 1 : Math.min(focus, panes.length - 1));
+      }
+      state = { ...state, message: `Killed ${refKey(ref)}.`, current: gone(state.current), previous: gone(state.previous), panes: panes.map(refKey) };
     } catch (error) {
       state = { ...state, message: explain(error, ref) };
     }
@@ -267,12 +297,22 @@ export async function ui(options: UiOptions = {}): Promise<number> {
     let effect: Effect = target?.name ? { kind: "attach", ref: { device: target.device, name: target.name } } : { kind: "none" };
     while (!stop.signal.aborted) {
       let message: string | null = null;
-      if (effect.kind === "attach") message = await visit(effect.ref);
-      else if (effect.kind === "new") {
+      if (effect.kind === "attach" || effect.kind === "add-pane") {
+        place(effect.ref, effect.kind === "add-pane");
+        message = await show();
+      } else if (effect.kind === "new") {
         const made = await create(effect.device);
-        message = typeof made === "string" ? made : await visit(made);
+        if (typeof made === "string") message = made;
+        else {
+          place(made, !!effect.pane);
+          message = await show();
+        }
+      } else if (effect.kind === "remove-pane") {
+        panes.splice(focus, 1);
+        focus = Math.min(focus, panes.length - 1);
+        message = await show();
       } else if (effect.kind === "detach") break;
-      state = { ...state, message };
+      state = { ...state, message, panes: panes.map(refKey) };
       effect = await pick();
     }
   } finally {
