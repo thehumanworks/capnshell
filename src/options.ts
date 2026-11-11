@@ -59,6 +59,13 @@ export interface DaemonConfig {
   state: string;
 }
 
+/** `cns sessions` without a device: every paired device's named sessions. */
+export interface SessionsEverywhereConfig {
+  role: "sessions";
+  everywhere: true;
+  json: boolean;
+}
+
 /** One command on a paired device. */
 export interface PeerConfig {
   role: PeerRole;
@@ -146,13 +153,17 @@ export function addDaemonCommand(program: Command, run: (config: DaemonConfig) =
   });
 }
 
-export function addPeerCommands(program: Command, run: (config: PeerConfig) => void | Promise<void>): void {
+export function addPeerCommands(
+  program: Command,
+  run: (config: PeerConfig) => void | Promise<void>,
+  everywhere: (config: SessionsEverywhereConfig) => void | Promise<void> = () => { throw new Error("sessions requires a paired device's name."); },
+): void {
   program.enablePositionalOptions();
   const descriptions: Record<PeerRole, string> = {
     run: "Execute one shell command on a paired device and exit with its status",
     tty: "Open an interactive terminal (PTY) on a paired device, or start a named session",
     cp: "Copy files or directories between this device and a paired device, or between two paired devices",
-    sessions: "List a paired device's named PTY sessions",
+    sessions: "List a paired device's named PTY sessions, or without a device, every paired device's",
     keys: "Send keys to a named PTY session",
     screen: "Print a named PTY session's screen, optionally once it shows some text",
     kill: "End a named PTY session and remove it",
@@ -236,7 +247,13 @@ export function addPeerCommands(program: Command, run: (config: PeerConfig) => v
         return run({ ...config, copy });
       });
     } else if (role === "sessions") {
-      command.usage("<device> [options]").argument("<device>", device).action((name: string) => run(resolveOptions(role, command, name)));
+      command.usage("[device] [options]").argument("[device]", `${device}; without one, every paired device`)
+        .addHelpText("after", "\nWithout a device, each paired device that lets this one list its sessions is asked at once, through\nthe local daemon's link when it has one. Devices that do not, or do not answer within 10 seconds,\nare named on stderr. Exit 0 when every device asked answered, 1 when one did not.\n--json then prints one entry per device: { device, state, sessions | reason }, where state is\nlisted, not-granted, refused or unreachable.")
+        .action((name: string | undefined) => {
+          if (name !== undefined) return run(resolveOptions(role, command, name));
+          const { json } = peerOptionsSchema.parse({ ...command.opts() });
+          return everywhere({ role: "sessions", everywhere: true, json: json === true });
+        });
     } else {
       command.usage(role === "keys" ? "<device> [options] <name> <keys...>" : "<device> [options] <name>")
         .argument("<device>", device).argument("<arguments...>");
@@ -268,10 +285,10 @@ export function splitRemote(value: string, platform: NodeJS.Platform = process.p
 }
 
 // The same command definitions are used by the CLI and option unit tests.
-export function parseOptions(argv: string[]): PeerConfig | DaemonConfig {
+export function parseOptions(argv: string[]): PeerConfig | DaemonConfig | SessionsEverywhereConfig {
   const program = new Command().exitOverride().configureOutput({ writeOut: () => {}, writeErr: () => {} });
-  let config: PeerConfig | DaemonConfig | undefined;
-  addPeerCommands(program, (parsed) => { config = parsed; });
+  let config: PeerConfig | DaemonConfig | SessionsEverywhereConfig | undefined;
+  addPeerCommands(program, (parsed) => { config = parsed; }, (parsed) => { config = parsed; });
   addDaemonCommand(program, (parsed) => { config = parsed; });
   program.parse(argv, { from: "user" });
   if (!config) throw new Error("A peer command is required.");

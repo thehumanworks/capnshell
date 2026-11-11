@@ -136,6 +136,24 @@ test("two terminals running cns tty DEVICE each get a shell of their own", { ski
   assert.deepEqual(await sessions(), ["tty-1", "tty-2"]);
 });
 
+test("cns sessions without a device lists every paired device's sessions, and names the ones it may not list", { skip: !posix, timeout: 60000 }, async (t) => {
+  const { cli, pair, laptop } = await pairedStudio(t);
+  assert.equal((await cli(laptop, ["tty", "studio", "--name", "build", "--", "sleep 60"])).code, 0);
+  const listed = await cli(laptop, ["sessions"]);
+  assert.equal(listed.code, 0, listed.stderr);
+  assert.match(listed.stdout, /^DEVICE +NAME +STATUS +SIZE +ATTACHED +TITLE OR COMMAND\nstudio +build +running +80x24 +0 +sleep 60\n$/);
+  assert.equal(listed.stderr, "");
+  const json = await cli(laptop, ["sessions", "--json"]);
+  const [entry] = JSON.parse(json.stdout) as Array<{ device: string; state: string; sessions: Array<{ name: string }> }>;
+  assert.deepEqual([entry?.device, entry?.state, entry?.sessions.map((session) => session.name)], ["studio", "listed", ["build"]]);
+
+  // A device that studio lets copy files only is told why studio is left out, and nothing fails.
+  const phone = await pair("phone", "files");
+  const refused = await cli(phone, ["sessions"]);
+  assert.deepEqual([refused.code, refused.stdout], [0, ""]);
+  assert.match(refused.stderr, /^cns: studio: not listed: studio does not let this device list its sessions \(sessions:list\); cns doctor studio checks what it grants now\n$/);
+});
+
 test("a terminal's session is removed when its shell exits", { skip: !posix, timeout: 60000 }, async (t) => {
   const { laptop, sessions, gone, terminal } = await pairedStudio(t);
   const shell = terminal(laptop, ["tty", "studio"]);

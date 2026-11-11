@@ -23,6 +23,9 @@ export function createCli(): Command {
     }
     const { startPeer } = await import("./commands/peer.js");
     await startPeer(config);
+  }, async (config) => {
+    const { sessionsEverywhere } = await import("./commands/sessions-everywhere.js");
+    process.exitCode = await sessionsEverywhere(config);
   });
   addDaemonCommand(program, async (config) => {
     const { startPeer } = await import("./commands/peer.js");

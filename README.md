@@ -78,6 +78,7 @@ laptop $ cns run studio -- 'git status'
 laptop $ cns cp ./notes.md studio:~/      # needs only the files grant
 laptop $ cns tty studio                 # a login shell of its own, session tty-1, that survives disconnects
 laptop $ cns sessions studio            # each terminal's session, and any other named sessions
+laptop $ cns sessions                   # every paired device's sessions in one table
 laptop $ cns peers
 NAME    STATUS  CONNECTION  VERSION  ACCESS                  FINGERPRINT
 studio  online  direct      1.4.0    shell, files, sessions  k7qm-3h2x-...
@@ -229,6 +230,7 @@ cns keys studio claude 'fix the failing tests' Enter
 cns screen studio claude --history 50
 cns keys studio claude C-c
 cns sessions studio                                       # name, status, size, viewers, command
+cns sessions                                              # every paired device's, with a DEVICE column
 cns kill studio claude
 ```
 
