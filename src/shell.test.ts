@@ -5,7 +5,7 @@ import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { Terminal as Screen } from "@xterm/headless";
 import {
-  MAX_EXEC_CHUNK_BYTES, MAX_FILE_CHUNK_BYTES, MAX_FORKS, MAX_NAMED_PTYS, MAX_OUTPUT_BYTES, MAX_PTY_BACKLOG_BYTES, MAX_PTY_INPUT_BYTES, MAX_SCREEN_HISTORY,
+  FINISHED_SESSION_MS, MAX_EXEC_CHUNK_BYTES, MAX_FILE_CHUNK_BYTES, MAX_FORKS, MAX_NAMED_PTYS, MAX_OUTPUT_BYTES, MAX_PTY_BACKLOG_BYTES, MAX_PTY_INPUT_BYTES, MAX_SCREEN_HISTORY,
   MAX_TIMEOUT_MS, MAX_WRITE_BYTES, HANDLES_REVOKED, PtyRegistry, ShellApi, type ExecInput, type ExecSink, type PtyExit,
 } from "./shell.js";
 
@@ -38,8 +38,8 @@ function apiFor(t: TestContext) {
 }
 
 /** Named sessions belong to the registry, which outlives each connection's ShellApi. */
-function registryFor(t: TestContext) {
-  const registry = new PtyRegistry();
+function registryFor(t: TestContext, options?: ConstructorParameters<typeof PtyRegistry>[0]) {
+  const registry = new PtyRegistry(options);
   t.after(() => registry[Symbol.dispose]());
   const connect = () => {
     const api = new ShellApi(registry);
@@ -765,12 +765,66 @@ test("waits time out, validate their options and are limited per session", { ski
   await Promise.all(pending);
 });
 
-test("each process holds a bounded number of named sessions until they are killed", { skip: windows }, async (t) => {
+test("each process holds a bounded number of running named sessions until they are killed", { skip: windows }, async (t) => {
   const api = registryFor(t).connect();
-  const sessions = Array.from({ length: MAX_NAMED_PTYS }, (_, index) => api.startPtySession(`s${index}`, { command: "true" }));
-  assert.throws(() => api.startPtySession("extra", { command: "true" }), /Too many named PTY sessions/);
+  const sessions = Array.from({ length: MAX_NAMED_PTYS }, (_, index) => api.startPtySession(`s${index}`, { command: "sleep 60" }));
+  assert.throws(() => api.startPtySession("extra", { command: "true" }), /Too many named PTY sessions: all 16 are running or in use\. Kill one first\./);
   await sessions[0]!.kill();
   api.startPtySession("extra", { command: "true" });
+});
+
+test("a finished named session is removed once its time is up, keeping its screen until then", { skip: windows }, async (t) => {
+  assert.equal(FINISHED_SESSION_MS, 60 * 60 * 1000);
+  const api = registryFor(t, { finishedMs: 300 }).connect();
+  const done = api.startPtySession("done", { command: "printf 'final words'; exit 3" });
+  const running = api.startPtySession("running", { command: "sleep 60" });
+  const ended = await done.wait({ text: "never shown" });
+  assert.equal(ended.running, false);
+  // Until its time is up, the final screen and exit status stay readable.
+  assert.match((await done.capture()).text, /^final words/);
+  assert.deepEqual(api.ptySessions().map((session) => [session.name, session.running]), [["done", false], ["running", true]]);
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  assert.deepEqual(api.ptySessions().map((session) => session.name), ["running"], "only the finished session is removed");
+  assert.throws(() => api.ptySession("done"), /No PTY session named done/);
+  await assert.rejects(done.capture(), /no longer exists/);
+  // The name is free again, and the running session was never touched.
+  api.startPtySession("done", { command: "sleep 60" });
+  assert.equal(running.info().running, true);
+});
+
+test("a finished session someone is still attached to is neither removed nor replaced", { skip: windows }, async (t) => {
+  const api = registryFor(t, { finishedMs: 100 }).connect();
+  const watched = api.startPtySession("watched", { command: "exit 4" });
+  // A viewer stays attached until it has taken the exit; this one takes its time.
+  let release!: () => void;
+  const taken = new Promise<void>((resolve) => { release = resolve; });
+  watched.attach({ output() {}, exit: () => taken });
+  await watched.wait({ text: "never shown" });
+  for (let index = 1; index < MAX_NAMED_PTYS; index++) api.startPtySession(`s${index}`, { command: "sleep 60" });
+  assert.throws(() => api.startPtySession("extra", { command: "true" }), /Too many named PTY sessions/);
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.ok(api.ptySessions().some((session) => session.name === "watched"), "kept while attached");
+  release();
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.ok(!api.ptySessions().some((session) => session.name === "watched"), "removed once nobody is attached");
+});
+
+test("when every place is taken, a new session replaces the finished one that ended first", { skip: windows }, async (t) => {
+  const api = registryFor(t).connect();
+  const first = api.startPtySession("first", { command: "exit 1" });
+  await first.wait({ text: "never shown" });
+  const second = api.startPtySession("second", { command: "exit 2" });
+  await second.wait({ text: "never shown" });
+  for (let index = 2; index < MAX_NAMED_PTYS; index++) api.startPtySession(`s${index}`, { command: "sleep 60" });
+  api.startPtySession("extra", { command: "sleep 60" });
+  const names = api.ptySessions().map((session) => session.name);
+  assert.equal(names.length, MAX_NAMED_PTYS);
+  assert.ok(!names.includes("first") && names.includes("second"), "the session that ended first makes room");
+  await assert.rejects(first.capture(), /no longer exists/);
+  api.startPtySession("again", { command: "sleep 60" });
+  assert.ok(!api.ptySessions().some((session) => session.name === "second"));
+  // With only running sessions left, a new one is refused.
+  assert.throws(() => api.startPtySession("over", { command: "true" }), /Too many named PTY sessions/);
 });
 
 test("Windows named sessions outlive connections, take keys, attach and are killed", { skip: !windows }, async (t) => {

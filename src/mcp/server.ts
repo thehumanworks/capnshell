@@ -23,7 +23,7 @@ const PROGRESS_MS = 10_000;
 const instructions = `cns runs commands and terminal programs on other machines ("peers") as the user running cns there.
 - list_peers shows each peer's operating system and shell. Commands use that shell's syntax: Bash on Linux and macOS, Windows PowerShell on Windows.
 - run_command starts a fresh non-interactive shell for every call and returns when the command finishes. cd and variables do not persist; pass cwd instead. Stdin is closed.
-- For interactive programs, REPLs, TUIs, servers and watchers, use a named session: start_session, then send_keys and read_screen, then kill_session. Sessions keep running between calls until killed, and other clients of the same peer can see them.
+- For interactive programs, REPLs, TUIs, servers and watchers, use a named session: start_session, then send_keys and read_screen, then kill_session. Sessions keep running between calls until killed, and other clients of the same peer can see them. A session whose program has ended keeps its final screen for an hour, then the peer removes it.
 - To wait for a program, pass until to read_screen or send_keys rather than sleeping.
 - For files on a peer, use read_file, write_file, list_directory and glob rather than cat, echo or ls through run_command. Paths are in the peer's own syntax; relative ones start from the default working directory.
 - Name a peer by the name list_peers gives it. A paired device keeps its name, but its ID (such as p4) changes whenever it reconnects, so pass an ID only for a peer that has no name. When several peers are connected, pass peer to choose one.`;

@@ -161,7 +161,7 @@ export function addPeerCommands(program: Command, run: (config: PeerConfig) => v
   for (const role of roles) {
     const command = program.command(role).description(descriptions[role]);
     if (role === "sessions" || sessionRoles.has(role)) {
-      command.addHelpText("after", "\nNamed sessions live in the device's daemon: they survive this command and reconnects,\nand end when they are killed or the daemon stops. Start one with cns tty DEVICE --name NAME.");
+      command.addHelpText("after", "\nNamed sessions live in the device's daemon: they survive this command and reconnects,\nand end when they are killed or the daemon stops. A session whose program has ended keeps its\nfinal screen for an hour, or until a new session needs its place. Start one with cns tty DEVICE --name NAME.");
     }
     if (role === "run" || role === "tty") {
       command.addOption(new Option("--cwd <path>", "Absolute working directory on the device").env("CNS_CWD"))
