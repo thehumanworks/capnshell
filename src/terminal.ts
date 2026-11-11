@@ -56,6 +56,12 @@ export interface AttachOptions {
   detachKey?: number;
   /** Show the session on a local terminal's alternate screen, restoring the screen on return. */
   alternateScreen?: boolean;
+  /**
+   * With `alternateScreen`: the caller has already switched the terminal to its alternate
+   * screen and keeps it there, as cns ui does between sessions. On return, only the modes
+   * the program set are reset, so moving to the next view never flashes the user's shell.
+   */
+  keepAlternateScreen?: boolean;
 }
 export type AttachResult =
   | { exit: PtyExit; screen?: PtyScreen }
@@ -94,7 +100,7 @@ class OutputSink extends RpcTarget implements PtySink {
  * input is forwarded verbatim; its end is not translated into a keystroke, because
  * Ctrl-D would also quit TUIs started with stdin closed.
  */
-export async function attachTerminal(open: OpenPty, options: PtyOptions, { signal, screen, detachKey, alternateScreen, onOutput, onInputRefused }: AttachOptions = {}): Promise<AttachResult> {
+export async function attachTerminal(open: OpenPty, options: PtyOptions, { signal, screen, detachKey, alternateScreen, keepAlternateScreen, onOutput, onInputRefused }: AttachOptions = {}): Promise<AttachResult> {
   const input = process.stdin;
   const interactive = !!(input.isTTY && process.stdout.isTTY);
   // A local terminal answers queries such as cursor-position reports only when it
@@ -120,11 +126,11 @@ export async function attachTerminal(open: OpenPty, options: PtyOptions, { signa
   };
   const sink = new OutputSink(write, finish, (reason) => finish({ detached: reason }), onOutput);
   // Switch before any output arrives; leaving the alternate screen restores the user's.
-  if (local) await new Promise((resolve) => process.stdout.write("\x1b[?1049h", resolve));
+  if (local && !keepAlternateScreen) await new Promise((resolve) => process.stdout.write("\x1b[?1049h", resolve));
   const leave = async () => {
     if (!local) return;
     closed = true;
-    await new Promise((resolve) => process.stdout.write(RESET_MODES + "\x1b[?1049l", resolve));
+    await new Promise((resolve) => process.stdout.write(RESET_MODES + (keepAlternateScreen ? "" : "\x1b[?1049l"), resolve));
   };
   let pty: RemotePty;
   try {

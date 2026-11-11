@@ -31,7 +31,7 @@ test("cns --version prints this cns's version and nothing else", async (t) => {
 test("the CLI exposes only cross-platform peer commands with side-effect-free help", async (t) => {
   const cwd = await temporaryDirectory(t);
   const { stdout } = await runCli(["--help"], cwd);
-  for (const command of ["up", "pair", "peers", "run", "tty", "cp", "sessions", "keys", "screen", "kill", "mcp", "attach", "stop"]) {
+  for (const command of ["up", "pair", "peers", "run", "tty", "cp", "sessions", "ui", "keys", "screen", "kill", "mcp", "attach", "stop"]) {
     assert.ok(stdout.includes(command));
     const result = await runCli([command, "--help"], cwd);
     assert.match(result.stdout, /Usage: cns/);

@@ -79,6 +79,7 @@ laptop $ cns cp ./notes.md studio:~/      # needs only the files grant
 laptop $ cns tty studio                 # a login shell of its own, session tty-1, that survives disconnects
 laptop $ cns sessions studio            # each terminal's session, and any other named sessions
 laptop $ cns sessions                   # every paired device's sessions in one table
+laptop $ cns ui                         # all of them in a switcher: Ctrl-] moves between sessions
 laptop $ cns peers
 NAME    STATUS  CONNECTION  VERSION  ACCESS                  FINGERPRINT
 studio  online  direct      1.4.0    shell, files, sessions  k7qm-3h2x-...
@@ -241,6 +242,24 @@ cns kill studio claude
 - **Terminal queries** are answered by the session's screen unless an attached terminal answers them, so programs keep drawing with no one attached.
 
 At a terminal, `cns tty studio` and `cns tty studio --attach NAME` reconnect by themselves when the connection drops (see [Paired devices](#paired-devices)). Without a terminal, run it again: the new attachment redraws the current screen and streams subsequent output. It does not replay all output missed during the outage, and input in flight when the connection failed may or may not have reached the program; inspect the session before retrying it. Unnamed PTYs end with their connection. Named sessions end when the device's daemon stops; they do not survive a daemon restart. `cns kill` with the same target and session name explicitly ends and removes a named session.
+
+### Switching between sessions
+
+`cns ui` shows one session at a time, with a switcher over every session on every paired device, much like tmux's session chooser:
+
+```sh
+cns ui                  # the switcher: each paired device and its sessions
+cns ui studio           # the switcher, with studio selected
+cns ui studio/claude    # straight into studio's session claude
+cns ui --key C-b        # switch with Ctrl-B instead of Ctrl-]
+```
+
+- In a session, Ctrl-] (`--key` or `CNS_KEY` choose another control key, such as `C-b`) opens the switcher over it; the session keeps running. Up and Down (or j and k) move, Enter opens the selected session, 1 to 9 open the numbered sessions, Tab opens the session before the last one, Esc returns to the one you came from, `n` (or Enter on a device) starts the next free `tty-N` there, and `x` kills the selected session after asking. When the terminal is at least 90 columns wide, the selected session's screen is shown beside the list.
+- `d` or `q` detaches: `cns ui` ends and every session keeps running, including the ones started from it, as does closing the terminal. A session started in `cns ui` is kept so you can return to it, unlike the one `cns tty DEVICE` starts, which ends with its window.
+- The switcher asks each device for its sessions when it opens and every three seconds while it shows, each over its own connection, so a slow or unreachable device is marked as such without holding up the others. A device whose saved grants do not include `sessions:list` is shown but not asked. The device's grants apply as everywhere else: without `sessions:control`, a session's output is shown but your keys are not sent, and the switcher says so.
+- If the connection to a device drops while one of its sessions is on screen, `cns ui` returns to the switcher and says so; Esc tries again. It does not reconnect by itself as `cns tty` does.
+- To see sessions side by side, run `cns ui` in each pane of your terminal or multiplexer (tmux, WezTerm, Windows Terminal and the like): each pane picks and switches its own session.
+- `cns ui` needs a terminal. Without one, use `cns sessions`, `cns screen`, `cns keys` and `cns tty --attach`.
 
 ### RPC interface
 
