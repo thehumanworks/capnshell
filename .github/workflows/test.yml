@@ -1,5 +1,6 @@
-# The tests on a POSIX system. The terminal tests run only there (the weekly
-# Windows run skips them), and no other workflow runs the tests at all.
+# The lint rules and the tests on a POSIX system. The terminal tests run only
+# there (the weekly Windows run skips them), and no other workflow runs the
+# tests or the rules at all: the rules otherwise run only as a pre-commit hook.
 # It runs for pull requests that change code rather than on every push because
 # this repository's Actions minutes are limited; run it on demand from the
 # Actions tab or `gh workflow run test.yml`.
@@ -15,6 +16,7 @@ on:
       - package.json
       - bun.lock
       - tsconfig.json
+      - sgconfig.yml
       - .github/workflows/test.yml
   workflow_dispatch:
 
@@ -36,4 +38,12 @@ jobs:
           bun-version-file: package.json
       - run: bun install --frozen-lockfile --ignore-scripts
       - run: bun run typecheck
+      # The version mise.toml names, as lefthook.yml runs it.
+      - name: Lint
+        run: |
+          npx --yes --package @ast-grep/cli@0.51.0 ast-grep test --skip-snapshot-tests
+          npx --yes --package @ast-grep/cli@0.51.0 ast-grep scan . .github
+      # Pi's grep tool runs the host's ripgrep, and its tests search with it.
+      - name: Install ripgrep
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ripgrep
       - run: bun run test
