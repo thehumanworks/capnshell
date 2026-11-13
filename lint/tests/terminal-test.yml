@@ -1,0 +1,9 @@
+id: no-terminal-answers
+valid:
+  - 'handle.attach(sink, { cols, rows })'
+  - 'handle.attach(sink, { answers: false })'
+  - 'const answers = await Promise.allSettled(devices)'
+invalid:
+  - 'handle.attach(sink, { answers: true })'
+  - 'handle.attach(sink, { cols, rows, answers: !options.respond })'
+  - 'handle.attach(sink, { cols, rows, answers })'

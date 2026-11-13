@@ -5,6 +5,7 @@ import type {
 import { MAX_PTY_INPUT_BYTES } from "./shell.js";
 import type { PeerController } from "./console.js";
 import { AttachedScreen } from "./redraw.js";
+import { BareLineFeeds, QueryFilter } from "./terminal-output.js";
 
 type Result<T> = Promise<T & { [Symbol.dispose]?(): void }>;
 /** The caller's view of a remote PtySession or PtyAttachment stub. */
@@ -68,8 +69,10 @@ export type AttachResult =
   /** Detached from a named session: by the user (null) or by the executor, with its reason. */
   | { exit: null; detached: string | null };
 
-// Leave the modes a full-screen program may have set, as tmux does on detach.
-const RESET_MODES = "\x1b[0m\x1b[?25h\x1b[?1l\x1b>\x1b[?66l\x1b[?2004l\x1b[?1004l\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?7h\x1b[4l";
+// Leave the modes a full-screen program may have set, as tmux does on detach. The key
+// modifier reset comes first: a terminal that does not know it reads it as underline.
+const RESET_MODES = "\x1b[>4m\x1b[0m\x1b[r\x1b[?25h\x1b[?1l\x1b>\x1b[?6l\x1b[?66l\x1b[?69l\x1b[?2004l\x1b[?1004l\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l"
+  + "\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?2026l\x1b[?2031l\x1b[?2048l\x1b[?7h\x1b[4l";
 
 /** Receives remote output by reference. Acknowledging after the local write is the flow control. */
 export class OutputSink extends RpcTarget implements PtySink {
@@ -103,9 +106,10 @@ export class OutputSink extends RpcTarget implements PtySink {
 export async function attachTerminal(open: OpenPty, options: PtyOptions, { signal, screen, detachKey, alternateScreen, keepAlternateScreen, onOutput, onInputRefused }: AttachOptions = {}): Promise<AttachResult> {
   const input = process.stdin;
   const interactive = !!(input.isTTY && process.stdout.isTTY);
-  // A local terminal answers queries such as cursor-position reports only when it
-  // both displays the output and types the replies; otherwise the remote screen must.
-  const remote = { stream: !screen, respond: !!screen || !interactive };
+  // The remote screen answers the program's terminal queries, such as cursor-position
+  // reports. This terminal's answers would arrive a round trip later, some of them after
+  // the program stopped waiting: see terminal-output.ts.
+  const remote = { stream: !screen, respond: true };
   const fixedSize = options.cols !== undefined || options.rows !== undefined;
   const size = () => ({
     cols: options.cols ?? (process.stdout.isTTY ? process.stdout.columns : undefined) ?? 80,
@@ -118,11 +122,14 @@ export async function attachTerminal(open: OpenPty, options: PtyOptions, { signa
   if (signal?.aborted) throw new Error("PTY session cancelled.");
   signal?.addEventListener("abort", abort, { once: true });
   const local = interactive && alternateScreen ? new AttachedScreen(size().cols, size().rows) : undefined;
+  // Only a terminal answers queries and converts line feeds; a file or a pipe gets every byte.
+  const terminal = process.stdout.isTTY ? { queries: new QueryFilter(), lineFeeds: new BareLineFeeds() } : undefined;
   let closed = false;
   const write = async (data: Uint8Array) => {
-    const translated = local ? await local.translate(data) : data;
+    const shown = terminal ? terminal.queries.filter(data) : data;
+    const translated = local ? await local.translate(shown) : shown;
     // Output still in flight after detaching must not reach the restored screen.
-    if (!closed) await new Promise((resolve) => process.stdout.write(translated, resolve));
+    if (!closed) await new Promise((resolve) => process.stdout.write(terminal ? terminal.lineFeeds.keep(translated) : translated, resolve));
   };
   const sink = new OutputSink(write, finish, (reason) => finish({ detached: reason }), onOutput);
   // Switch before any output arrives; leaving the alternate screen restores the user's.
@@ -218,7 +225,7 @@ export async function attachSession(controller: PeerController, id: string, name
     // Only a real terminal or an explicit size resizes a session others may share.
     const sized = !!process.stdout.isTTY || cols !== undefined || rows !== undefined;
     return await attachTerminal((sink, options) => session.attach(sink, {
-      ...(sized ? { cols: options.cols, rows: options.rows } : {}), answers: !options.respond,
+      ...(sized ? { cols: options.cols, rows: options.rows } : {}),
     }), { cols, rows }, { signal, detachKey: DETACH_KEY, alternateScreen: true });
   } finally {
     session[Symbol.dispose]();

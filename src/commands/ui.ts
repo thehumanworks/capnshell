@@ -185,7 +185,7 @@ export async function ui(options: UiOptions = {}): Promise<number> {
     let refused: string | undefined;
     await write("\x1b[?25h");
     try {
-      const result = await attachTerminal((sink, sized) => handle.attach(sink, { cols: sized.cols, rows: sized.rows, answers: !sized.respond }), {}, {
+      const result = await attachTerminal((sink, sized) => handle.attach(sink, { cols: sized.cols, rows: sized.rows }), {}, {
         signal: stop.signal, detachKey: switchKey, alternateScreen: true, keepAlternateScreen: true,
         onInputRefused: (reason) => { refused = explainDenial(printable(reason), ref.device); },
       });

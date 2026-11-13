@@ -187,7 +187,7 @@ export async function attachPaired(config: PeerConfig): Promise<number | typeof 
       try {
         const sized = !!process.stdout.isTTY || config.cols !== undefined || config.rows !== undefined;
         const result = await attachTerminal((sink, options) => connected.session.attach(sink, {
-          ...(sized ? { cols: options.cols, rows: options.rows } : {}), answers: !options.respond,
+          ...(sized ? { cols: options.cols, rows: options.rows } : {}),
         }), { cols: config.cols, rows: config.rows }, {
           signal: interrupted.signal, detachKey: DETACH_KEY, alternateScreen: true, onOutput: report,
           onInputRefused: (reason) => say(`${expect.name} lets this device watch ${session} but not type into it (${explainDenial(printable(reason), expect.name)})`),
