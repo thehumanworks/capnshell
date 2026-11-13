@@ -729,6 +729,29 @@ test("named sessions answer terminal queries unless an attached terminal does", 
   assert.match(done.screen.text, /second=9;9$/m);
 });
 
+test("a session's screen answers what a program asks before it draws: device, size and colour support", { skip: windows }, async (t) => {
+  // Each answer is read up to its last byte, so a query left unanswered would hold the command until the test times out.
+  const ask = (query: string, end: string, name: string) => `printf '${query}'; IFS= read -rs -d '${end}' reply; printf ' ${name}=%s.' "$(printf '%s' "$reply" | tr -d '\\033\\\\')"`;
+  const command = [
+    ask("\\033[c", "c", "device"),
+    ask("\\033[18t", "t", "size"),
+    ask("\\033P+q5463\\033\\\\", "\\\\", "truecolor"),
+    ask("\\033P+q524742;6b63757531\\033\\\\", "\\\\", "rgb"),
+    "IFS= read -rs -d '\\\\' reply; printf ' other=%s.' \"$(printf '%s' \"$reply\" | tr -d '\\033\\\\')\"",
+  ].join("; ");
+  const answered = ptySink();
+  const pty = apiFor(t).openPty(answered.sink, { command, respond: true, cols: 40, rows: 4 });
+  await answered.exited;
+  // Neovim waits for the device attributes as it exits, and takes its colours from Tc and RGB.
+  assert.match(answered.output, / device=\[\?1;2\./);
+  assert.match(answered.output, / size=\[8;4;40\./);
+  assert.match(answered.output, / truecolor=P1\+r5463\./);
+  assert.match(answered.output, / rgb=P1\+r524742\./);
+  // A capability the screen does not have is refused, not left unanswered.
+  assert.match(answered.output, / other=P0\+r6b63757531\./);
+  pty[Symbol.dispose]();
+});
+
 test("keys follow the program's cursor-key mode", { skip: windows }, async (t) => {
   const session = registryFor(t).connect().startPtySession("cursor", {
     command: "printf '\\033[?1hready'; IFS= read -rs -n 3 key; printf ' hex=%s' \"$(printf '%s' \"$key\" | od -An -tx1 | tr -d ' \\n')\"",

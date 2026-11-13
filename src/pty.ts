@@ -26,6 +26,11 @@ export const MAX_NAMED_PTYS = 16;
 export const FINISHED_SESSION_MS = 60 * 60 * 1000;
 /** Lines of scrollback each PTY's screen keeps for capture(). */
 export const MAX_SCREEN_HISTORY = 1000;
+/**
+ * What a screen answers yes to when a program asks for terminfo capabilities by name
+ * (XTGETTCAP, names in hex): `Tc` and `RGB`, 24-bit colour. Neovim asks for these.
+ */
+const CAPABILITIES = new Set(["Tc", "RGB"].map((name) => Buffer.from(name).toString("hex").toUpperCase()));
 const MAX_WAITERS = 8;
 const MAX_VIEWERS = 8;
 
@@ -206,12 +211,17 @@ class Pty {
     const { command, cwd, cols, rows, term, timeoutMs } = options;
     this.command = command ?? null;
     this.cwd = cwd;
-    this.#screen = new Screen({ cols, rows, scrollback: MAX_SCREEN_HISTORY, allowProposedApi: true });
+    this.#screen = new Screen({ cols, rows, scrollback: MAX_SCREEN_HISTORY, allowProposedApi: true, windowOptions: { getWinSizeChars: true } });
     this.#screen.loadAddon(this.#serializer as never);
     this.#screen.onTitleChange((title) => { this.#title = title; });
     // Someone must answer queries such as cursor-position reports, or TUIs wait for them.
-    this.#screen.onData((reply) => {
+    const answer = (reply: string) => {
       if (![...this.#viewers].some((viewer) => viewer.answers) && !this.#ended && !this.#terminal.closed) this.#terminal.write(reply);
+    };
+    this.#screen.onData(answer);
+    this.#screen.parser.registerDcsHandler({ intermediates: "+", final: "q" }, (names) => {
+      for (const name of names.split(";")) answer(`\x1bP${CAPABILITIES.has(name.toUpperCase()) ? 1 : 0}+r${name}\x1b\\`);
+      return true;
     });
     let eof!: () => void;
     const drained = new Promise<void>((resolve) => { eof = resolve; });

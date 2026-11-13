@@ -1,0 +1,19 @@
+# Who answers a session's terminal queries: the session's own screen, never the terminal
+# of a cns command attached to it. src/terminal-output.ts says why.
+id: no-terminal-answers
+language: typescript
+severity: error
+files: [src/terminal.ts, src/console.ts, src/commands/**/*.ts]
+ignores: [src/**/*.test.ts]
+message: >-
+  An attached terminal must not answer a session's terminal queries: its reply crosses the
+  link, and one that arrives after the program has gone is typed into the shell. Leave
+  `answers` out; the session's screen answers.
+rule:
+  any:
+    - kind: pair
+      has: { field: key, regex: '^answers$' }
+      not:
+        has: { field: value, regex: '^false$' }
+    - kind: shorthand_property_identifier
+      regex: '^answers$'

@@ -7,20 +7,35 @@ import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { Client, type CallToolResult } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
+import { Terminal as Screen } from "@xterm/headless";
 import { cliEnvironment, cliInvocation, launchCli, unusedPort } from "./test-support.js";
 
 const posix = process.platform !== "win32";
 const decoder = new TextDecoder();
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** What reads a pseudo-terminal's output besides the test, and may send input of its own. */
+interface TerminalReader {
+  cols: number;
+  rows: number;
+  read(data: Uint8Array, send: (text: string) => void): void;
+}
+
 /** Run cns on a pseudo-terminal, as a person at a terminal would. */
-function inTerminal(t: TestContext, args: string[], env: Record<string, string>) {
+function inTerminal(t: TestContext, args: string[], env: Record<string, string>, reader?: TerminalReader) {
   const invocation = cliInvocation(args);
   let output = "";
   let notify = () => {};
   const child = Bun.spawn([invocation.file, ...invocation.args], {
     env: cliEnvironment(env) as Record<string, string>,
-    terminal: { cols: 100, rows: 30, name: "xterm-256color", data: (_terminal, data) => { output += decoder.decode(data, { stream: true }); notify(); } },
+    terminal: {
+      cols: reader?.cols ?? 100, rows: reader?.rows ?? 30, name: "xterm-256color",
+      data: (terminal, data) => {
+        output += decoder.decode(data, { stream: true });
+        reader?.read(data.slice(), (text) => { terminal.write(text); });
+        notify();
+      },
+    },
   });
   t.after(() => { if (child.exitCode === null) child.kill(); });
   const waitFor = (needle: string, from = 0) => new Promise<void>((resolve, reject) => {
@@ -41,6 +56,52 @@ function inTerminal(t: TestContext, args: string[], env: Record<string, string>)
       return /session (\S+)\. Ctrl-\] detaches/.exec(output)![1]!;
     },
   };
+}
+
+/**
+ * Run cns on a pseudo-terminal that a model of a terminal emulator reads. The model draws
+ * what cns writes and, as Ghostty does, answers every query that reaches it and reports its
+ * size in-band to a program that turns those reports on. What it draws has passed the
+ * pseudo-terminal's driver, which converts line feeds as the driver of a real terminal does.
+ */
+function inEmulator(t: TestContext, args: string[], env: Record<string, string>, cols: number, rows: number) {
+  const screen = new Screen({ cols, rows, scrollback: 0, allowProposedApi: true });
+  t.after(() => screen.dispose());
+  /** Everything the emulator sent that nobody typed. */
+  const sent: string[] = [];
+  let send = (_text: string) => {};
+  let recent = "";
+  screen.onData((reply) => {
+    sent.push(reply);
+    send(reply.replace("\x1b[?1;2c", "\x1b[?62;22c").replace("\x1b[?2048;0$y", "\x1b[?2048;2$y"));
+  });
+  const terminal = inTerminal(t, args, env, { cols, rows, read: (data, write) => {
+    send = write;
+    screen.write(data);
+    recent = (recent + Buffer.from(data).toString("latin1")).slice(-4096);
+    if (!recent.includes("\x1b[?2048h")) return;
+    recent = "";
+    const report = `\x1b[48;${rows};${cols};0;0t`;
+    sent.push(report);
+    write(report);
+  } });
+  /** The rows of the emulator's screen, once it has drawn all it received. */
+  const drawn = async () => {
+    await new Promise<void>((resolve) => screen.write("", resolve));
+    return Array.from({ length: rows }, (_, y) => screen.buffer.active.getLine(y)!.translateToString(true));
+  };
+  return Object.assign(terminal, {
+    sent,
+    drawn,
+    /** Wait until a row of the screen has `text`. */
+    shows: async (text: string) => {
+      for (const end = Date.now() + 15000; ; await pause(20)) {
+        const now = await drawn();
+        if (now.some((row) => row.includes(text))) return now;
+        if (Date.now() > end) throw new Error(`Waiting for ${JSON.stringify(text)} on the screen:\n${now.join("\n")}`);
+      }
+    },
+  });
 }
 
 /** A device, studio, running its daemon, and laptop paired with it with every grant. */
@@ -115,7 +176,11 @@ async function pairedStudio(t: TestContext) {
     });
   };
 
-  return { root, cli, pair, laptop, sessions, gone, throughProxy, terminal: (dev: { env: Record<string, string> }, args: string[]) => inTerminal(t, args, dev.env) };
+  return {
+    root, cli, pair, laptop, sessions, gone, throughProxy,
+    terminal: (dev: { env: Record<string, string> }, args: string[]) => inTerminal(t, args, dev.env),
+    emulator: (dev: { env: Record<string, string> }, args: string[], cols: number, rows: number) => inEmulator(t, args, dev.env, cols, rows),
+  };
 }
 
 // What changed: cns tty DEVICE at a terminal used to join the device's session main, so every
@@ -315,6 +380,79 @@ test("Ctrl-] leaves a terminal's session running, says how to return, and --atta
   back.write("\x1d");
   assert.equal(await back.exited, 0);
   assert.match(shell.output, new RegExp(`detached from ${name}; it keeps running on studio: cns tty studio --attach ${name} returns to it`));
+});
+
+// What a full-screen program does with its terminal, as Neovim does it: it asks whether the
+// terminal reports its size in-band and then trusts only those reports, moves down a row with
+// a line feed alone, and asks for the device attributes as it exits, waiting a second for them.
+const FULL_SCREEN_PROGRAM = String.raw`
+import { writeFileSync } from "node:fs";
+const out = (text) => process.stdout.write(text);
+let input = "";
+let waiting;
+let inband = false;
+let quitting = false;
+let size = [process.stdout.columns, process.stdout.rows];
+const draw = () => out("\x1b[1;1H\x1b[2Ksize " + size[0] + "x" + size[1] + ".\x1b[3;10Hab\ncd");
+const answer = (query, pattern, ms) => new Promise((resolve) => {
+  const timer = setTimeout(() => { waiting = undefined; resolve(null); }, ms);
+  waiting = { pattern, done: (match) => { clearTimeout(timer); waiting = undefined; resolve(match); } };
+  out(query);
+});
+const quit = async () => {
+  const asked = Date.now();
+  const device = await answer("\x1b[c", /\x1b\[\?[\d;]*c/, 1000);
+  writeFileSync(process.argv[2], JSON.stringify({ inband, device: device && device[0].slice(2), waitedMs: Date.now() - asked }));
+  out((inband ? "\x1b[?2048l" : "") + "\x1b[?1049l");
+  process.exit(0);
+};
+process.stdin.on("data", (data) => {
+  input += data.toString("latin1");
+  for (;;) {
+    const match = waiting && waiting.pattern.exec(input);
+    const report = !match && /\x1b\[48;(\d+);(\d+);\d+;\d+t/.exec(input);
+    const found = match || report;
+    if (!found) break;
+    input = input.slice(0, found.index) + input.slice(found.index + found[0].length);
+    if (match) waiting.done(match);
+    else if (inband) { size = [Number(report[2]), Number(report[1])]; draw(); }
+  }
+  if (input.includes("q") && !quitting) { quitting = true; void quit(); }
+});
+out("\x1b[?1049h\x1b[H\x1b[2J");
+const mode = await answer("\x1b[?2048$p", /\x1b\[\?2048;(\d)\$y/, 1000);
+if (mode && (mode[1] === "1" || mode[1] === "2")) { inband = true; out("\x1b[?2048h"); }
+else process.stdout.on("resize", () => { size = [process.stdout.columns, process.stdout.rows]; draw(); });
+draw();
+`;
+
+test("a full-screen program draws where it means to, follows the terminal attached and gets its answers from the session", { skip: !posix, timeout: 60000 }, async (t) => {
+  const { root, laptop, emulator } = await pairedStudio(t);
+  const [program, result] = [path.join(root, "full-screen.mjs"), path.join(root, "result.json")];
+  await writeFile(program, FULL_SCREEN_PROGRAM);
+  const first = emulator(laptop, ["tty", "studio"], 100, 30);
+  const name = await first.attached();
+  // The program's own terminal passes its output on unchanged, as a full-screen program sets it.
+  first.write(`stty raw -echo; "${process.execPath}" "${program}" "${result}"; stty sane; echo left-$((1+1))\r`);
+  // The line feed between ab and cd moves the cursor down, and not to the first column.
+  assert.deepEqual((await first.shows("size 100x30.")).slice(2, 4), ["         ab", "           cd"]);
+
+  // A terminal of another size takes over: the program must learn the new size from the session.
+  first.write("\x1d");
+  assert.equal(await first.exited, 0);
+  const second = emulator(laptop, ["tty", "studio", "--attach", name], 80, 20);
+  assert.deepEqual((await second.shows("size 80x20.")).slice(2, 4), ["         ab", "           cd"]);
+
+  second.write("q");
+  await second.waitFor("left-2");
+  await pause(300);
+  const ended = JSON.parse(await readFile(result, "utf8")) as { inband: boolean; device: string | null; waitedMs: number };
+  assert.equal(ended.inband, false, "the program was told a terminal reports its size in-band, and stops following the session's size");
+  assert.equal(ended.device, "?1;2c", "the session's screen answers the program's last query");
+  assert.ok(ended.waitedMs < 1000, `the program waited ${ended.waitedMs} ms for its answer`);
+  // No query reached either terminal, so neither sent a reply that could arrive after the program had gone.
+  assert.deepEqual({ first: first.sent, second: second.sent }, { first: [], second: [] });
+  assert.doesNotMatch((await second.drawn()).join("\n"), /\d;\d+c/, "a reply was typed into the shell");
 });
 
 test("a device that may only watch sessions does not land in another terminal's session", { skip: !posix, timeout: 60000 }, async (t) => {
