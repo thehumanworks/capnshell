@@ -1,5 +1,7 @@
 import { isIP } from "node:net";
-import { resolvePeer, type Permission } from "./peers.js";
+import { resolvePeer as resolveSavedPeer, type Permission } from "./peers.js";
+import type { Identity } from "./identity.js";
+import { environmentTokens, tokenTarget } from "./tokens.js";
 import { Command, Option } from "commander";
 import { z } from "zod";
 import { MAX_SCREEN_HISTORY, MAX_TIMEOUT_MS, sessionNameSchema } from "./shell.js";
@@ -11,7 +13,20 @@ const roles = ["run", "tty", "cp", "sessions", "keys", "screen", "kill"] as cons
 const sessionRoles = new Set<PeerRole>(["keys", "screen", "kill"]);
 type PeerRole = typeof roles[number];
 /** A paired device a command reaches: the identity it must prove and every address saved for it. */
-export type ExpectedPeer = { name: string; publicKey: string; outgoing: Permission[]; addresses: string[] };
+export type ExpectedPeer = {
+  name: string; publicKey: string; outgoing: Permission[]; addresses: string[];
+  /** With CNS_TOKEN: the token's identity, which the command signs in with instead of this device's own. */
+  identity?: Identity;
+};
+
+/**
+ * The device a command names: with CNS_TOKEN set, reached with the token for it and nothing
+ * saved on this machine; otherwise a paired device saved here.
+ */
+export function resolvePeer(device: string): ExpectedPeer {
+  const tokens = environmentTokens();
+  return tokens ? tokenTarget(device, tokens) : resolveSavedPeer(device);
+}
 const portSchema = (name = "--port") => z.string().regex(/^\d+$/, `${name} requires an integer.`)
   .transform(Number).pipe(z.int().min(1).max(65535));
 const bindSchema = (name = "--bind") => z.string().refine((value) => isIP(value) !== 0,
@@ -297,7 +312,7 @@ export function parseOptions(argv: string[]): PeerConfig | DaemonConfig | Sessio
 
 export interface McpConfig {
   /** The paired device the tools reach; without one, the devices linked to the local daemon. */
-  expect?: { name: string; publicKey: string; addresses: string[] };
+  expect?: { name: string; publicKey: string; addresses: string[]; identity?: Identity };
   /** The local daemon's state file, when the tools use its linked devices. */
   state?: string;
   cwd?: string;
@@ -325,9 +340,16 @@ function resolveMcpOptions(command: Command, device: string | undefined): McpCon
     throw new Error("A non-loopback MCP endpoint exposes shell access. Add --allow-remote only for a trusted LAN/VPN.");
   }
   let expect: McpConfig["expect"];
+  // With one token, cns mcp reaches its device; with several, the device must be named.
+  const tokens = environmentTokens();
+  if (device === undefined && tokens) {
+    if (state !== undefined) throw new Error("--state applies to the daemon's linked devices; with CNS_TOKEN, cns mcp reaches the token's device.");
+    if (tokens.length > 1) throw new Error(`Name the device: cns mcp DEVICE. CNS_TOKEN reaches ${tokens.map((token) => token.device.name).join(", ")}.`);
+    device = tokens[0]!.device.name;
+  }
   if (device !== undefined) {
     const peer = resolvePeer(device);
-    expect = { name: peer.name, publicKey: peer.publicKey, addresses: peer.addresses };
+    expect = { name: peer.name, publicKey: peer.publicKey, addresses: peer.addresses, ...peer.identity ? { identity: peer.identity } : {} };
   }
   return {
     ...expect ? { expect } : {}, state, cwd,

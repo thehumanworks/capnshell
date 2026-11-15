@@ -8,6 +8,7 @@ import * as config from "./config.js";
 import { generateIdentity } from "./identity.js";
 import { isLoopback, parseMcpOptions, parseOptions as parsePeerOptions, splitRemote, type DaemonConfig, type PeerConfig } from "./options.js";
 import { expandGrants, savePairedPeer } from "./peers.js";
+import { mintToken } from "./tokens.js";
 
 const posix = process.platform !== "win32";
 // These tests are about parsing, not about trusting the filesystem, and `nix build` runs
@@ -39,7 +40,7 @@ after(() => {
 // Exercise Commander's real environment handling without inheriting user defaults
 // or leaking an individual test's environment to other tests.
 function withEnvironment<T>(env: NodeJS.ProcessEnv, parse: () => T): T {
-  const names = ["CNS_BIND", "CNS_PORT", "CNS_CWD"];
+  const names = ["CNS_BIND", "CNS_PORT", "CNS_CWD", "CNS_TOKEN"];
   const saved = names.map((name) => process.env[name]);
   try {
     for (const name of names) {
@@ -260,4 +261,21 @@ test("DEVICE:PATH is told from local paths", () => {
   assert.equal(splitRemote("dir/a:b"), undefined);
   assert.equal(splitRemote("C:\\Users\\me", "win32"), undefined);
   assert.deepEqual(splitRemote("C:/Users", "linux"), { target: "C", path: "/Users" });
+});
+
+test("with CNS_TOKEN, a command reaches the token's device as the token, and never the devices saved here", { skip: !posix }, () => {
+  const device = { name: "studio", publicKey: generateIdentity().publicKey, addresses: ["ws://10.1.1.1:47381"] };
+  const token = mintToken(device, "ci");
+  const other = mintToken({ name: "laptop", publicKey: generateIdentity().publicKey, addresses: ["ws://10.1.1.2:47381"] }, "ci");
+  const run = parseOptions(["run", "studio", "--", "pwd"], { CNS_TOKEN: token.text });
+  assert.equal(run.expect.publicKey, device.publicKey);
+  assert.deepEqual(run.expect.addresses, device.addresses);
+  assert.equal(run.expect.identity?.publicKey, token.publicKey);
+  // Without CNS_TOKEN, studio is the paired device saved here, signed in to as this device.
+  assert.equal(parseOptions(["run", "studio", "--", "pwd"]).expect.identity, undefined);
+  assert.throws(() => parseOptions(["cp", "studio:/a", "beelink:/b"], { CNS_TOKEN: token.text }), /CNS_TOKEN reaches studio, not beelink/);
+  // cns mcp with one token reaches its device; with several, it must be named.
+  assert.equal(parseMcp([], { CNS_TOKEN: token.text }).expect?.identity?.publicKey, token.publicKey);
+  assert.throws(() => parseMcp([], { CNS_TOKEN: `${token.text} ${other.text}` }), /Name the device: cns mcp DEVICE\. CNS_TOKEN reaches studio, laptop\./);
+  assert.equal(parseMcp(["laptop"], { CNS_TOKEN: `${token.text} ${other.text}` }).expect?.identity?.publicKey, other.publicKey);
 });

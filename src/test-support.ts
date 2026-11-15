@@ -56,7 +56,7 @@ export async function unusedPort(host = LOOPBACK): Promise<string> {
 
 /** Keep user CLI defaults out of tests unless explicitly supplied. */
 export function cliEnvironment(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
-  return { ...process.env, CNS_BIND: undefined, CNS_PORT: undefined, CNS_CWD: undefined, ...overrides };
+  return { ...process.env, CNS_BIND: undefined, CNS_PORT: undefined, CNS_CWD: undefined, CNS_TOKEN: undefined, ...overrides };
 }
 
 /** Exercise actual CLI processes, keeping exact streams available for run assertions. */

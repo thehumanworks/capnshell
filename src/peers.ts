@@ -80,6 +80,12 @@ export const pairedPeerSchema = z.strictObject({
   addresses: z.array(addressSchema).max(16),
   pairedAt: z.iso.datetime(),
   grants: z.strictObject({ incoming: grantsSchema, outgoing: grantsSchema }),
+  /**
+   * Set when this is a token that `cns token create` made, not a device that paired: a program
+   * elsewhere signs in with its key, and the record ends at `expiresAt`, when given (tokens.ts).
+   * A cns older than tokens refuses the whole record, so it never accepts an expired token.
+   */
+  token: z.strictObject({ expiresAt: z.iso.datetime().optional() }).optional(),
 });
 export type PairedPeer = z.infer<typeof pairedPeerSchema>;
 

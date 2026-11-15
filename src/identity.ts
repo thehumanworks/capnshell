@@ -75,6 +75,23 @@ function identityFrom(file: IdentityFile): Identity {
   };
 }
 
+/** An identity that lives in memory only, from a PKCS#8 Ed25519 private key in base64url, such as the one a token carries. */
+export function identityFromPrivateKey(privateKey: string, createdAt = new Date(0).toISOString()): Identity {
+  const key = createPrivateKey({ key: Buffer.from(privateKey, "base64url"), format: "der", type: "pkcs8" });
+  if (key.asymmetricKeyType !== "ed25519") throw new Error("Not an Ed25519 private key.");
+  const publicKey = (createPublicKey(key).export({ format: "der", type: "spki" }) as Buffer).subarray(-PUBLIC_KEY_BYTES).toString("base64url");
+  return identityFrom({ version: 1, publicKey, privateKey, createdAt });
+}
+
+/** A new Ed25519 key pair, as base64url: the raw public key and the PKCS#8 private key. */
+export function newKeyPair(): { publicKey: PublicKey; privateKey: string } {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  return {
+    publicKey: (publicKey.export({ format: "der", type: "spki" }) as Buffer).subarray(-PUBLIC_KEY_BYTES).toString("base64url"),
+    privateKey: (privateKey.export({ format: "der", type: "pkcs8" }) as Buffer).toString("base64url"),
+  };
+}
+
 /** A fresh identity that is not stored anywhere, for tests and pairing dry runs. */
 export function generateIdentity(): Identity {
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");

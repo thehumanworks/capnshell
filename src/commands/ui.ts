@@ -3,6 +3,7 @@ import { errorMessage, printable } from "../errors.js";
 import { listEverywhere, LIST_TIMEOUT_MS, type FleetDevice } from "../fleet-sessions.js";
 import { ensureIdentity, type Identity } from "../identity.js";
 import { explainDenial, listPeers, resolvePeer, type Permission } from "../peers.js";
+import { environmentTokens, TokenError } from "../tokens.js";
 import { secureReady } from "../secure.js";
 import { describeExit } from "../session-text.js";
 import { sessionNameSchema, type PtySessionInfo } from "../shell.js";
@@ -74,6 +75,7 @@ class Links {
 export async function ui(options: UiOptions = {}): Promise<number> {
   const input = process.stdin;
   const { byte: switchKey, label: switchLabel } = parseSwitchKey(options.key ?? process.env.CNS_KEY ?? "C-]");
+  if (environmentTokens()) throw new TokenError("cns ui works with this device's own pairings, not CNS_TOKEN. With a token, use cns tty DEVICE or cns sessions DEVICE.", 2);
   const target = options.target === undefined ? undefined : parseTarget(options.target);
   if (target) resolvePeer(target.device);
   if (!input.isTTY || !process.stdout.isTTY) {
@@ -81,7 +83,7 @@ export async function ui(options: UiOptions = {}): Promise<number> {
   }
   const { identity } = ensureIdentity();
   await secureReady();
-  const devices: UiDevice[] = listPeers().map((peer) => ({ name: peer.name, publicKey: peer.publicKey, addresses: peer.addresses, outgoing: peer.grants.outgoing }));
+  const devices: UiDevice[] = listPeers().filter((peer) => !peer.token).map((peer) => ({ name: peer.name, publicKey: peer.publicKey, addresses: peer.addresses, outgoing: peer.grants.outgoing }));
   if (!devices.length) throw new Error("No paired devices. Run cns pair to pair with another device.");
   const byName = (name: string) => devices.find((device) => device.name === name);
 

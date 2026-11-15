@@ -1,7 +1,7 @@
 import { connectControl } from "../commands/daemon.js";
 import type { PeerController, PeerSummary } from "../console.js";
 import { openDeviceLink } from "../device-link.js";
-import { fingerprint, loadIdentity } from "../identity.js";
+import { fingerprint, loadIdentity, type Identity } from "../identity.js";
 import type { ShellApi } from "../shell.js";
 import { plain, type RemoteNamedPty } from "../terminal.js";
 
@@ -73,14 +73,14 @@ function limitCalls(open: (signal: AbortSignal) => Promise<Link>): (signal: Abor
  * link to it when there is one, else a new encrypted connection. Closing a call's connection
  * makes the device kill its commands and end its waits.
  */
-export function pairedTarget(expect: { name: string; publicKey: string; addresses: string[] }, cwd?: string): McpTarget {
+export function pairedTarget(expect: { name: string; publicKey: string; addresses: string[]; identity?: Identity }, cwd?: string): McpTarget {
   return {
     label: expect.name,
     device: expect.name,
     cwd,
     open: limitCalls(async (signal) => {
-      // Prove this device's identity and require the saved one on the other end.
-      const identity = loadIdentity();
+      // Prove this device's identity, or with CNS_TOKEN the token's, and require the saved one on the other end.
+      const identity = expect.identity ?? loadIdentity();
       if (!identity) throw new Error("This device has no identity yet; run cns identity or cns up first.");
       // The local daemon's standing link to the device, lent for this call, or else an encrypted
       // channel to it at the first saved address, or the relay, that answers as it.

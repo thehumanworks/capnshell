@@ -3,6 +3,7 @@ import { CommanderError } from "commander";
 import { createCli } from "./cli-program.js";
 import { errorMessage } from "./errors.js";
 import { explainDenial } from "./peers.js";
+import { TokenError } from "./tokens.js";
 
 try {
   await createCli().parseAsync(process.argv);
@@ -13,6 +14,6 @@ try {
   } else {
     console.error(explainDenial(errorMessage(error)));
     // Peer-mode commands set 3 for an unpaired or changed device; a refused operation is 4.
-    process.exitCode = /^Permission denied/.test(errorMessage(error)) ? 4 : process.exitCode || 1;
+    process.exitCode = /^Permission denied/.test(errorMessage(error)) ? 4 : error instanceof TokenError ? error.exitCode : process.exitCode || 1;
   }
 }

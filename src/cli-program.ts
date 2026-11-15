@@ -57,6 +57,26 @@ export function createCli(): Command {
       if (options.json) console.log(JSON.stringify(peers, null, 2));
       else for (const peer of peers) console.log(`${peer.name}\t${peer.fingerprint}\t${peer.addresses[0] ?? "-"}`);
     });
+  const token = program.command("token").description("Let a program on another machine, such as a CI job, a server or an agent, reach this device with no pairing")
+    .addHelpText("after", `
+cns token create NAME --grant G makes a token: a key that signs in here as NAME, with the grants G.
+It prints the token once, to stdout; this device keeps only its public key. On the other machine,
+set CNS_TOKEN to it, and cns run, cp, tty, sessions, screen, keys, kill and mcp reach this device
+as NAME with nothing to pair and nothing saved there. CNS_TOKEN may hold tokens from several
+devices, separated by spaces. Change what a token may use with cns peer grant and cns peer revoke.
+Examples: cns token create ci --grant shell,files --expires 90d
+          cns token create agent --grant sessions | gh secret set CNS_TOKEN`);
+  token.command("create <name>").description("Make a token that may use what --grant names here, and print it once")
+    .option("--grant <grants>", "What it may use here: shell, files, sessions, all, or a comma-separated list of permissions")
+    .option("--expires <time>", "When it stops working: days or hours, such as 30d or 12h, or never (default: 30d)")
+    .option("--state <path>", "Local daemon state file")
+    .action(async (name: string, options) => { const { createToken } = await import("./commands/token-cli.js"); await createToken(name, options); });
+  token.command("list").description("List the tokens this device accepts, what they may use and when they expire")
+    .option("--json", "Print a JSON array: { name, fingerprint, grants, createdAt, expiresAt, expired } per token")
+    .action(async (options: { json?: boolean }) => { const { listTokens } = await import("./commands/token-cli.js"); listTokens(options); });
+  token.command("revoke <name>").description("Stop accepting a token, and end the connections using it, now")
+    .option("--state <path>", "Local daemon state file")
+    .action(async (name: string, options: { state?: string }) => { const { revokeToken } = await import("./commands/token-cli.js"); await revokeToken(name, options); });
   const gateway = program.command("gateway").description("Administer the gateway that lets Claude's connectors reach devices paired with it")
     .addHelpText("after", "\nThe gateway is a Cloudflare Worker you deploy (gateway/README.md). Commands are signed with this\ndevice's identity, which the gateway accepts when its public key is in the gateway's OWNER_KEYS.\nThe gateway's address is CNS_GATEWAY, or --url, or https://gateway.cns.nothuman.work.");
   const gatewayCommand = (name: string, description: string) => gateway.command(name).description(description)
