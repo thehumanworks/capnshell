@@ -29,6 +29,8 @@ test("a daemon keeps no standing link to a device that gave no address and grant
   // And a device it was told where to reach.
   assert.equal(worthDialing({ publicKey: SMALL, addresses: [DIRECT], grants: { outgoing: [] } }, RELAY), true);
   assert.equal(worthDialing({ publicKey: SMALL, addresses: [], grants: { outgoing: ["shell"] } }, undefined), false);
+  // A mesh member is a daemon, whose grants are learned over the link.
+  assert.equal(worthDialing({ publicKey: SMALL, addresses: [], grants: { outgoing: [] }, mesh: "home" }, RELAY), true);
 });
 
 test("a dial loop dials without a link, and with one only to replace a relayed link past the race", () => {
@@ -50,6 +52,8 @@ test("only a device that answers as another, or forgot this one, ends a dial loo
   for (const code of codes) {
     assert.equal(afterDialFailure(code, false), code === "identity-changed" || code === "not-paired" ? "stop" : "retry", `${code}`);
     assert.equal(afterDialFailure(code, true), "retry", `${code} while upgrading`);
+    // A mesh member may not have the member list with this device in it yet.
+    assert.equal(afterDialFailure(code, false, true), code === "identity-changed" ? "stop" : "retry", `${code} to a mesh member`);
   }
 });
 

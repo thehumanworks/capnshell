@@ -50,13 +50,50 @@ export function createCli(): Command {
     .option("--state <path>", "Local daemon state file")
     .action(async (name: string, urls: string[], options: { remove?: boolean; state?: string }) => { const { address } = await import("./commands/pairing-cli.js"); await address(name, urls, options); });
   alias.command("list").description("List paired devices")
-    .option("--json", "Print a JSON array sorted by name, [] when there are none: { name, fingerprint, publicKey, addresses, grants } per device")
+    .option("--json", "Print a JSON array sorted by name, [] when there are none: { name, fingerprint, publicKey, addresses, grants, mesh? } per device")
     .action(async (options: { json?: boolean }) => {
       const { listPeers } = await import("./peers.js");
-      const peers = listPeers().map((peer) => ({ name: peer.name, fingerprint: peer.fingerprint, publicKey: peer.publicKey, addresses: peer.addresses, grants: peer.grants }));
+      const peers = listPeers().map((peer) => ({ name: peer.name, fingerprint: peer.fingerprint, publicKey: peer.publicKey, addresses: peer.addresses, grants: peer.grants, ...peer.mesh === undefined ? {} : { mesh: peer.mesh } }));
       if (options.json) console.log(JSON.stringify(peers, null, 2));
       else for (const peer of peers) console.log(`${peer.name}\t${peer.fingerprint}\t${peer.addresses[0] ?? "-"}`);
     });
+  const mesh = program.command("mesh").description("Let a group of devices all reach each other: one device runs the mesh, the others join through their pairing with it")
+    .addHelpText("after", [
+      "",
+      "On the device that runs it:  cns mesh create home",
+      "                             cns mesh add home laptop studio     (devices paired with this one)",
+      "On each of those:            cns mesh join home --via NAME --allow shell",
+      "                             (NAME: its name for the device that runs the mesh)",
+      "Every member then reaches every other one, without pairing with each, as far as each allows:",
+      "--allow, or later cns mesh allow, sets what members may use on that device, and the admin's",
+      "cns mesh add --limit narrows it for one member. The member list is signed by the device that runs",
+      "the mesh, and devices pass the newest one to each other over their encrypted links.",
+    ].join("\n"));
+  const meshCommands = () => import("./commands/mesh-cli.js");
+  mesh.command("create <name>").description("Start a mesh that this device runs")
+    .option("--state <path>", "Local daemon state file")
+    .action(async (name: string, options) => { await (await meshCommands()).createMesh(name, options); });
+  mesh.command("add <name> <devices...>").description("Put devices paired with this one in the mesh, or change the limit of ones in it")
+    .option("--limit <grants>", "The most each may use on other members, whatever they allow: shell, files, sessions, all, or permissions")
+    .option("--state <path>", "Local daemon state file")
+    .action(async (name: string, devices: string[], options) => { await (await meshCommands()).addMembers(name, devices, options); });
+  mesh.command("remove <name> <devices...>").description("Take devices out of the mesh; the other members drop them")
+    .option("--state <path>", "Local daemon state file")
+    .action(async (name: string, devices: string[], options) => { await (await meshCommands()).removeMembers(name, devices, options); });
+  mesh.command("join <name>").description("Take part in a mesh run by a paired device that added this one")
+    .requiredOption("--via <device>", "The device that runs the mesh, by its name here")
+    .option("--allow <grants>", "What members may use on this device: none, shell, files, sessions, all, or permissions (default: none)")
+    .option("--state <path>", "Local daemon state file")
+    .action(async (name: string, options) => { await (await meshCommands()).joinMesh(name, options); });
+  mesh.command("allow <name> <grants...>").description("Set what every member of the mesh may use on this device; none takes it all away")
+    .option("--state <path>", "Local daemon state file")
+    .action(async (name: string, grants: string[], options) => { await (await meshCommands()).allowMembers(name, grants, options); });
+  mesh.command("leave <name>").description("Forget the mesh and its members here; on the device that runs it, end the mesh")
+    .option("--state <path>", "Local daemon state file")
+    .action(async (name: string, options) => { await (await meshCommands()).leaveMesh(name, options); });
+  mesh.command("list [name]").description("List this device's meshes and their members")
+    .option("--json", "Print a JSON array: { name, admin, version, issuedAt, allow, members: [{ name, fingerprint, admin, limit }] } per mesh")
+    .action(async (name: string | undefined, options) => { (await meshCommands()).listMeshesCommand(name, options); });
   const gateway = program.command("gateway").description("Administer the gateway that lets Claude's connectors reach devices paired with it")
     .addHelpText("after", "\nThe gateway is a Cloudflare Worker you deploy (gateway/README.md). Commands are signed with this\ndevice's identity, which the gateway accepts when its public key is in the gateway's OWNER_KEYS.\nThe gateway's address is CNS_GATEWAY, or --url, or https://gateway.cns.nothuman.work.");
   const gatewayCommand = (name: string, description: string) => gateway.command(name).description(description)
