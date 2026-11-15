@@ -57,7 +57,7 @@ function prompter(yes: boolean | undefined): Prompt {
   };
 }
 
-export function parseGrants(value: string | undefined, fallback: readonly string[]): Permission[] {
+function parseGrants(value: string | undefined, fallback: readonly string[]): Permission[] {
   const words = value === undefined ? fallback : value.split(",").map((word) => word.trim()).filter(Boolean);
   if (value !== undefined && !words.length) return [];
   return expandGrants(words);
@@ -73,7 +73,7 @@ async function chooseGrants(prompt: Prompt, name: string): Promise<Permission[]>
 }
 
 /** Refuse a name that is not a valid alias or that a saved peer, of any kind, already uses. */
-export function checkFreeName(name: string): void {
+function checkFreeName(name: string): void {
   if (!peerNamePattern.test(name)) throw new Error("Names contain 1-64 letters, numbers, underscores or hyphens and start with a letter or number.");
   if (peerFileExists(name)) throw new Error(`A saved peer is already named ${name}. Choose another with --name, or remove it first with cns peer remove ${name}.`);
 }
@@ -132,7 +132,7 @@ function serviceFailure(kind: ServiceKind, state: string): () => string | undefi
 }
 
 /** The local paired daemon, started if it is not running, or if the one that was has crashed. */
-export async function pairedDaemon(options: { bind?: string; port?: string; state?: string }, quiet = false): Promise<{ control: ControlConnection; started: boolean }> {
+async function pairedDaemon(options: { bind?: string; port?: string; state?: string }, quiet = false): Promise<{ control: ControlConnection; started: boolean }> {
   const { created } = ensureIdentity();
   if (created) console.error(`Created this device's identity at ${identityPath()}. Keep the file private; losing it means pairing again.`);
   let running: ControlConnection | undefined;
@@ -177,7 +177,7 @@ export async function up(options: UpOptions): Promise<void> {
     console.log(`${started ? "Started" : "Running"} as ${status.identity?.fingerprint} (${version ? `cns ${version}, ` : ""}pid ${status.pid}${service ? `, ${describeService(service.kind)}` : ""}), listening at ${status.url}.`);
     if (status.addresses?.length) console.log(`Reachable at ${status.addresses.join(", ")}.`);
     if (status.relay) console.log(`Relay: ${status.relay}${status.relayRegistered ? ", registered" : ", registering"}.`);
-    const paired = listPeers().filter((peer) => !peer.token);
+    const paired = listPeers();
     console.log(paired.length
       ? `Paired devices: ${paired.map((peer) => `${peer.name}${peers.some((connected) => connected.peer?.daemon && connected.peer.fingerprint === peer.fingerprint) ? " (online)" : ""}`).join(", ")}.`
       : "No paired devices yet. Run cns pair here and type the code it shows on the other device.");
@@ -191,7 +191,7 @@ export async function up(options: UpOptions): Promise<void> {
  * when it is. A daemon keeps the executable it started with, so an upgrade reaches paired devices,
  * and commands that use the daemon's links, only once the daemon restarts.
  */
-export function driftWarning(status: DaemonStatus, state?: string): string | undefined {
+function driftWarning(status: DaemonStatus, state?: string): string | undefined {
   const self = { version: CNS_VERSION, executable: selfPath() };
   const installed = installedService(daemonStatePath(state));
   return daemonDrift({
@@ -542,7 +542,6 @@ export async function doctor(name: string | undefined, options: DoctorOptions): 
   if (name === undefined) return doctorSelf(options);
   const entry = getPeer(name);
   if (!entry) throw new Error(`No paired device is saved as ${name}. cns peers lists the paired devices.`);
-  if (entry.token) throw new Error(`${name} is a token, which signs in here and is never dialed. cns token list shows it; the machine using it can run cns run DEVICE -- hostname with CNS_TOKEN set.`);
   const report: Record<string, unknown> = { name };
   const lines: string[] = [];
   const identity = ensureIdentity().identity;
@@ -680,8 +679,7 @@ export async function removePeer(name: string, options: { state?: string }): Pro
 
 /** `cns peers`: every paired device with its status. */
 export async function peers(options: PeersOptions): Promise<void> {
-  // Tokens are programs that sign in here, not devices to reach: cns token list shows them.
-  const saved = listPeers().filter((peer) => !peer.token);
+  const saved = listPeers();
   let online = new Map<string, { via: "direct" | "relay"; version: string | undefined }>();
   const control = await daemonIfRunning(options.state);
   if (control) {

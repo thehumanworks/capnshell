@@ -26,8 +26,7 @@ export interface DeviceConnection {
 
 /** Connect to `expect` at the first of its addresses, or the relay, that answers as it, and read its handshake. */
 export async function connectDevice(expect: ExpectedPeer, signal: AbortSignal): Promise<DeviceConnection> {
-  // A token's identity with CNS_TOKEN; else this device's own, made on first use.
-  const identity = expect.identity ?? ensureIdentity().identity;
+  const { identity } = ensureIdentity();
   let link: DeviceLink;
   try {
     // The local daemon's standing link when it has one; else, like any one command's connection,

@@ -1,5 +1,4 @@
 import type { RpcStub } from "capnweb";
-import { AuthError } from "./auth.js";
 import { connectControl, type ControlConnection } from "./commands/daemon.js";
 import type { Identity } from "./identity.js";
 import { RefusingShell } from "./refusing-shell.js";
@@ -7,7 +6,6 @@ import { builtInRelay } from "./relay-config.js";
 import { dialAddresses, isRelayAddress } from "./relay-hub.js";
 import { connectFirst, rpcSession } from "./secure.js";
 import type { ShellApi } from "./shell.js";
-import { explainTokenRefusal } from "./tokens.js";
 
 /** How long a command waits for the local daemon to lend it a link before dialing the device itself. */
 export const LEND_MS = 3000;
@@ -33,8 +31,7 @@ export interface DeviceLink {
   close(reason?: string): void;
 }
 
-/** `identity`, when set, is a token's (tokens.ts): the command signs in with it, and no local daemon is asked. */
-type Device = { name: string; publicKey: string; addresses: readonly string[]; identity?: Identity };
+type Device = { name: string; publicKey: string; addresses: readonly string[] };
 
 /**
  * Reach a paired device for one command. When the local daemon has a standing link to it,
@@ -43,18 +40,10 @@ type Device = { name: string; publicKey: string; addresses: readonly string[]; i
  * outbound link works. Otherwise dial it at its saved addresses, then the relay.
  */
 export async function openDeviceLink(device: Device, identity: Identity, signal: AbortSignal): Promise<DeviceLink> {
-  // The local daemon runs as this device, never as a token, so it has no link to lend one.
-  const lent = device.identity ? undefined : await borrow(device, identity, signal);
+  const lent = await borrow(device, identity, signal);
   if (lent) return lent;
   signal.throwIfAborted();
-  let opened: Awaited<ReturnType<typeof connectFirst>>;
-  try { opened = await connectFirst(dialAddresses(device, builtInRelay()), device.identity ?? identity, { expect: device.publicKey, signal }); }
-  catch (error) {
-    // The device's own advice, pair with it, does not help a program holding a token.
-    if (device.identity && error instanceof AuthError && error.code === "not-paired") throw new AuthError("not-paired", explainTokenRefusal(device.name, error.message));
-    throw error;
-  }
-  const { channel, url } = opened;
+  const { channel, url } = await connectFirst(dialAddresses(device, builtInRelay()), identity, { expect: device.publicKey, signal });
   // One command's own connection only uses the other device and offers it nothing.
   const remote = rpcSession<ShellApi>(channel, new RefusingShell());
   return {

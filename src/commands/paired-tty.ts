@@ -79,7 +79,7 @@ export async function attachPaired(config: PeerConfig): Promise<number | typeof 
   const own = !config.attach;
   /** The session, once this terminal has started it or from --attach. */
   let name: string | undefined = own ? undefined : config.name;
-  const identity = expect.identity ?? ensureIdentity().identity;
+  const { identity } = ensureIdentity();
   await secureReady();
   const interrupted = new AbortController();
   let exitOnSignal = 130;

@@ -17,7 +17,6 @@ import { ensureIdentity, fingerprint, type Identity, type PublicKey } from "../i
 import { GrantedShell, type GrantHolder } from "../granted-shell.js";
 import { createInvite, decisionSchema, PairingApi, suggestedName } from "../pairing.js";
 import { InviteBook } from "../invites.js";
-import { tokenExpired, tokenRefusal } from "../tokens.js";
 import { advertisedSchema, describeGrants, explainDenial, findPairedPeer, getPeer, grantsSchema, learnAddresses, listPeers, savePairedPeer, updatePairedPeer } from "../peers.js";
 import { listeningAddresses } from "../addresses.js";
 import { serveControl, type PairingController } from "./daemon-server.js";
@@ -66,11 +65,7 @@ interface Session {
   dialed?: string;
   /** Local commands borrowing this link, told when it ends. */
   borrowers: Set<() => void>;
-  /** Ends the connection when the token it signed in with expires. */
-  expiry?: ReturnType<typeof setTimeout>;
 }
-/** The longest delay a timer takes; a token that expires later is checked again then. */
-const MAX_TIMER_MS = 2 ** 31 - 1;
 /** A daemon registered at a relay pings it this often, and re-registers if it hears nothing for three times as long. */
 const RELAY_PING_MS = 30_000;
 /** Dialers the relay announced that the daemon is answering at once; more are ignored. */
@@ -99,18 +94,16 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
   const cancelled = new AbortController();
   // Machine-readable command output must contain only the remote command's streams.
   const announce = (message: string) => { if (daemon) console.log(message); };
-  // A command run with CNS_TOKEN signs in with the token's identity and saves nothing here.
-  const identity: Identity = command?.expect.identity ?? ensureIdentity().identity;
+  const identity: Identity = ensureIdentity().identity;
   // The relay built into cns: the daemon registers there, and paired devices are dialed there after their direct addresses.
   const relay = builtInRelay();
   /** What this device lets an authenticated paired device do here: exactly its saved incoming grants. */
-  function offerTo(publicKey: PublicKey): { local: GrantedShell; name: string; grants: GrantHolder; expiresAt?: number } {
+  function offerTo(publicKey: PublicKey): { local: GrantedShell; name: string; grants: GrantHolder } {
     const entry = findPairedPeer(publicKey);
-    if (!entry || tokenExpired(entry, Date.now())) throw new AuthError("not-paired", "Not paired with this device.");
+    if (!entry) throw new AuthError("not-paired", "Not paired with this device.");
     const grants: GrantHolder = { current: entry.grants.incoming };
     const owner = fingerprint(publicKey);
-    const expiresAt = entry.token?.expiresAt === undefined ? undefined : Date.parse(entry.token.expiresAt);
-    return { local: new GrantedShell(new ShellApi(ptys, { owner }), grants, entry.name, owner, advertisedToPeers), name: entry.name, grants, ...expiresAt === undefined ? {} : { expiresAt } };
+    return { local: new GrantedShell(new ShellApi(ptys, { owner }), grants, entry.name, owner, advertisedToPeers), name: entry.name, grants };
   }
   /** Invites handed out and not yet settled (invites.ts). */
   const invites = new InviteBook();
@@ -133,7 +126,6 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
   function remove(session: Session) {
     if (!sessions.delete(session.id)) return;
     clearTimeout(session.timer);
-    clearTimeout(session.expiry);
     // Close first: releasing the stub afterwards then finds the session already ended
     // rather than reporting an aborted one to the other side.
     session.close("Shell session ended");
@@ -318,9 +310,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
   /** The responder's view of who may connect: paired devices, and devices that hold a live invite. */
   function authorize(peer: PublicKey, invite?: { id: string }): Refusal | undefined {
     if (invite) return undefined;
-    const entry = findPairedPeer(peer);
-    // A token signs in as a paired device until it expires (tokens.ts).
-    if (entry) return tokenRefusal(entry, Date.now());
+    if (findPairedPeer(peer)) return undefined;
     return { code: "not-paired", reason: "Not paired with this device. Run cns pair on it and type the code it shows here with cns pair CODE." };
   }
   const secretFor = (id: string) => invites.secretFor(id);
@@ -384,8 +374,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
   function dial(name: string) {
     if (links.has(name) || stopping) return;
     const entry = getPeer(name);
-    // A token is a program that signs in here, never a device to dial.
-    if (!entry || entry.token || !worthDialing(entry, relay)) return;
+    if (!entry || !worthDialing(entry, relay)) return;
     const expectedKey = entry.publicKey;
     let attempt = 0;
     let stopped = false;
@@ -559,18 +548,6 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
       (error) => { relayAnswers.delete(id); refused(`Refused ${address}: ${printable(errorMessage(error))}`); });
   }
 
-  /** End a token's connection when the token expires, as revoking it would. */
-  function endAtExpiry(session: Session, expiresAt: number) {
-    const left = expiresAt - Date.now();
-    if (left <= 0) {
-      announce(`The token ${session.peer?.name} has expired; ended its connection.`);
-      remove(session);
-      return;
-    }
-    session.expiry = setTimeout(() => endAtExpiry(session, expiresAt), Math.min(left, MAX_TIMER_MS));
-    session.expiry.unref?.();
-  }
-
   /**
    * Take an authenticated, encrypted inbound channel: offer the device what it was
    * granted here, or a pairing proposal for an invite. Returns undefined when the
@@ -581,21 +558,17 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
     try {
       // Both daemons dialed at once, or the other one lost the link this side holds (link-rules.ts).
       const held = linkTo(peer);
-      // A token is a program's connection, never a daemon's standing link, whatever it says: one
-      // holder cannot replace another's connection, nor have its addresses saved here.
-      const daemonLink = !invite && mode === "daemon" && !findPairedPeer(peer)?.token;
-      const outcome = onInbound(held, daemonLink, keepsOwnOutbound(peer), Date.now());
+      const outcome = onInbound(held, !invite && mode === "daemon", keepsOwnOutbound(peer), Date.now());
       if (outcome === "refuse") {
         channel.close("Duplicate link");
         return undefined;
       }
-      const offered: { local: GrantedShell | PairingApi; name?: string; grants?: GrantHolder; expiresAt?: number } = invite ? { local: pairingFor(invite.id, peer) } : offerTo(peer);
+      const offered = invite ? { local: pairingFor(invite.id, peer), name: undefined, grants: undefined } : offerTo(peer);
       if (outcome === "replace") remove(held!);
       const remote = rpcSession<ShellApi>(channel, offered.local);
       const session = register({ close: (reason) => channel.close(reason), outbound: false, via }, offered.local, remote, address,
-        offered.name ? { name: offered.name, publicKey: peer, daemon: daemonLink } : undefined);
+        offered.name ? { name: offered.name, publicKey: peer, daemon: mode === "daemon" } : undefined);
       session.grants = offered.grants;
-      if (offered.expiresAt !== undefined) endAtExpiry(session, offered.expiresAt);
       if (invite) session.pairing = true;
       void channel.done.then(() => disconnected(session));
       return session;
