@@ -62,10 +62,11 @@ export function keepsOutbound(ownKey: string, otherKey: string): boolean {
  * Whether to keep a standing link to a paired device. A device that gave no address of its
  * own and lets this one do nothing, such as the gateway (gateway/), never answers through
  * the relay and offers nothing over a link: it dials when it needs this device, so dialing
- * it would only knock on the relay every 30 seconds for nothing.
+ * it would only knock on the relay every 30 seconds for nothing. A mesh member is a daemon,
+ * and what it lets this device do is learned over the link, so it is dialed all the same.
  */
-export function worthDialing(entry: { publicKey: string; addresses: readonly string[]; grants: { outgoing: readonly string[] } }, relay: string | undefined): boolean {
-  if (!entry.addresses.length && !entry.grants.outgoing.length) return false;
+export function worthDialing(entry: { publicKey: string; addresses: readonly string[]; grants: { outgoing: readonly string[] }; mesh?: string }, relay: string | undefined): boolean {
+  if (entry.mesh === undefined && !entry.addresses.length && !entry.grants.outgoing.length) return false;
   return dialAddresses(entry, relay).length > 0;
 }
 
@@ -92,12 +93,14 @@ export function dialTurn(held: HeldLink | undefined, addresses: readonly string[
 /**
  * Whether a dial loop goes on after its dial failed with `code` (an AuthError's, if it was
  * one). A device that answers as another device, or no longer knows this one, ends the
- * loop: dialing again would get the same answer until a person pairs again. While upgrading,
- * a direct address that answers wrongly says nothing about the device, whose relayed link
- * still works, so the loop goes on.
+ * loop: dialing again would get the same answer until a person pairs again. A mesh member
+ * (`member`) that does not know this device may not have the newest member list yet, which
+ * reaches it from any member, so that loop goes on. While upgrading, a direct address that
+ * answers wrongly says nothing about the device, whose relayed link still works, so the
+ * loop goes on.
  */
-export function afterDialFailure(code: AuthCode | undefined, upgrade: boolean): "stop" | "retry" {
-  if (!upgrade && (code === "identity-changed" || code === "not-paired")) return "stop";
+export function afterDialFailure(code: AuthCode | undefined, upgrade: boolean, member = false): "stop" | "retry" {
+  if (!upgrade && (code === "identity-changed" || (code === "not-paired" && !member))) return "stop";
   return "retry";
 }
 

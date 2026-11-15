@@ -77,13 +77,7 @@ function identityFrom(file: IdentityFile): Identity {
 
 /** A fresh identity that is not stored anywhere, for tests and pairing dry runs. */
 export function generateIdentity(): Identity {
-  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-  return identityFrom({
-    version: 1,
-    publicKey: (publicKey.export({ format: "der", type: "spki" }) as Buffer).subarray(-PUBLIC_KEY_BYTES).toString("base64url"),
-    privateKey: (privateKey.export({ format: "der", type: "pkcs8" }) as Buffer).toString("base64url"),
-    createdAt: new Date().toISOString(),
-  });
+  return identityFrom({ version: 1, ...newKeyPair(), createdAt: new Date().toISOString() });
 }
 
 /** This device's identity, if the file exists. The file must be private and consistent. */
@@ -101,20 +95,29 @@ export function loadIdentity(): Identity | undefined {
   } finally { closeSync(fd); }
 }
 
-/** This device's identity, created on first use. Returns whether it was created now. */
-export function ensureIdentity(): { identity: Identity; created: boolean } {
+/** A new Ed25519 key pair, as base64url: the raw public key and the PKCS#8 private key. */
+export function newKeyPair(): { publicKey: PublicKey; privateKey: string } {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  return {
+    publicKey: (publicKey.export({ format: "der", type: "spki" }) as Buffer).subarray(-PUBLIC_KEY_BYTES).toString("base64url"),
+    privateKey: (privateKey.export({ format: "der", type: "pkcs8" }) as Buffer).toString("base64url"),
+  };
+}
+
+/**
+ * This device's identity, created on first use: from `keys` when given, such as the key
+ * pair a mesh bot token carries, else a new one. Returns whether it was created now. An
+ * existing identity is returned as it is, whatever `keys` says.
+ */
+export function ensureIdentity(keys?: { publicKey: PublicKey; privateKey: string }): { identity: Identity; created: boolean } {
   const existing = loadIdentity();
   if (existing) return { identity: existing, created: false };
   checkConfigDirectory(true);
-  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-  const file: IdentityFile = {
-    version: 1,
-    publicKey: (publicKey.export({ format: "der", type: "spki" }) as Buffer).subarray(-PUBLIC_KEY_BYTES).toString("base64url"),
-    privateKey: (privateKey.export({ format: "der", type: "pkcs8" }) as Buffer).toString("base64url"),
-    createdAt: new Date().toISOString(),
-  };
+  const file: IdentityFile = identityFileSchema.parse({ version: 1, ...keys ?? newKeyPair(), createdAt: new Date().toISOString() });
+  // Checked before it is saved: a private key that is not the public key's is refused.
+  const identity = identityFrom(file);
   // Exclusive creation: never replace an identity, even one written a moment ago by another cns.
   const fd = openSync(identityPath(), "wx", 0o600);
   try { writeFileSync(fd, JSON.stringify(file, null, 2) + "\n"); } finally { closeSync(fd); }
-  return { identity: identityFrom(file), created: true };
+  return { identity, created: true };
 }

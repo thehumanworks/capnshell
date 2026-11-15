@@ -23,20 +23,29 @@ export class GrantedShell extends RpcTarget {
   #peer: string;
   #owner: string | null;
   #addresses: () => string[];
+  #meshes: (offered: unknown) => unknown[];
   /**
    * `owner` is the peer's fingerprint, the owner of the sessions it starts here.
    * `addresses` says where this device can be reached now, which any paired device may ask.
+   * `meshes` takes the mesh member lists the peer offers and answers with the ones it is in (mesh.ts).
    */
-  constructor(shell: ShellApi, grants: readonly Permission[] | GrantHolder, peer: string, owner: string | null = null, addresses: () => string[] = () => []) {
+  constructor(shell: ShellApi, grants: readonly Permission[] | GrantHolder, peer: string, owner: string | null = null, addresses: () => string[] = () => [], meshes: (offered: unknown) => unknown[] = () => []) {
     super();
     this.#shell = shell;
     this.#grants = Array.isArray(grants) ? { current: [...grants] } : grants as GrantHolder;
     this.#peer = peer;
     this.#owner = owner;
     this.#addresses = addresses;
+    this.#meshes = meshes;
   }
   /** Where this device can be reached now, so a paired device can keep its saved record current. It needs no grant. */
   addresses(): string[] { return [...this.#addresses()]; }
+  /**
+   * Swap mesh member lists: this device keeps any offered list that is newer than its own and
+   * signed by that mesh's admin, and answers with the lists of the meshes the peer is in. It
+   * needs no grant: a list changes nothing unless its admin signed it.
+   */
+  meshes(offered: unknown): unknown[] { return this.#meshes(offered); }
   /** What the peer may do here right now, so it can show current access rather than what it was granted at pairing. It needs no grant. */
   granted(): Permission[] { return [...this.#grants.current]; }
   /** What the peer may do here, as people read it. */
@@ -47,7 +56,7 @@ export class GrantedShell extends RpcTarget {
   exec(...args: Parameters<ShellApi["exec"]>) { this.#require("shell"); return this.#shell.exec(...args); }
   openPty(...args: Parameters<ShellApi["openPty"]>) { this.#require("shell"); return this.#shell.openPty(...args); }
   /** A fork carries the same grants. */
-  fork(): GrantedShell { this.#require("shell"); return new GrantedShell(this.#shell.fork(), this.#grants, this.#peer, this.#owner, this.#addresses); }
+  fork(): GrantedShell { this.#require("shell"); return new GrantedShell(this.#shell.fork(), this.#grants, this.#peer, this.#owner, this.#addresses, this.#meshes); }
   stat(...args: Parameters<ShellApi["stat"]>) { this.#require("files"); return this.#shell.stat(...args); }
   access(...args: Parameters<ShellApi["access"]>) { this.#require("files"); return this.#shell.access(...args); }
   readdir(...args: Parameters<ShellApi["readdir"]>) { this.#require("files"); return this.#shell.readdir(...args); }

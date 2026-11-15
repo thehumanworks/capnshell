@@ -67,6 +67,10 @@ export function explainDenial(message: string, device?: string): string {
   try { missing = expandGrants(match[1]!.split(", ")); } catch { return message; }
   if (!missing.length) return message;
   const where = device ? `on ${device}` : "on the other device";
+  // A mesh member gets what the device lets every member of the mesh use, so that is what to widen there.
+  let entry: PeerEntry | undefined;
+  try { entry = device ? getPeer(device) : undefined; } catch { entry = undefined; }
+  if (entry?.mesh) return `${message} ${device} gives members of the mesh ${entry.mesh} what cns mesh allow set there. To allow it, run ${where}: cns mesh allow ${entry.mesh} ${grantWords(expandGrants([...entry.grants.outgoing, ...missing]))}`;
   return `${message} To allow it, run ${where}: cns peer grant ${match[2]} ${grantWords(missing)}`;
 }
 
@@ -80,6 +84,12 @@ export const pairedPeerSchema = z.strictObject({
   addresses: z.array(addressSchema).max(16),
   pairedAt: z.iso.datetime(),
   grants: z.strictObject({ incoming: grantsSchema, outgoing: grantsSchema }),
+  /**
+   * Set when the device is here because it is a member of this mesh (mesh.ts), not because
+   * it paired with this one: the mesh's member list keeps the record and its incoming grants.
+   * A cns older than meshes refuses the whole record, so it never lets a mesh member in.
+   */
+  mesh: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/).optional(),
 });
 export type PairedPeer = z.infer<typeof pairedPeerSchema>;
 

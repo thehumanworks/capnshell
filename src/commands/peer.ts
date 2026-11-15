@@ -26,6 +26,7 @@ import { infoSchema } from "./connect-device.js";
 import { describeVersion } from "../version.js";
 import { openDeviceLink, type DeviceLink } from "../device-link.js";
 import { afterDialFailure, dialTurn, keepsOutbound, onDialed, onInbound, redialDelay, worthDialing } from "../link-rules.js";
+import { applyMeshes, droppedBy, listMeshes, listsFor, newerLists, removeMesh, writeMesh, type SignedList } from "../mesh.js";
 
 /** CLI exit statuses for failures, as docs/paired-peers.md lists them: 3 unpaired or changed device, 4 permission denied, else 1. */
 export function authExitCode(error: unknown): number {
@@ -103,7 +104,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
     if (!entry) throw new AuthError("not-paired", "Not paired with this device.");
     const grants: GrantHolder = { current: entry.grants.incoming };
     const owner = fingerprint(publicKey);
-    return { local: new GrantedShell(new ShellApi(ptys, { owner }), grants, entry.name, owner, advertisedToPeers), name: entry.name, grants };
+    return { local: new GrantedShell(new ShellApi(ptys, { owner }), grants, entry.name, owner, advertisedToPeers, answerMeshes(publicKey)), name: entry.name, grants };
   }
   /** Invites handed out and not yet settled (invites.ts). */
   const invites = new InviteBook();
@@ -258,7 +259,10 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
         if (!sessions.has(id) || stopping) return;
         clearTimeout(session.timer);
         announce(`Connected to ${describe(session)} [${session.info.platform} / ${session.info.shell}, ${describeVersion(session.info.version)}].`);
-        if (session.peer?.daemon) void learnFromPeer(session);
+        if (session.peer?.daemon) {
+          void learnFromPeer(session);
+          void exchangeMeshes(session);
+        }
         if (command) await stop(await runOneShot(command, controller, id, cancelled.signal));
       } catch (error) {
         if (!stopping && sessions.has(id)) {
@@ -307,6 +311,75 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
     }
   }
 
+  /**
+   * Take the mesh member lists a device offered (mesh.ts): keep each that is newer than this
+   * device's and signed by its mesh's admin, leave a mesh whose admin no longer offers it,
+   * bring the records in line and pass any change on to every linked device. Answers with
+   * the lists of the meshes the device is in. A mesh that cannot be read here fails the
+   * whole answer, which the device then ignores, rather than seeming to have dropped it.
+   */
+  function meshesFrom(from: PublicKey, offered: unknown): SignedList[] {
+    if (!daemon || stopping) return [];
+    const states = listMeshes();
+    const newer = newerLists(states, offered);
+    const dropped = droppedBy(from, identity.publicKey, states, offered);
+    for (const state of newer) {
+      if (state.list.members.some((member) => member.key === identity.publicKey)) {
+        writeMesh(state);
+        announce(`The mesh ${state.name} has a new member list, version ${state.list.version}.`);
+      } else {
+        removeMesh(state.name);
+        announce(`The mesh ${state.name}'s admin removed this device from it; left the mesh.`);
+      }
+    }
+    for (const name of dropped) {
+      removeMesh(name);
+      announce(`The admin of the mesh ${name} no longer lists this device; left the mesh.`);
+    }
+    if (newer.length || dropped.length) meshesChanged();
+    return listsFor(from, listMeshes());
+  }
+
+  /**
+   * Bring the records in line with every mesh saved here and act on the change: links to
+   * devices that are no longer members end, changed grants apply as cns peer grant's do,
+   * members are dialed, and every linked device is offered the lists it is in.
+   */
+  function meshesChanged() {
+    const plan = applyMeshes(identity.publicKey);
+    for (const { publicKey } of plan.remove) forget(publicKey);
+    for (const { name } of plan.update) void pairing?.refresh(name);
+    // Every member, not only new ones: a loop that stopped is started again.
+    for (const entry of listPeers(() => {})) if (entry.mesh !== undefined) dial(entry.name);
+    if (plan.create.length) announce(`Mesh members saved: ${plan.create.map(({ name }) => name).join(", ")}.`);
+    if (plan.remove.length) announce(`Mesh members removed: ${plan.remove.map(({ name }) => name).join(", ")}.`);
+    for (const session of sessions.values()) if (session.peer?.daemon && session.info) void exchangeMeshes(session);
+  }
+
+  /** A device's GrantedShell.meshes: what went wrong here is reported here, not to the device. */
+  const answerMeshes = (from: PublicKey) => (offered: unknown) => {
+    try { return meshesFrom(from, offered); }
+    catch (error) {
+      announce(`Mesh lists: ${errorMessage(error)}`);
+      throw new Error("The device could not take or offer its mesh lists.");
+    }
+  };
+
+  /** Swap member lists with a device on a standing link. A cns older than meshes answers nothing, and nothing changes. */
+  async function exchangeMeshes(session: Session) {
+    const peer = session.peer!;
+    const remote = session.remote as unknown as RpcStub<{ meshes(offered: unknown): unknown[] }>;
+    let answer: unknown;
+    try {
+      const offered = listsFor(peer.publicKey, listMeshes());
+      try { answer = await remote.meshes(offered); } catch { return; }
+      if (!sessions.has(session.id) || stopping) return;
+      meshesFrom(peer.publicKey, answer);
+    } catch (error) {
+      announce(`Mesh lists: ${errorMessage(error)}`);
+    }
+  }
+
   /** The responder's view of who may connect: paired devices, and devices that hold a live invite. */
   function authorize(peer: PublicKey, invite?: { id: string }): Refusal | undefined {
     if (invite) return undefined;
@@ -347,6 +420,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
       return result;
     },
     dial: async (name) => { dial(name); },
+    async meshChanged() { meshesChanged(); },
     async refresh(name) {
       // Sessions are found by key, so a renamed alias still reaches its device's links.
       const entry = getPeer(name);
@@ -414,7 +488,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
       try {
         ({ channel, url } = await connectFirst(turn.addresses, identity, { expect: current.publicKey, mode: "daemon", signal: cancelled.signal }));
       } catch (error) {
-        if (afterDialFailure(error instanceof AuthError ? error.code : undefined, turn.upgrade) === "stop") {
+        if (afterDialFailure(error instanceof AuthError ? error.code : undefined, turn.upgrade, current.mesh !== undefined) === "stop") {
           announce(`${name}: ${(error as Error).message}`);
           return stop();
         }
@@ -430,7 +504,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
       const via = isRelayAddress(url) ? "relay" : "direct";
       const grants: GrantHolder = { current: current.grants.incoming };
       const owner = fingerprint(current.publicKey);
-      const local = new GrantedShell(new ShellApi(ptys, { owner }), grants, name, owner, advertisedToPeers);
+      const local = new GrantedShell(new ShellApi(ptys, { owner }), grants, name, owner, advertisedToPeers, answerMeshes(current.publicKey));
       const remote = rpcSession<ShellApi>(channel, local);
       const session = register({ close: (reason) => channel.close(reason), outbound: true, via, dialed: url }, local, remote, new URL(url).host, { name, publicKey: current.publicKey, daemon: true });
       session.grants = grants;
