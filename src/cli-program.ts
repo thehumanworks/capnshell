@@ -8,7 +8,14 @@ export function createCli(): Command {
     .description("Shells, terminals and files on your paired devices, on Linux, macOS and Windows")
     .version(CNS_VERSION, "-V, --version", "Print this cns's version; cns status shows the daemon's")
     .exitOverride()
-    .showHelpAfterError();
+    .showHelpAfterError()
+    // A mesh bot token makes this machine the bot it names before any command runs (mesh-token.ts).
+    .hook("preAction", async () => {
+      const token = process.env.CNS_TOKEN?.trim();
+      if (!token) return;
+      const { startAsBot } = await import("./mesh-token.js");
+      startAsBot(token);
+    });
   addPeerCommands(program, async (config) => {
     // At a terminal, each cns tty DEVICE starts a named session of its own, which survives
     // connection loss; --attach NAME joins one. Piped input gets an unnamed terminal.
@@ -77,6 +84,12 @@ export function createCli(): Command {
     .option("--limit <grants>", "The most each may use on other members, whatever they allow: shell, files, sessions, all, or permissions")
     .option("--state <path>", "Local daemon state file")
     .action(async (name: string, devices: string[], options) => { await (await meshCommands()).addMembers(name, devices, options); });
+  mesh.command("token <name> <bot>").description("Print a token that makes a machine nobody sits at, such as a CI runner, a member of the mesh as BOT")
+    .option("--allow <grants>", "Required: what other members may use on the bot: none, shell, files, sessions, all, or permissions")
+    .option("--limit <grants>", "The most the bot may use on other members, whatever they allow")
+    .option("--state <path>", "Local daemon state file")
+    .addHelpText("after", "\nThe token goes to stdout, once; store it as a secret. On the bot's machine, set CNS_TOKEN to it:\nany cns command there first makes the machine the bot, and CNS_TOKEN=... cns up runs it as a member\nthe others reach. The token works again on a new machine, one machine at a time. Revoke it with\ncns mesh remove NAME BOT, then cns peer remove BOT.")
+    .action(async (name: string, bot: string, options) => { await (await meshCommands()).botToken(name, bot, options); });
   mesh.command("remove <name> <devices...>").description("Take devices out of the mesh; the other members drop them")
     .option("--state <path>", "Local daemon state file")
     .action(async (name: string, devices: string[], options) => { await (await meshCommands()).removeMembers(name, devices, options); });

@@ -1,10 +1,11 @@
 import os from "node:os";
 import { errorMessage } from "../errors.js";
-import { ensureIdentity, fingerprint, type PublicKey } from "../identity.js";
+import { ensureIdentity, fingerprint, newKeyPair, type PublicKey } from "../identity.js";
+import { mintBotToken } from "../mesh-token.js";
 import { applyMeshes, firstList, listMeshes, listsFor, MAX_MESHES, nextList, openLists, readMesh, removeMesh, signList, writeMesh, type Member, type MeshState } from "../mesh.js";
 import { meshFiles, peerNamePattern } from "../peer-files.js";
 import { suggestedName } from "../pairing.js";
-import { describeGrants, expandGrants, getPeer, listPeers, resolvePeer, type Permission } from "../peers.js";
+import { describeGrants, expandGrants, getPeer, listPeers, resolvePeer, savePairedPeer, type Permission } from "../peers.js";
 import { connectDevice } from "./connect-device.js";
 import { connectControl } from "./daemon.js";
 
@@ -90,6 +91,42 @@ export async function addMembers(name: string, devices: string[], options: State
   if (!live) console.log("Start this device's daemon so members get the new list: cns up.");
 }
 
+/**
+ * `cns mesh token NAME BOT --allow GRANTS`: a token that makes a machine nobody sits at a
+ * member of the mesh, as BOT (mesh-token.ts). The token goes to stdout, once, so it can be
+ * piped into a secret store; this device keeps only the bot's public key.
+ */
+export async function botToken(name: string, bot: string, options: StateOption & { allow?: string; limit?: string }): Promise<void> {
+  const { identity } = ensureIdentity();
+  const state = adminOf(name, identity.publicKey);
+  if (options.allow === undefined) throw new Error("Say what other members may use on the bot: --allow none, shell, files, sessions, all, or permissions.");
+  const allow = grantsFrom(options.allow);
+  const limit = options.limit === undefined ? undefined : grantsFrom(options.limit);
+  if (!peerNamePattern.test(bot)) throw new Error("Names contain 1-64 letters, numbers, underscores or hyphens and start with a letter or number.");
+  if (getPeer(bot) || state.list.members.some((member) => member.name === bot)) throw new Error(`${bot} is taken: a paired device or a member of ${name} has that name. Choose another.`);
+  // Where the bot reaches this device: what the running daemon advertises, else the relay alone.
+  let addresses: string[] = [];
+  try {
+    const control = await connectControl(options.state);
+    try { addresses = (await control.remote.status()).addresses ?? []; } finally { control.close(); }
+  } catch { /* No daemon: the bot finds this device at the relay, once its daemon runs. */ }
+  const keys = newKeyPair();
+  const list = nextList(state.list, (members) => [...members, { key: keys.publicKey, name: bot, ...limit ? { limit } : {} }], Date.now());
+  const signed = signList(list, identity);
+  const token = mintBotToken(keys.privateKey, signed, addresses.slice(0, 16), allow);
+  savePairedPeer(bot, { publicKey: keys.publicKey, addresses: [], pairedAt: new Date().toISOString(), grants: { incoming: [], outgoing: [] } });
+  writeMesh({ ...state, signed });
+  const live = await settle(options, identity.publicKey);
+  console.log(token);
+  console.error([
+    `Token for ${bot} (fingerprint ${fingerprint(keys.publicKey)}), a member of ${name} (version ${list.version}). Members may use there: ${describeGrants(allow)}${limit ? `; it may use at most ${describeGrants(limit)} on them` : ""}.`,
+    `Anyone who has it can act as ${bot}. This device keeps no copy: store it as a secret now.`,
+    `On the bot's machine: CNS_TOKEN=<token> cns up, so members reach it; any cns command there reaches them.`,
+    `It may use nothing on this device; cns peer grant ${bot} GRANTS changes that. To revoke it: cns mesh remove ${name} ${bot}, then cns peer remove ${bot}.`,
+    ...live ? [] : ["Start this device's daemon so members get the new list and the bot can reach this device: cns up."],
+  ].join("\n"));
+}
+
 /** `cns mesh remove NAME DEVICE...`: take devices out of the mesh. */
 export async function removeMembers(name: string, devices: string[], options: StateOption): Promise<void> {
   const { identity } = ensureIdentity();
@@ -104,6 +141,8 @@ export async function removeMembers(name: string, devices: string[], options: St
   writeMesh({ ...state, signed: signList(list, identity) });
   const live = await settle(options, identity.publicKey);
   console.log(`Removed ${devices.join(", ")} from the mesh ${name} (version ${list.version}). The other members drop ${keys.length === 1 ? "it" : "them"} when they get this list, and ${keys.length === 1 ? "it leaves" : "each leaves"} the mesh when it next reaches this device.`);
+  const paired = listPeers(() => {}).filter((peer) => peer.mesh === undefined && keys.includes(peer.publicKey)).map((peer) => peer.name);
+  if (paired.length) console.log(`Still paired with this device: ${paired.join(", ")}. To unpair: cns peer remove NAME.`);
   if (!live) console.log("Start this device's daemon so members get the new list: cns up.");
 }
 

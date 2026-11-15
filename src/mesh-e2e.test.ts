@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -104,4 +104,65 @@ test("mesh members reach each other as far as each allows, and the admin's list 
   assert.equal((await mesh(hub, ["leave", "home"])).code, 0);
   await eventually("laptop leaves the ended mesh", () => !has(laptop, "meshes", "home"));
   assert.ok(has(laptop, "peers", "hub"));
+});
+
+test("a mesh bot token makes a machine nobody sits at a member that others reach, until the admin removes it", { skip: process.platform === "win32", timeout: 120000 }, async (t) => {
+  const devices = await testDevices(t, "cns-mesh-bot-");
+  const hub = await devices.device("hub");
+  const laptop = await devices.device("laptop");
+  for (const device of [hub, laptop]) await devices.up(device);
+  await devices.pair(hub, laptop);
+  const mesh = (device: TestDevice, args: string[]) => devices.cli(device, ["mesh", ...args, "--state", device.state]);
+  const has = (device: TestDevice, kind: "peers" | "meshes", name: string) => existsSync(path.join(device.dir, kind, name));
+  assert.equal((await mesh(hub, ["create", "home"])).code, 0);
+  assert.equal((await mesh(hub, ["add", "home", "laptop"])).code, 0);
+  assert.equal((await mesh(laptop, ["join", "home", "--via", "hub", "--allow", "shell"])).code, 0);
+
+  // The admin says what members may use on the bot, and prints the token alone on stdout.
+  const unsaid = await mesh(hub, ["token", "home", "ci"]);
+  assert.equal(unsaid.code, 1);
+  assert.match(unsaid.stderr, /Say what other members may use on the bot: --allow/);
+  const minted = await mesh(hub, ["token", "home", "ci", "--allow", "shell"]);
+  assert.equal(minted.code, 0, minted.output);
+  assert.match(minted.stdout, /^cnsbot1:[A-Za-z0-9_-]+\n$/);
+  assert.match(minted.stderr, /Token for ci \(fingerprint [a-z2-7-]+\), a member of home \(version 3\)\. Members may use there: shell\./);
+  const token = minted.stdout.trim();
+  // hub keeps the bot's public key only, and members learn of the bot from hub.
+  assert.ok(!(await readFile(path.join(hub.dir, "peers", "ci"), "utf8")).includes(token.slice(20, 60)));
+  await eventually("laptop saves the bot", () => has(laptop, "peers", "ci"));
+
+  // On a machine with nothing of cns's, the token makes it the bot, which runs as a member.
+  const bot = await devices.device("bot", { CNS_TOKEN: token });
+  await devices.up(bot);
+  assert.ok(has(bot, "meshes", "home") && has(bot, "peers", "laptop"));
+  const ran = await devices.cli(bot, ["run", "laptop", "--", "echo", "from the bot"]);
+  assert.equal(ran.code, 0, ran.output);
+  assert.equal(ran.stdout, "from the bot\n");
+  // laptop reaches the bot over the link the bot's daemon made, as far as the token allows.
+  const control = await connectControl(laptop.state);
+  try { await settledLink(control, "ci"); } finally { control.close(); }
+  const back = await devices.cli(laptop, ["run", "ci", "--", "echo", "from laptop"]);
+  assert.equal(back.code, 0, back.output);
+  assert.equal(back.stdout, "from laptop\n");
+
+  // The token works again on another new machine, and never on a device that is already one.
+  const again = await devices.device("again", { CNS_TOKEN: token });
+  const reused = await devices.cli(again, ["run", "laptop", "--", "echo", "again"]);
+  assert.equal(reused.code, 0, reused.output);
+  assert.equal(reused.stdout, "again\n");
+  const taken = await devices.cli({ ...laptop, env: { ...laptop.env, CNS_TOKEN: token } }, ["peers"]);
+  assert.equal(taken.code, 1);
+  assert.match(taken.stderr, /CNS_TOKEN makes this machine a mesh bot, but it is already another device/);
+  const garbled = await devices.cli({ ...again, env: { ...again.env, CNS_TOKEN: token.slice(0, -10) } }, ["peers"]);
+  assert.match(garbled.stderr, /CNS_TOKEN is not a cns mesh bot token/);
+
+  // Removed, the bot is dropped by the members and leaves the mesh; the token reaches no one.
+  const removed = await mesh(hub, ["remove", "home", "ci"]);
+  assert.equal(removed.code, 0, removed.output);
+  assert.match(removed.stdout, /Still paired with this device: ci\. To unpair: cns peer remove NAME\./);
+  await eventually("laptop drops the bot", () => !has(laptop, "peers", "ci"));
+  await eventually("the bot leaves the mesh", () => !has(bot, "meshes", "home"));
+  const fresh = await devices.device("fresh", { CNS_TOKEN: token });
+  const refused = await devices.cli(fresh, ["run", "laptop", "--", "true"]);
+  assert.equal(refused.code, 3, refused.output);
 });
