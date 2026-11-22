@@ -125,10 +125,12 @@ test("commands reach a device that cannot be dialed over the link it dialed to t
   assert.deepEqual([nameOne, nameTwo].sort(), ["tty-1", "tty-2"]);
   await new Promise((resolve) => setTimeout(resolve, 500));
   const [fromOne, fromTwo] = [one.screen.length, two.screen.length];
-  one.write("echo $((6 * 7))\r");
-  two.write("echo $((6 * 8))\r");
-  await Promise.all([one.waitFor("42", fromOne), two.waitFor("48", fromTwo)]);
-  assert.doesNotMatch(two.screen.slice(fromTwo), /42/);
+  // Labelled answers: a shell may print escape sequences that carry hex IDs, such as
+  // systemd's OSC 3008 context, which can hold "42" or "48" by chance.
+  one.write("echo first:$((6 * 7))\r");
+  two.write("echo second:$((6 * 8))\r");
+  await Promise.all([one.waitFor("first:42", fromOne), two.waitFor("second:48", fromTwo)]);
+  assert.doesNotMatch(two.screen.slice(fromTwo), /first:/);
   one.write("\x1d");
   two.write("exit\r");
   assert.deepEqual([await one.exited, await two.exited], [0, 0]);
