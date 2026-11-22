@@ -3,18 +3,25 @@ import { addDaemonCommand, addMcpCommand, addPeerCommands } from "./options.js";
 import { CNS_VERSION } from "./version.js";
 
 export function createCli(): Command {
+  // Positional options keep flags for remote commands intact. Also accept this one directly on "up".
+  const tokenFileOption = ["--token-file <path>", "Read the mesh bot token directly from this file instead of CNS_TOKEN"] as const;
   const program = new Command()
     .name("cns")
     .description("Shells, terminals and files on your paired devices, on Linux, macOS and Windows")
     .version(CNS_VERSION, "-V, --version", "Print this cns's version; cns status shows the daemon's")
+    .option(...tokenFileOption)
     .exitOverride()
     .showHelpAfterError()
     // A mesh bot token makes this machine the bot it names before any command runs (mesh-token.ts).
-    .hook("preAction", async () => {
-      const token = process.env.CNS_TOKEN?.trim();
-      if (!token) return;
-      const { startAsBot } = await import("./mesh-token.js");
-      startAsBot(token);
+    .hook("preAction", async (_root, command) => {
+      const file: string | undefined = command.optsWithGlobals().tokenFile;
+      const token = process.env.CNS_TOKEN;
+      if (file === undefined && token === undefined) return;
+      const { readBotTokenFile, startAsBot } = await import("./mesh-token.js");
+      if (file !== undefined) startAsBot(readBotTokenFile(file), "token file");
+      else startAsBot(token!);
+      // Children use the saved identity. Never pass them a private key or bootstrap the daemon a second time.
+      delete process.env.CNS_TOKEN;
     });
   addPeerCommands(program, async (config) => {
     // At a terminal, each cns tty DEVICE starts a named session of its own, which survives
@@ -88,9 +95,10 @@ export function createCli(): Command {
     .option("--allow <grants>", "Required: what other members may use on the bot: none, shell, files, sessions, all, or permissions")
     .option("--limit <grants>", "The most the bot may use on other members, whatever they allow")
     .option("--state <path>", "Local daemon state file")
-    .addHelpText("after", "\nThe token goes to stdout, once; store it as a secret. On the bot's machine, set CNS_TOKEN to it:\nany cns command there first makes the machine the bot, and CNS_TOKEN=... cns up runs it as a member\nthe others reach. The token works again on a new machine, one machine at a time. Revoke it with\ncns mesh remove NAME BOT, then cns peer remove BOT.")
+    .addHelpText("after", "\nThe token goes to stdout, once; store it as a secret. On the bot's machine, set CNS_TOKEN to it:\nany cns command there first makes the machine the bot, and CNS_TOKEN=... cns up runs it as a member\nthe others reach. For a mounted secret, use cns up --token-file PATH instead of CNS_TOKEN.\nThe token works again on a new machine, one machine at a time. To revoke it\nand free its name on this device: cns mesh remove NAME BOT --unpair.")
     .action(async (name: string, bot: string, options) => { await (await meshCommands()).botToken(name, bot, options); });
   mesh.command("remove <name> <devices...>").description("Take devices out of the mesh; the other members drop them")
+    .option("--unpair", "Also remove their direct pairings on this admin, end their links and free their names")
     .option("--state <path>", "Local daemon state file")
     .action(async (name: string, devices: string[], options) => { await (await meshCommands()).removeMembers(name, devices, options); });
   mesh.command("join <name>").description("Take part in a mesh run by a paired device that added this one")
@@ -138,6 +146,7 @@ export function createCli(): Command {
     .action(async (options) => { await (await gatewayCommands()).log(options); });
   program.command("up")
     .description("Run this device as a paired peer: start its daemon, or report the running one")
+    .option(...tokenFileOption)
     .option("--bind <address>", "Interface to listen on (default: every interface; CNS_BIND)")
     .option("--port <port>", "TCP port (default: 47381; CNS_PORT)")
     .option("--state <path>", "Local daemon state file")

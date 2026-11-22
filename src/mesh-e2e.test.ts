@@ -132,7 +132,7 @@ test("a mesh bot token makes a machine nobody sits at a member that others reach
   await eventually("laptop saves the bot", () => has(laptop, "peers", "ci"));
 
   // On a machine with nothing of cns's, the token makes it the bot, which runs as a member.
-  const bot = await devices.device("bot", { CNS_TOKEN: token });
+  const bot = await devices.device("bot", { CNS_TOKEN: `"${token}"\r\n` });
   await devices.up(bot);
   assert.ok(has(bot, "meshes", "home") && has(bot, "peers", "laptop"));
   const ran = await devices.cli(bot, ["run", "laptop", "--", "echo", "from the bot"]);
@@ -154,15 +154,60 @@ test("a mesh bot token makes a machine nobody sits at a member that others reach
   assert.equal(taken.code, 1);
   assert.match(taken.stderr, /CNS_TOKEN makes this machine a mesh bot, but it is already another device/);
   const garbled = await devices.cli({ ...again, env: { ...again.env, CNS_TOKEN: token.slice(0, -10) } }, ["peers"]);
-  assert.match(garbled.stderr, /CNS_TOKEN is not a cns mesh bot token/);
+  assert.match(garbled.stderr, /Invalid CNS_TOKEN.*incomplete or damaged/);
+  const empty = await devices.device("empty", { CNS_TOKEN: "" });
+  assert.match((await devices.cli(empty, ["mesh", "list"])).stderr, /CNS_TOKEN is set but empty/);
+  assert.ok(!existsSync(path.join(empty.dir, "identity.json")));
 
-  // Removed, the bot is dropped by the members and leaves the mesh; the token reaches no one.
+  // A plain remove leaves the direct pairing on the admin; another member drops the old key.
   const removed = await mesh(hub, ["remove", "home", "ci"]);
   assert.equal(removed.code, 0, removed.output);
-  assert.match(removed.stdout, /Still paired with this device: ci\. To unpair: cns peer remove NAME\./);
+  assert.match(removed.stdout, /cns peer remove ci\b/);
+  const collision = await mesh(hub, ["token", "home", "ci", "--allow", "shell"]);
+  assert.equal(collision.code, 1);
+  assert.match(collision.stderr, /still paired.*cns peer remove ci/);
   await eventually("laptop drops the bot", () => !has(laptop, "peers", "ci"));
   await eventually("the bot leaves the mesh", () => !has(bot, "meshes", "home"));
   const fresh = await devices.device("fresh", { CNS_TOKEN: token });
   const refused = await devices.cli(fresh, ["run", "laptop", "--", "true"]);
   assert.equal(refused.code, 3, refused.output);
+
+  // Free the existing 1.7 pairing, then exercise single-command revocation with live links.
+  const keyOf = async () => JSON.parse(await readFile(path.join(hub.dir, "peers", "ci"), "utf8")).publicKey as string;
+  const oldKey = await keyOf();
+  assert.equal((await devices.cli(hub, ["peer", "remove", "ci", "--state", hub.state])).code, 0);
+  const replacement = await mesh(hub, ["token", "home", "ci", "--allow", "none"]);
+  assert.equal(replacement.code, 0, replacement.stderr);
+  const newKey = await keyOf();
+  assert.notEqual(newKey, oldKey);
+  const runner = await devices.device("replacement", { CNS_TOKEN: replacement.stdout.trim() });
+  await devices.up(runner);
+  const adminControl = await connectControl(hub.state);
+  try {
+    await settledLink(adminControl, "ci");
+    const revoked = await mesh(hub, ["remove", "home", "ci", "--unpair"]);
+    assert.equal(revoked.code, 0, revoked.output);
+    assert.ok(!has(hub, "peers", "ci"));
+    assert.ok(!(await adminControl.controller.peers()).some((entry) => entry.peer?.name === "ci"));
+  } finally { adminControl.close(); }
+  const reissued = await mesh(hub, ["token", "home", "ci", "--allow", "none"]);
+  assert.equal(reissued.code, 0, reissued.stderr);
+  assert.notEqual(await keyOf(), newKey);
+});
+
+test("unpairing on mesh removal will not break another mesh's pairing", async (t) => {
+  const devices = await testDevices(t, "cns-mesh-unpair-");
+  const hub = await devices.device("hub");
+  const mesh = (...args: string[]) => devices.cli(hub, ["mesh", ...args, "--state", hub.state]);
+  for (const name of ["home", "work"]) assert.equal((await mesh("create", name)).code, 0);
+  assert.equal((await mesh("token", "home", "ci", "--allow", "none")).code, 0);
+  assert.equal((await mesh("add", "work", "ci")).code, 0);
+  const blocked = await mesh("remove", "home", "ci", "--unpair");
+  assert.equal(blocked.code, 1);
+  assert.match(blocked.stderr, /also listed in.*work/);
+  assert.ok(existsSync(path.join(hub.dir, "peers", "ci")));
+  // The failed command changed neither list. Dropping membership alone is still allowed.
+  assert.equal((await mesh("remove", "home", "ci")).code, 0);
+  assert.equal((await mesh("remove", "work", "ci", "--unpair")).code, 0);
+  assert.equal((await mesh("token", "home", "ci", "--allow", "none")).code, 0);
 });

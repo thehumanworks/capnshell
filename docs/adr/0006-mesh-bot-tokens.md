@@ -32,11 +32,18 @@ of its own, every device sees which bot did what, and removing one bot leaves th
   runs the bot's daemon, which links to the members, and commands reach them. The admin
   need not be online when the bot starts, since the token carries a list; the bot catches
   up on newer lists from any member.
+- **File delivery.** `--token-file PATH` reads the same token directly from a file instead of
+  the environment. An explicit file wins over `CNS_TOKEN` even if a launcher overrides the
+  variable. A bad file fails; there is no fallback to a different identity. After bootstrap
+  the daemon reads the saved identity; it does not need the token in its environment.
 - **Never over another device.** A machine that already has an identity of its own
   refuses the token, so a token set by mistake cannot replace a person's device.
-- **Revoking.** `cns mesh remove NAME BOT` drops the bot from every member, and
-  `cns peer remove BOT` unpairs it from the admin. A copy of the token used later makes a
-  bot that no member accepts.
+- **Revoking.** `cns mesh remove NAME BOT` drops the bot from the other members when
+  they get the new list. Its direct pairing with the admin is separate and still holds the
+  name. `cns peer remove BOT` on the admin ends that pairing and frees the name. To do both
+  in one command, use `cns mesh remove NAME BOT --unpair`. It identifies the pairing by
+  public key and refuses to unpair a device still listed in another local mesh. Reissuing
+  the same name creates a new identity, without carrying over the old bot's grants.
 
 ## Consequences
 

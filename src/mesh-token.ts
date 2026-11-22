@@ -1,9 +1,10 @@
 import { createPrivateKey, createPublicKey } from "node:crypto";
+import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { z } from "zod";
 import { ensureIdentity, PUBLIC_KEY_BYTES, type PublicKey } from "./identity.js";
 import { applyMeshes, openList, readMesh, signedListSchema, writeMesh, type MemberList, type SignedList } from "./mesh.js";
-import { peerFileExists, peerNamePattern, validatePeerUrl } from "./peer-files.js";
-import { findPairedPeer, grantsSchema, savePairedPeer, type Permission } from "./peers.js";
+import { peerFileExists, peerNamePattern } from "./peer-files.js";
+import { advertisedSchema, findPairedPeer, grantsSchema, savePairedPeer, type Permission } from "./peers.js";
 
 /**
  * A mesh bot token: everything a machine nobody sits at, such as a CI runner or a server,
@@ -31,7 +32,7 @@ const tokenSchema = z.strictObject({
   sk: z.string().regex(base64url).refine((value) => Buffer.from(value, "base64url").length === 48),
   list: signedListSchema,
   /** Where the admin's daemon answers, as it advertised then. */
-  admin: z.array(z.string().max(2048)).max(16),
+  admin: advertisedSchema,
   /** What other members, and the admin, may use on the bot. */
   allow: grantsSchema,
 });
@@ -46,28 +47,76 @@ export interface BotToken {
 
 /** A token as `cns mesh token` prints it. */
 export function mintBotToken(privateKey: string, signed: SignedList, adminAddresses: readonly string[], allow: readonly Permission[]): string {
-  const text = BOT_TOKEN_PREFIX + Buffer.from(JSON.stringify(tokenSchema.parse({ v: 1, sk: privateKey, list: signed, admin: [...adminAddresses], allow: [...allow] }))).toString("base64url");
+  const body = { v: 1, sk: privateKey, list: signed, admin: adminAddresses, allow };
+  const text = BOT_TOKEN_PREFIX + Buffer.from(JSON.stringify(body)).toString("base64url");
   if (text.length > MAX_TOKEN_CHARS) throw new Error(`The token would be ${text.length} characters, more than an environment variable safely holds. Remove members or addresses from the mesh, then try again.`);
+  checkedBot(body, (why) => new Error(`Cannot issue a bot token: ${why}`));
   return text;
 }
 
-/** The bot a token makes. Anything that is not a whole, valid token of a bot listed by its mesh's admin is refused. */
-export function decodeBotToken(text: string): BotToken {
-  const unreadable = "CNS_TOKEN is not a cns mesh bot token. Set it to the whole line cns mesh token printed.";
-  if (!text.startsWith(BOT_TOKEN_PREFIX)) throw new Error(unreadable);
-  let body: z.infer<typeof tokenSchema>;
+/** Both ends check the same fields, key and signature. Never include token data or a raw parser error in a diagnostic. */
+function checkedBot(value: unknown, invalid: (why: string) => Error): BotToken {
+  const parsed = tokenSchema.safeParse(value);
+  if (!parsed.success) {
+    const field = parsed.error.issues[0]?.path[0];
+    if (field === "admin") throw invalid("invalid admin address list.");
+    if (field === "sk") throw invalid("invalid bot private key.");
+    if (field === "list") throw invalid("invalid signed member list.");
+    throw invalid("the token fields do not match the cnsbot1 format.");
+  }
+  const body = parsed.data;
   let publicKey: PublicKey;
-  let list: MemberList;
   try {
-    body = tokenSchema.parse(JSON.parse(Buffer.from(text.slice(BOT_TOKEN_PREFIX.length), "base64url").toString("utf8")));
-    for (const address of body.admin) validatePeerUrl(address);
     const key = createPrivateKey({ key: Buffer.from(body.sk, "base64url"), format: "der", type: "pkcs8" });
-    if (key.asymmetricKeyType !== "ed25519") throw new Error("Not an Ed25519 key.");
+    if (key.asymmetricKeyType !== "ed25519") throw new Error();
     publicKey = (createPublicKey(key).export({ format: "der", type: "spki" }) as Buffer).subarray(-PUBLIC_KEY_BYTES).toString("base64url");
-    list = openList(body.list);
-  } catch { throw new Error(unreadable); }
-  if (list.admin === publicKey || !list.members.some((member) => member.key === publicKey)) throw new Error(unreadable);
+  } catch { throw invalid("the private key is not a valid Ed25519 key."); }
+  let list: MemberList;
+  try { list = openList(body.list); }
+  catch { throw invalid("the signed member list is invalid or its admin signature did not verify."); }
+  if (list.admin === publicKey) throw invalid("the token contains the admin's own key, not a bot key.");
+  if (!list.members.some((member) => member.key === publicKey)) throw invalid("the bot key is not listed in the signed member list.");
   return { keys: { publicKey, privateKey: body.sk }, signed: body.list, list, adminAddresses: body.admin, allow: body.allow };
+}
+
+/** An explicitly named file may be a mounted secret (including a projected symlink). Do not block on pipes or read unbounded input. */
+export function readBotTokenFile(path: string): string {
+  let fd: number;
+  try { fd = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0)); }
+  catch { throw new Error("Cannot read --token-file. Pass the path to a readable token file, not the token itself."); }
+  try {
+    if (!fstatSync(fd).isFile()) throw new Error("--token-file must name a regular file.");
+    // Allow space for line wrapping and line endings. The token itself has a smaller limit.
+    const bytes = Buffer.alloc(64 * 1024 + 1);
+    let used = 0;
+    while (used < bytes.length) {
+      const n = readSync(fd, bytes, used, bytes.length - used, null);
+      if (!n) return bytes.toString("utf8", 0, used);
+      used += n;
+    }
+    throw new Error("The token file is too long (over 64 KiB). Use only stdout from cns mesh token.");
+  } finally { closeSync(fd); }
+}
+
+type TokenSource = "CNS_TOKEN" | "token file";
+
+/** Read a whole token, allowing only transport formatting (outer quotes, whitespace and line wrapping). */
+export function decodeBotToken(value: string, source: TokenSource = "CNS_TOKEN"): BotToken {
+  let text = value.trim();
+  if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'"))) text = text.slice(1, -1).trim();
+  if (!text) throw new Error(source === "token file" ? "The token file is empty." : "CNS_TOKEN is set but empty. Set it to the token, or unset it to run as a regular device.");
+  const invalid = (why: string) => new Error(`Invalid ${source} (${text.length} characters): ${why}`);
+  if (!text.startsWith(BOT_TOKEN_PREFIX)) throw invalid(`the value must start with ${BOT_TOKEN_PREFIX} and contain only the token printed by cns mesh token.`);
+  const encoded = text.slice(BOT_TOKEN_PREFIX.length).replace(/[ \t\r\n]+/g, "");
+  if (BOT_TOKEN_PREFIX.length + encoded.length > MAX_TOKEN_CHARS) throw invalid("the value is too long to be a cns mesh bot token.");
+  if (!base64url.test(encoded)) throw invalid("set it to only the token from stdout, without the instructions from stderr.");
+  let body: unknown;
+  try {
+    const bytes = Buffer.from(encoded, "base64url");
+    if (bytes.toString("base64url") !== encoded) throw new Error();
+    body = JSON.parse(bytes.toString("utf8"));
+  } catch { throw invalid("the payload after cnsbot1: is incomplete or damaged. Transfer stdout directly to a secret store or private file."); }
+  return checkedBot(body, invalid);
 }
 
 /**
@@ -76,11 +125,11 @@ export function decodeBotToken(text: string): BotToken {
  * member list. A machine that is already another device is refused: it has an identity of
  * its own, which the token must not replace.
  */
-export function startAsBot(text: string): { created: boolean } {
-  const token = decodeBotToken(text);
+export function startAsBot(text: string, source: TokenSource = "CNS_TOKEN"): { created: boolean } {
+  const token = decodeBotToken(text, source);
   const { identity, created } = ensureIdentity(token.keys);
   if (identity.publicKey !== token.keys.publicKey) {
-    throw new Error(`CNS_TOKEN makes this machine a mesh bot, but it is already another device (${identity.fingerprint}). Run the bot with a configuration directory of its own: CNS_CONFIG_DIR=DIRECTORY.`);
+    throw new Error(`${source === "token file" ? "The token file" : source} makes this machine a mesh bot, but it is already another device (${identity.fingerprint}). Run the bot with a configuration directory of its own: CNS_CONFIG_DIR=DIRECTORY.`);
   }
   const { list } = token;
   if (!findPairedPeer(list.admin)) {

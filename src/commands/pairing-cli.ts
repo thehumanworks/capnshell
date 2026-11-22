@@ -671,11 +671,13 @@ export async function address(name: string, urls: string[], options: { remove?: 
 }
 
 /** `cns peer remove NAME`: unpair a device here; the running daemon drops its links at once. */
-export async function removePeer(name: string, options: { state?: string }): Promise<void> {
+export async function removePeer(name: string, options: { state?: string }, expectedKey?: string): Promise<void> {
   let publicKey: string | undefined;
   let mesh: string | undefined;
   try { ({ publicKey, mesh } = getPeer(name) ?? {}); }
-  catch { /* An unreadable record is removed all the same. */ }
+  catch { /* An explicit peer remove can forget an unreadable record. */ }
+  // A mesh removal selected a member by key. Never unpair a different device now using its alias.
+  if (expectedKey !== undefined && publicKey !== expectedKey) throw new Error(`The pairing for ${name} changed; it was not removed. Check cns peer list.`);
   if (mesh !== undefined) notMeshMember(name, `It goes when the mesh's admin removes it, or when this device leaves the mesh: cns mesh leave ${mesh}.`);
   removePeerFile(name);
   if (publicKey) {

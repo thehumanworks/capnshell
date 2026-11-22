@@ -77,6 +77,14 @@ test("a member's records follow the list: created, renamed when taken, regranted
   assert.deepEqual([onAdmin.create, onAdmin.update, onAdmin.remove], [[], [], []]);
 });
 
+test("a member that missed the removal reuses the bot's alias for its replacement key", () => {
+  const list = homeList();
+  const oldKey = generateIdentity().publicKey;
+  const plan = planMesh({ self: laptop.publicKey, mesh: "home", list, allow: [], now: NOW, records: [record("studio", oldKey, { mesh: "home" })] });
+  assert.deepEqual(plan.remove, [{ name: "studio", publicKey: oldKey }]);
+  assert.deepEqual(plan.create.map(({ name, record }) => [name, record.publicKey]), [["studio", studio.publicKey]]);
+});
+
 test("a device takes only a newer list its mesh's admin signed, for a mesh it is in", () => {
   const held = stateOf(homeList(2));
   const v3 = signList(homeList(3), admin);

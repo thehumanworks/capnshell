@@ -130,8 +130,11 @@ export function planMesh({ self, mesh, allow, list, records, now }: { self: Publ
   // does not hold keeps none.
   const members = self !== list.admin && list.members.some((member) => member.key === self) ? list.members.filter((member) => member.key !== self && member.key !== list.admin) : [];
   const keys = new Set(members.map((member) => member.key));
-  for (const record of records) if (record.mesh === mesh && !keys.has(record.publicKey)) plan.remove.push({ name: record.name, publicKey: record.publicKey });
-  const taken = new Set(records.map((record) => record.name));
+  const taken = new Set<string>();
+  for (const record of records) {
+    if (record.mesh === mesh && !keys.has(record.publicKey)) plan.remove.push({ name: record.name, publicKey: record.publicKey });
+    else taken.add(record.name); // applyMeshes removes old keys before it creates their replacements.
+  }
   for (const member of members) {
     const incoming = memberGrants(allow, member.limit);
     const existing = records.find((record) => record.publicKey === member.key);

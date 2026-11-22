@@ -1,12 +1,13 @@
 import { spawn, type SpawnOptionsWithoutStdio } from "node:child_process";
 import { EventEmitter, once } from "node:events";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import type { TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { connectControl, stopDaemon } from "./commands/daemon.js";
+import { makePrivateDirectory } from "./config.js";
 import { selfInvocation } from "./runtime.js";
 
 export const PROJECT_ROOT = fileURLToPath(new URL("../", import.meta.url));
@@ -150,7 +151,7 @@ export async function testDevices(t: TestContext, prefix = "cns-devices-") {
     cli,
     async device(name: string, env: Record<string, string> = {}): Promise<TestDevice> {
       const dir = path.join(root, name);
-      await mkdir(dir, { mode: 0o700 });
+      makePrivateDirectory(dir); // Applies the private ACL as well as mode 0700 on the respective platforms.
       return { name, dir, env: { CNS_CONFIG_DIR: dir, HOME: dir, ...env }, state: path.join(dir, "daemon.json") };
     },
     /** Start the device's daemon on loopback. */

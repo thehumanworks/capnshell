@@ -114,6 +114,8 @@ jobs:
           cp "out/$EXE" "$RUNNER_TEMP/$EXE"
           cd "$RUNNER_TEMP"
           "./$EXE" --help
+      - name: Start a bot using the compiled release binary
+        run: CAPNWEB_TEST_BINARY="$RUNNER_TEMP/$EXE" bun test --timeout 90000 ./src/mesh-token-cli.test.ts
       - name: Archive and upload
         run: |
           name="cns-$TAG-${{ matrix.asset }}"
