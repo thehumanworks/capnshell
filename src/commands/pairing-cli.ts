@@ -634,8 +634,15 @@ async function refresh(name: string, state?: string) {
   try { await control.remote.refresh(name); } finally { control.close(); }
 }
 
+/** Refuse to change a mesh member's record by hand: the mesh's list and cns mesh allow keep it. */
+function notMeshMember(name: string, then: string): void {
+  const mesh = getPeer(name)?.mesh;
+  if (mesh !== undefined) throw new Error(`${name} is here as a member of the mesh ${mesh}, so cns mesh allow ${mesh} sets what it may use here, as for every member. ${then}`.trimEnd());
+}
+
 /** `cns peer grant NAME GRANTS`: let a paired device do more here, at once and without interrupting its links. */
 export async function grant(name: string, words: string[], options: { state?: string }): Promise<void> {
+  notMeshMember(name, "");
   const added = expandGrants(words.flatMap((word) => word.split(",")).map((word) => word.trim()).filter(Boolean));
   if (!added.length) throw new Error(`Name what to grant: ${["shell", "files", "sessions", "all", ...PERMISSIONS].join(", ")}.`);
   const updated = updatePairedPeer(name, (peer) => ({ ...peer, grants: { ...peer.grants, incoming: expandGrants([...peer.grants.incoming, ...added]) } }));
@@ -645,6 +652,7 @@ export async function grant(name: string, words: string[], options: { state?: st
 
 /** `cns peer revoke NAME [GRANTS]`: take access away, now, ending what used it; without grants, all of it. */
 export async function revoke(name: string, words: string[], options: { state?: string }): Promise<void> {
+  notMeshMember(name, "");
   const removed = words.length ? new Set(expandGrants(words.flatMap((word) => word.split(",")).map((word) => word.trim()).filter(Boolean))) : new Set(PERMISSIONS);
   const updated = updatePairedPeer(name, (peer) => ({ ...peer, grants: { ...peer.grants, incoming: peer.grants.incoming.filter((permission) => !removed.has(permission)) } }));
   await refresh(name, options.state);
@@ -665,8 +673,10 @@ export async function address(name: string, urls: string[], options: { remove?: 
 /** `cns peer remove NAME`: unpair a device here; the running daemon drops its links at once. */
 export async function removePeer(name: string, options: { state?: string }): Promise<void> {
   let publicKey: string | undefined;
-  try { publicKey = getPeer(name)?.publicKey; }
+  let mesh: string | undefined;
+  try { ({ publicKey, mesh } = getPeer(name) ?? {}); }
   catch { /* An unreadable record is removed all the same. */ }
+  if (mesh !== undefined) notMeshMember(name, `It goes when the mesh's admin removes it, or when this device leaves the mesh: cns mesh leave ${mesh}.`);
   removePeerFile(name);
   if (publicKey) {
     const control = await daemonIfRunning(options.state);
@@ -690,16 +700,19 @@ export async function peers(options: PeersOptions): Promise<void> {
   const rows = saved.map((peer) => {
     const link = online.get(peer.fingerprint);
     // Known only while linked: what a device runs can change whenever it is offline.
-    return { name: peer.name, fingerprint: peer.fingerprint, status: link ? "online" : "offline", connection: link?.via ?? null, version: link?.version ?? null, access: peer.grants.outgoing, grants: peer.grants.incoming, addresses: peer.addresses };
+    return { name: peer.name, fingerprint: peer.fingerprint, status: link ? "online" : "offline", connection: link?.via ?? null, version: link?.version ?? null, access: peer.grants.outgoing, grants: peer.grants.incoming, addresses: peer.addresses, mesh: peer.mesh ?? null };
   });
   if (options.json) { console.log(JSON.stringify(rows, null, 2)); return; }
   if (!rows.length) { console.error("No paired devices. Run cns pair to pair with another device."); return; }
-  const table = [["NAME", "STATUS", "CONNECTION", "VERSION", "ACCESS", "FINGERPRINT"], ...rows.map((row) => [
-    row.name, row.status, row.connection ?? "-", row.status === "online" ? row.version ?? "older" : "-", describeGrants(row.access), row.fingerprint,
+  // Only when there is a mesh member, so the table of a device in no mesh stays as it was.
+  const meshes = rows.some((row) => row.mesh !== null);
+  const table = [["NAME", "STATUS", "CONNECTION", "VERSION", "ACCESS", ...meshes ? ["MESH"] : [], "FINGERPRINT"], ...rows.map((row) => [
+    row.name, row.status, row.connection ?? "-", row.status === "online" ? row.version ?? "older" : "-", describeGrants(row.access), ...meshes ? [row.mesh ?? "-"] : [], row.fingerprint,
   ])];
   const widths = table.reduce((max, row) => row.map((cell, index) => Math.max(cell.length, max[index] ?? 0)), [] as number[]);
   console.log(table.map((row) => row.map((cell, index) => index === row.length - 1 ? cell : cell.padEnd(widths[index]!)).join("  ")).join("\n"));
-  const blocked = rows.flatMap((row) => !row.access.length ? [row.name] : []);
+  // A mesh member's access is learned over its first link, and cns mesh allow, not cns peer grant, widens it.
+  const blocked = rows.flatMap((row) => !row.access.length && row.mesh === null ? [row.name] : []);
   if (blocked.length) console.error(`\n${noAccessHint(blocked)}`);
   const behind = rows.flatMap((row) => {
     if (row.status !== "online") return [];

@@ -27,6 +27,8 @@ export interface PairingController {
   refresh(name: string): Promise<void>;
   /** Drop every link and dial loop for a device that is no longer paired. */
   forget(publicKey: string): Promise<void>;
+  /** Bring the records in line with the mesh lists saved here, and offer each linked device the lists it is in. */
+  meshChanged(): Promise<void>;
   /** End an invite nobody will decide on, telling a waiting device so. */
   cancel(id: string): void;
 }
@@ -100,6 +102,7 @@ export class ControlApi extends RpcTarget {
   dial(name: string) { return this.#paired().dial(name); }
   refresh(name: string) { return this.#paired().refresh(name); }
   forget(publicKey: string) { return this.#paired().forget(publicKey); }
+  meshChanged() { return this.#paired().meshChanged(); }
   peers() { return this.#controller.peers(); }
   info(id: string) { return this.#controller.info(id); }
   /** Pending commands keep running when an attached console detaches. */
