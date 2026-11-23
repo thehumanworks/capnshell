@@ -87,6 +87,8 @@ export interface RestartFacts {
     managedByNix: boolean;
     /** It runs this cns's executable. */
     runsThis: boolean;
+    /** systemd drop-ins whose ExecStart runs another cns, whatever the unit file says; see serviceOverrides. */
+    overrides?: string[];
   };
   platform: NodeJS.Platform;
 }
@@ -97,6 +99,13 @@ const SESSIONS_END = "Restarting ends the named sessions it holds.";
 /** What to run so that the daemon runs this cns: restart it, reinstall its service, or update the configuration that owns it. */
 export function restartAdvice(facts: RestartFacts): string {
   const { installed } = facts;
+  const overrides = installed?.overrides ?? [];
+  if (overrides.length) {
+    // Checked first: neither a restart nor a new unit file gets past a drop-in that replaces the command.
+    const [these, replace, theirs] = overrides.length === 1 ? ["The drop-in", "replaces", "the file or its"] : ["The drop-ins", "replace", "the files or their"];
+    return `${these} ${overrides.join(", ")} ${replace} the service's command with another cns, so every restart brings that one back. ` +
+      `Delete ${theirs} ExecStart lines, run systemctl --user daemon-reload, then cns stop, then cns up. ${SESSIONS_END}`;
+  }
   if (installed?.managedByNix) {
     const check = installed.kind === "systemd" ? " If it still runs the old one afterwards, systemctl --user cat cns shows what overrides it." : "";
     return installed.runsThis

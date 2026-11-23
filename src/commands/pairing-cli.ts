@@ -21,7 +21,7 @@ import { RefusingShell } from "../refusing-shell.js";
 import { connectControl, daemonStatePath, removeStaleState, startDaemon, stopDaemon, type ControlConnection, type DaemonStatus } from "./daemon.js";
 import { selfInvocation, selfPath } from "../runtime.js";
 import { CNS_VERSION, daemonDrift, describeVersion, reportedVersion, restartAdvice, versionOrder } from "../version.js";
-import { describeService, installService, installedService, installedServiceRuns, lingering, serviceEnvironment, serviceFailed, serviceFile, serviceKind, serviceLog, serviceName, startService, uninstallService, type ServiceKind } from "../service.js";
+import { describeService, installService, installedService, installedServiceRuns, lingering, serviceEnvironment, serviceFailed, serviceFile, serviceKind, serviceLog, serviceName, serviceOverrides, startService, uninstallService, type ServiceKind } from "../service.js";
 
 /** How long the invited device waits for the inviting person to decide. */
 const PROPOSAL_WAIT_MS = 10 * 60 * 1000;
@@ -192,6 +192,8 @@ export async function up(options: UpOptions): Promise<void> {
  * and commands that use the daemon's links, only once the daemon restarts.
  */
 function driftWarning(status: DaemonStatus, state?: string): string | undefined {
+  // The advice asks the service manager, so skip it when there is no drift to explain.
+  if (versionOrder(reportedVersion(status.version)) === "same") return undefined;
   const self = { version: CNS_VERSION, executable: selfPath() };
   const installed = installedService(daemonStatePath(state));
   return daemonDrift({
@@ -199,7 +201,12 @@ function driftWarning(status: DaemonStatus, state?: string): string | undefined 
     self,
     advice: restartAdvice({
       service: status.service,
-      ...installed ? { installed: { kind: installed.kind, ...installedServiceRuns(installed, self.executable) } } : {},
+      ...installed ? {
+        installed: {
+          kind: installed.kind, ...installedServiceRuns(installed, self.executable),
+          overrides: serviceOverrides(installed.kind, self.executable).map(printable),
+        },
+      } : {},
       platform: process.platform,
     }),
     which: process.platform === "win32" ? "Get-Command cns" : "command -v cns",
