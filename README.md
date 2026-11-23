@@ -123,6 +123,24 @@ studio $ cns tty laptop
 - **Revoking a bot and reusing its name.** On the admin, `cns mesh remove NAME BOT --unpair` removes the member and the direct pairing that holds its name. Other members drop the old key when they receive the updated list. Without `--unpair`, membership ends but the pairing and its grants remain. If you already removed the member, check its fingerprint in `cns peer list`, then run `cns peer remove BOT` on the admin to free the name. A new token for that name has a **new key**: give the replacement bot its own private configuration directory.
 - **Trust.** Joining a mesh trusts its admin to choose who else may reach this device, within what `--allow` lets them do here. Someone who steals the admin's identity can add a device to every member's list, and that device then gets what each member allows members; `cns mesh allow NAME none`, or `cns mesh leave NAME`, on a member shuts it out there. Every member learns the other members' public keys and names, and the addresses the admin saved for them. [docs/adr/0005-meshes.md](docs/adr/0005-meshes.md) and [docs/adr/0006-mesh-bot-tokens.md](docs/adr/0006-mesh-bot-tokens.md) have the design.
 
+### Mesh secrets
+
+Members of a mesh can share secrets, such as API keys: one member sets a secret, and every member that may read it gets a copy, including members that join later and bots.
+
+```sh
+laptop $ cns secret set home OPENAI_API_KEY                   # asks for the value, hidden
+laptop $ op read op://dev/npm/token | cns secret set home NPM_TOKEN --device ci
+studio $ cns secret get home OPENAI_API_KEY                   # prints the value
+studio $ cns secret list home                                 # names, never values
+laptop $ cns secret rm home NPM_TOKEN --device ci
+```
+
+- **Who reads it.** Without `--device`, every member of the mesh, now and later. With `--device NAME`, only that member and the device that set it. On a device, `get` returns the secret set for it alone before the mesh's; `get --device NAME` returns the one set for that member, which only it and the device that set it can read.
+- **Who changes it.** Only the device that set a secret changes or removes it; `set` on another member refuses the name and says where to run it.
+- **Values.** `set` reads the value from a hidden prompt, or from stdin less one final line break, never from an argument, so it stays out of `ps` and shell history. `get` prints it on stdout, with a line break only at a terminal. Values hold up to 16 KiB; names are environment variable names. A device keeps up to 64 secrets per mesh.
+- **How it travels.** The value is encrypted once per version, and its key is sealed to the device key of each member that may read it. Each device keeps its copy in `secrets/` in the configuration directory as a private file that holds only ciphertext, so `get` works offline. Daemons pass secrets to each other over their encrypted links, beside the member list; the relay and the gateway see nothing they can open. A change reaches linked members within seconds, and others when they next link to any member. The setting device's daemon must run for its first copies to go out.
+- **Leaving.** A member removed from the mesh, or that leaves it, deletes its copies and gets no new versions, but keeps what it read: after losing a device, change its secrets at their source and set them again. Once the admin removes a member, the others delete the secrets it set. [docs/adr/0007-mesh-secrets.md](docs/adr/0007-mesh-secrets.md) has the design.
+
 ## Multiple peers
 
 `cns attach` opens a console on the local daemon, which lists and selects the devices linked to it:
@@ -516,7 +534,7 @@ Pushing a tag `vX.Y.Z` that matches `package.json`'s version runs `.github/workf
 
 ## Security
 
-A paired device can do on this one what it was granted, as the user running the daemon: `shell` and `sessions:create` amount to running any command. Grant only what a device needs, and revoke it with `cns peer revoke`. A member of a mesh this device joined can do what `cns mesh allow` lets members do here (see [Meshes](#meshes)). Only paired devices that authenticate with their identities can connect, and every link is encrypted end to end (see [Paired devices](#paired-devices)), so the daemon listens on every interface by default; `--bind` narrows it. Browser-origin WebSocket requests are rejected.
+A paired device can do on this one what it was granted, as the user running the daemon: `shell` and `sessions:create` amount to running any command. Grant only what a device needs, and revoke it with `cns peer revoke`. A member of a mesh this device joined can do what `cns mesh allow` lets members do here (see [Meshes](#meshes)), and can read the secrets set for every member of that mesh (see [Mesh secrets](#mesh-secrets)). Only paired devices that authenticate with their identities can connect, and every link is encrypted end to end (see [Paired devices](#paired-devices)), so the daemon listens on every interface by default; `--bind` narrows it. Browser-origin WebSocket requests are rejected.
 
 Daemon control uses authenticated Cap’n Web RPC on a separate loopback endpoint, with its token in private local state. Keep the state directory private. Peer selection prevents accidental routing; it is not an authorization boundary or sandbox.
 

@@ -115,6 +115,37 @@ export function createCli(): Command {
   mesh.command("list [name]").description("List this device's meshes and their members")
     .option("--json", "Print a JSON array: { name, admin, version, issuedAt, allow, members: [{ name, fingerprint, admin, limit }] } per mesh")
     .action(async (name: string | undefined, options) => { (await meshCommands()).listMeshesCommand(name, options); });
+  const secret = program.command("secret").description("Keep secrets, such as API keys, that every member of a mesh can read, or one member only")
+    .addHelpText("after", [
+      "",
+      "laptop $ cns secret set home OPENAI_API_KEY                  (asks for the value, hidden)",
+      "laptop $ op read op://dev/npm/token | cns secret set home NPM_TOKEN --device ci",
+      "studio $ cns secret get home OPENAI_API_KEY                  (prints the value)",
+      "",
+      "A secret set without --device reaches every member of the mesh, now and later, bots included;",
+      "with --device, only that member and the device that set it can read it. On a device, get returns",
+      "the one set for it alone before the mesh's. Values are never arguments, so they stay out of ps",
+      "and shell history. Each device keeps its copies encrypted to its own key, and daemons pass them",
+      "on over their encrypted links, sealed to each member that may read them. Only the device that set",
+      "a secret changes or removes it. A member removed from the mesh drops its copies and gets no new",
+      "versions, but keeps what it read.",
+    ].join("\n"));
+  const secretCommands = () => import("./commands/secret-cli.js");
+  const deviceOption = ["--device <name>", "Only this member, besides the device that sets it, may read it"] as const;
+  secret.command("set <mesh> <name>").description("Set or change a secret: the value comes from a hidden prompt, or from stdin")
+    .option(...deviceOption)
+    .option("--state <path>", "Local daemon state file")
+    .action(async (mesh: string, name: string, options) => { await (await secretCommands()).setSecret(mesh, name, options); });
+  secret.command("get <mesh> <name>").description("Print a secret's value: the one set for this device alone, else the mesh's")
+    .option("--device <name>", "The one set for this member alone")
+    .action(async (mesh: string, name: string, options) => { await (await secretCommands()).getSecret(mesh, name, options); });
+  secret.command("list [mesh]").description("List the secrets this device can read, by name; never their values")
+    .option("--json", "Print a JSON array: { mesh, name, for, setBy, version, setAt } per secret; for is null for the whole mesh")
+    .action(async (mesh: string | undefined, options) => { await (await secretCommands()).listSecrets(mesh, options); });
+  secret.command("rm <mesh> <name>").description("Remove a secret this device set, from every member")
+    .option("--device <name>", "The one set for this member alone")
+    .option("--state <path>", "Local daemon state file")
+    .action(async (mesh: string, name: string, options) => { await (await secretCommands()).removeSecret(mesh, name, options); });
   const gateway = program.command("gateway").description("Administer the gateway that lets Claude's connectors reach devices paired with it")
     .addHelpText("after", "\nThe gateway is a Cloudflare Worker you deploy (gateway/README.md). Commands are signed with this\ndevice's identity, which the gateway accepts when its public key is in the gateway's OWNER_KEYS.\nThe gateway's address is CNS_GATEWAY, or --url, or https://gateway.cns.nothuman.work.");
   const gatewayCommand = (name: string, description: string) => gateway.command(name).description(description)
