@@ -3,6 +3,7 @@ import { errorMessage } from "./errors.js";
 import { verify, type Identity, type PublicKey } from "./identity.js";
 import { meshFiles, peerNamePattern, removePeerFile, validatePeerUrl } from "./peer-files.js";
 import { expandGrants, grantsSchema, listPeers, publicKeySchema, savePairedPeer, updatePairedPeer, type PairedPeer, type PeerEntry, type Permission } from "./peers.js";
+import { pruneSecrets } from "./secrets.js";
 
 /**
  * A mesh: devices that all reach each other because one device, the mesh's admin, lists
@@ -227,7 +228,8 @@ export function removeMesh(name: string): void {
  * Bring this device's records in line with every mesh's list (planMesh), and say what
  * changed. Records of a mesh this device no longer has go first. A device dropped from one
  * mesh may be in another, which can take it only once the first has let go of its record,
- * so a pass that removed records is followed by one more.
+ * so a pass that removed records is followed by one more. Secrets this device may no longer
+ * keep, such as those of a mesh it left or of a member removed from one, go too (secrets.ts).
  */
 export function applyMeshes(self: PublicKey, now = Date.now()): MeshPlan {
   const states = listMeshes();
@@ -252,5 +254,6 @@ export function applyMeshes(self: PublicKey, now = Date.now()): MeshPlan {
     }
     if (!removed) break;
   }
+  pruneSecrets(self, states);
   return total;
 }

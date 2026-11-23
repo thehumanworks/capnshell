@@ -65,14 +65,36 @@ export function verify(publicKey: PublicKey, data: Uint8Array, signature: Uint8A
   return verifyBytes(null, data, key, signature);
 }
 
+/**
+ * The 32-byte private seed of each identity this process loaded or made, kept off the
+ * Identity object so that nothing that is handed an identity passes the seed on by accident.
+ */
+const seeds = new WeakMap<Identity, Uint8Array>();
+
 function identityFrom(file: IdentityFile): Identity {
-  const privateKey: KeyObject = createPrivateKey({ key: Buffer.from(file.privateKey, "base64url"), format: "der", type: "pkcs8" });
+  const der = Buffer.from(file.privateKey, "base64url");
+  const privateKey: KeyObject = createPrivateKey({ key: der, format: "der", type: "pkcs8" });
   const derived = (createPublicKey(privateKey).export({ format: "der", type: "spki" }) as Buffer).subarray(-PUBLIC_KEY_BYTES).toString("base64url");
   if (derived !== file.publicKey) throw new Error(`Identity file is inconsistent: its public key does not belong to its private key: ${identityPath()}`);
-  return {
+  const identity: Identity = {
     publicKey: file.publicKey, fingerprint: fingerprint(file.publicKey), createdAt: file.createdAt,
     sign: (data) => new Uint8Array(signBytes(null, data, privateKey)),
   };
+  // An Ed25519 PKCS#8 key is a fixed 16-byte header followed by the seed.
+  seeds.set(identity, new Uint8Array(der.subarray(-32)));
+  return identity;
+}
+
+/**
+ * Hand this identity's private seed to `use`, such as to open what was sealed to its key
+ * (secrets.ts), and wipe the copy afterwards. Only identities read from a file or made by
+ * generateIdentity have one.
+ */
+export function withSeed<T>(identity: Identity, use: (seed: Uint8Array) => T): T {
+  const seed = seeds.get(identity);
+  if (!seed) throw new Error("This identity's private key is not available here.");
+  const copy = new Uint8Array(seed);
+  try { return use(copy); } finally { copy.fill(0); }
 }
 
 /** A fresh identity that is not stored anywhere, for tests and pairing dry runs. */
