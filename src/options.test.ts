@@ -100,6 +100,10 @@ test("mcp uses the daemon's linked devices, or one named paired device", { skip:
   assert.equal(parseMcp([], { CNS_CWD: "/srv" }).cwd, "/srv");
   assert.deepEqual(parseMcp(["--state", "/tmp/d.json"]), { state: "/tmp/d.json", cwd: undefined, http: undefined });
   assert.deepEqual(parseMcp(["studio"]).expect, { name: "studio", publicKey: studio.publicKey, addresses: expected.addresses });
+  assert.deepEqual(parseMcp(["-D", "studio", "-w", "/srv"]).expect, { name: "studio", publicKey: studio.publicKey, addresses: expected.addresses });
+  assert.deepEqual(parseMcp(["-S", "/tmp/d.json"]).state, "/tmp/d.json");
+  assert.deepEqual(parseMcp(["-p", "47382", "-b", "0.0.0.0", "-R"]).http, { bind: "0.0.0.0", port: 47382, remote: true });
+  assert.throws(() => parseMcp(["studio", "--device", "studio"]), /Name the device once/);
 });
 
 test("mcp serves HTTP on loopback unless remote access is explicit", () => {
@@ -244,6 +248,38 @@ test("named session commands take the device, a session name and their own optio
   ]) assert.throws(() => parseOptions(args), `Expected rejection: ${args.join(" ")}`);
 });
 
+test("--device and --session stand in for the DEVICE and NAME arguments, once each", { skip: !posix }, () => {
+  for (const args of [
+    ["run", "--device", "studio", "--", "pwd"], ["run", "-D", "studio", "-n", "--", "pwd"], ["shell", "-D", "studio"], ["sessions", "-D", "studio"],
+    ["keys", "-D", "studio", "-s", "build", "Enter"], ["screen", "--device", "studio", "build"], ["kill", "studio", "--session", "build"],
+  ]) assert.deepEqual(parseOptions(args).expect, expected, args.join(" "));
+  const keys = parseOptions(["keys", "-D", "studio", "-s", "build", "make test", "Enter"]);
+  assert.deepEqual([keys.name, keys.keys], ["build", ["make test", "Enter"]]);
+  assert.deepEqual(parseOptions(["keys", "--device", "studio", "build", "-l", "--", "-n"]).keys, ["-n"]);
+  assert.deepEqual(parseOptions(["keys", "studio", "-s", "build", "C-c"]).keys, ["C-c"]);
+  const screen = parseOptions(["screen", "-D", "studio", "-s", "build", "-H", "20", "-u", "PASS", "-t", "0"]);
+  assert.deepEqual([screen.name, screen.screen, screen.until, screen.timeoutMs], ["build", { history: 20 }, "PASS", 0]);
+  assert.equal(parseOptions(["kill", "-D", "studio", "-s", "build"]).name, "build");
+  assert.equal(parseOptions(["sessions", "-D", "studio", "-j"]).json, true);
+  const run = parseOptions(["run", "-D", "studio", "-w", "/srv", "-t", "5000", "-e", "API_KEY", "--", "make"]);
+  assert.deepEqual([run.cwd, run.timeoutMs, run.secrets, run.command], ["/srv", 5000, ["API_KEY"], "make"]);
+  const shell = parseOptions(["shell", "-D", "studio", "-x", "100", "-y", "30", "-T", "vt100", "-p", "-H", "5", "--", "htop"]);
+  assert.deepEqual([shell.cols, shell.rows, shell.term, shell.screen], [100, 30, "vt100", { history: 5 }]);
+  assert.deepEqual([parseOptions(["shell", "-D", "studio", "-N", "build"]).name, parseOptions(["shell", "-D", "studio", "-a", "build"]).attach], ["build", true]);
+
+  assert.throws(() => parseOptions(["run", "studio", "-D", "studio", "--", "pwd"]), /With --device, give no DEVICE argument/);
+  assert.throws(() => parseOptions(["sessions", "studio", "-D", "studio"]), /Name the device once/);
+  assert.throws(() => parseOptions(["screen", "-D", "studio"]), /screen requires a session's name: cns screen DEVICE NAME, or --session NAME/);
+  assert.throws(() => parseOptions(["screen", "-D", "studio", "-s", "a", "b"]), /screen takes one session name: with --device or --session/);
+  assert.throws(() => parseOptions(["kill", "-s", "build"]), /kill requires a paired device's name: cns kill DEVICE NAME, or --device DEVICE/);
+  assert.throws(() => parseOptions(["keys", "-D", "studio", "-s", "a"]), /keys requires at least one key/);
+  assert.throws(() => parseOptions(["shell", "-D", "--", "ls"]), /--device needs a paired device's name/);
+  assert.throws(() => parseOptions(["screen", "studio", "-s", "--"]), /--session needs a session's name/);
+  for (const args of [["run", "-D", "missing", "--", "pwd"], ["kill", "-D", "studio", "-s", "bad name"], ["keys", "-D", "studio", "-D", "studio", "-s", "a", "Enter"]]) {
+    assert.throws(() => parseOptions(args), `Expected rejection: ${args.join(" ")}`);
+  }
+});
+
 test("shell -d names the session it types into, and what it was given that only a new session can take", { skip: !posix }, () => {
   const first = parseOptions(["shell", "studio", "-d", "--session", "work", "--cwd", "/srv", "--cols", "100", "--", "make", "watch"]);
   assert.deepEqual([first.role, first.detached, first.name, first.attach, first.command, first.startOnly], ["shell", true, "work", false, "make watch", ["cwd", "cols"]]);
@@ -255,9 +291,21 @@ test("shell -d names the session it types into, and what it was given that only 
   assert.deepEqual([unnamed.detached, unnamed.name, unnamed.command], [true, undefined, undefined]);
   assert.equal(parseOptions(["shell", "studio", "--command", "htop"]).command, "htop");
   assert.equal(parseOptions(["shell", "studio"]).detached, undefined);
+  // --screen with -d waits for the command to end and prints what it showed.
+  for (const args of [
+    ["shell", "studio", "-d", "--session", "work", "--screen", "--", "make"],
+    ["shell", "-d", "--session", "work", "--screen", "--device", "studio", "--", "make"],
+    ["shell", "-d", "-s", "work", "-p", "-D", "studio", "-c", "make"],
+  ]) {
+    const screened = parseOptions(args);
+    assert.deepEqual([screened.detached, screened.name, screened.screen, screened.command, screened.expect], [true, "work", { history: 0 }, "make", expected], args.join(" "));
+  }
+  assert.throws(() => parseOptions(["shell", "studio", "-d", "--screen"]), /-d --screen prints what a command shows/);
+  assert.throws(() => parseOptions(["shell", "-d", "--session", "work", "--screen", "--", "make"]), /shell requires a paired device's name: cns shell DEVICE -- command, or --device DEVICE/);
   for (const args of [
     ["shell", "studio", "--session", "work", "--", "ls"], ["shell", "studio", "-d", "--name", "work"], ["shell", "studio", "-d", "--attach", "work"],
-    ["shell", "studio", "-d", "--screen", "--", "ls"], ["shell", "studio", "-d", "--key", "ctrl-]"], ["shell", "studio", "-d", "--kitty-keys"],
+    ["shell", "studio", "-d", "--screen"], ["shell", "studio", "-d", "--screen", "--history", "5", "--", "ls"], ["shell", "-d", "--screen", "--", "ls"],
+    ["shell", "studio", "-d", "--key", "ctrl-]"], ["shell", "studio", "-d", "--kitty-keys"],
     ["shell", "studio", "-d", "--session", "bad name"], ["shell", "studio", "-d", "--session", "a", "--session", "b"],
     ["shell", "studio", "-d", "--command", "ls", "--", "ls"], ["shell", "studio", "-d", "--command", " "], ["run", "studio", "-d", "--", "ls"],
     ["run", "studio", "--command", "ls", "--", "ls"],

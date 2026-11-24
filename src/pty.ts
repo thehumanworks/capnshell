@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { SerializeAddon } from "@xterm/addon-serialize";
@@ -184,6 +185,32 @@ function ptyProgram(command: string | undefined): string[] {
   return [shell, "-l"];
 }
 
+/**
+ * The process group of the session led by `pid` and the group that has its terminal, or
+ * undefined when this system does not say. A shell at its prompt has its terminal; each
+ * command it runs is a job, a group of its own, that has the terminal while it runs.
+ */
+async function terminalGroups(pid: number): Promise<{ own: number; foreground: number } | undefined> {
+  const groups = (own: string | undefined, foreground: string | undefined) => {
+    const [a, b] = [Number(own), Number(foreground)];
+    return Number.isSafeInteger(a) && Number.isSafeInteger(b) && a > 0 && b > 0 ? { own: a, foreground: b } : undefined;
+  };
+  try {
+    if (process.platform === "linux") {
+      // After the program's name, in parentheses: state ppid pgrp session tty_nr tpgid ...
+      const stat = await readFile(`/proc/${pid}/stat`, "utf8");
+      const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+      return groups(fields[2], fields[5]);
+    }
+    const ps = Bun.spawn(["ps", "-o", "pgid=,tpgid=", "-p", String(pid)], { stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+    const [text] = await Promise.all([new Response(ps.stdout).text(), ps.exited]);
+    const [own, foreground] = text.trim().split(/\s+/);
+    return groups(own, foreground);
+  } catch {
+    return undefined;
+  }
+}
+
 function signalGroup(pid: number, signal: NodeJS.Signals): void {
   try { process.kill(-pid, signal); } catch { /* The group has already exited. */ }
 }
@@ -299,6 +326,17 @@ class Pty {
   get size() { return { cols: this.#screen.cols, rows: this.#screen.rows }; }
   get viewers() { return [...this.#viewers].filter((viewer) => viewer.stream).length; }
   get outputBytes() { return this.#emitted; }
+
+  /**
+   * True while a program the session's shell started has the terminal, as while a command
+   * runs; false while the shell has it, waiting at its prompt. Null when that cannot be told:
+   * on Windows, for a session that runs a command of its own, and once the program has ended.
+   */
+  async busy(): Promise<boolean | null> {
+    if (this.command !== null || this.#exit || process.platform === "win32") return null;
+    const groups = await terminalGroups(this.pid);
+    return groups && !this.#exit ? groups.foreground !== groups.own : null;
+  }
 
   write(data: string | Uint8Array): void {
     ptyInputSchema.parse(data);
@@ -696,6 +734,8 @@ export class NamedPty extends PtyControls {
     this.#scope = scope;
   }
   info(): PtySessionInfo { return describe(this.#name, this.#lookup()); }
+  /** Whether the session's shell is running a command: true, false, or null when the device cannot tell. */
+  async busy(): Promise<boolean | null> { return await this.#lookup().busy(); }
   /**
    * Receive the session's output, starting with a redraw of its current screen. A
    * finished session's sink receives its redraw and exit() at once.

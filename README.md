@@ -39,7 +39,7 @@ laptop $ cns shell studio
 | `shell DEVICE [-- '<command>']` | Open an interactive terminal (PTY): a login shell in a session of its own (`shell-1`, `shell-2`, ...), or one command. |
 | `shell DEVICE --name NAME [-- '<command>']` | Start a named PTY session in the background. |
 | `shell DEVICE --attach NAME` | Attach to a named session; Ctrl-] detaches. |
-| `shell DEVICE -d [--session NAME] [-- '<command>']` | Type a command into a shell that keeps running on the device, and return; the first use starts it. |
+| `shell DEVICE -d [--session NAME] [--screen] [-- '<command>']` | Type a command into a shell that keeps running on the device, and return; the first use starts it. With `--screen`, wait for the command to end and print what it showed. |
 | `sessions DEVICE` | List a device's named sessions. |
 | `keys DEVICE NAME KEY...` | Send keys or text to a named session. |
 | `screen DEVICE NAME` | Print a named session's screen, optionally once it shows some text. |
@@ -51,7 +51,7 @@ laptop $ cns shell studio
 | `attach` | Open a console for the local daemon. |
 | `stop` | Stop the local daemon and its sessions. |
 
-Use `cns <command> --help` for options, and `cns --version` for the version of this cns.
+Use `cns <command> --help` for options, and `cns --version` for the version of this cns. Every option has a one-letter form as well, such as `-s` for `--session` and `-D` for `--device`. A command that takes a device or a session name as an argument also takes it as an option, so `cns screen -D studio -s work` is `cns screen studio work`, and `cns ui -D studio -s work` is `cns ui studio/work`.
 
 ## Device identity
 
@@ -308,13 +308,15 @@ cns shell studio -d --session work --command 'git status'                       
 cns screen studio work --until passed                                            # what it printed
 cns shell studio --attach work                                                   # or join it
 name=$(cns shell studio -d -- 'make watch')                                      # no name: the next free shell-N, printed
+cns shell -d -D studio -s work -p -- make test                                   # --screen: waits for it to end, prints what it showed
 cns kill studio work
 ```
 
 - **The session.** The first use of a name starts the session, and says so on stderr; without `--session` it is the next free `shell-N`, and stdout carries that name alone. It is a named session like any other: `cns sessions` lists it, `cns screen` and `cns keys` read and drive it, `cns shell --attach` joins it, and it ends with `cns kill`, when its shell exits or when the device's daemon stops.
 - **The command** is typed at the prompt, followed by Enter, as a person would type it. `cns` returns once it is typed, not when it finishes, and its status stays in the shell: read the screen, or `--until` some text, to know how it went. A program still running in the session receives what is typed, as it would from a keyboard. For a session that is starting `cns` first waits for the prompt, up to five seconds; when none shows it says so and types the command anyway. Stopped while it waits, it types nothing.
+- **Waiting for the result.** With `--screen` (`-p`), `cns` waits for the command to end, prints what the session shows from the line the command was typed on to the prompt after it, and returns, leaving the session running. The command has ended once the shell has the terminal back and nothing new has shown for a moment; the device's cns says which program has the terminal, from 2.1.0 on. An older device's cns, or a Windows device, cannot say, so `cns` waits until nothing new has shown for two seconds and says so: a command that pauses that long is printed before it ends. A command that waits for input, such as a question, keeps `cns` waiting; Ctrl-C stops waiting, exits 130 and leaves the command running. When the shell exits, as with `exit 3`, `cns` prints the screen, says the session ended and exits with the shell's status. It prints at most the device's 1000 lines of scrollback.
 - **What only a new session takes.** `--cwd`, `--timeout`, `--term`, `--cols`, `--rows` and `--secret` describe a session being started. Given for one that already runs, the command is refused and nothing is typed, so a command meant for another directory, or one that needs a secret, never runs without it.
-- **What it is not for.** A session started with a command of its own (`--name NAME -- COMMAND`) is not a shell to type into, and one that has ended takes nothing; both are refused with what to run instead. `-d` does not go with `--name`, `--attach`, `--screen`, `--key` or `--kitty-keys`.
+- **What it is not for.** A session started with a command of its own (`--name NAME -- COMMAND`) is not a shell to type into, and one that has ended takes nothing; both are refused with what to run instead. `-d` does not go with `--name`, `--attach`, `--history`, `--key` or `--kitty-keys`.
 
 ### Switching between sessions
 

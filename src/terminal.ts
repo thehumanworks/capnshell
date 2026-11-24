@@ -21,6 +21,8 @@ export interface RemotePty {
 /** The caller's view of a remote NamedPty stub. */
 export interface RemoteNamedPty {
   info(): Result<PtySessionInfo>;
+  /** Since cns 2.1.0: whether the session's shell is running a command, or null when the device cannot tell. */
+  busy(): Promise<boolean | null>;
   write(data: Uint8Array | string): Promise<unknown>;
   keys(keys: string[], options?: KeysOptions): Promise<unknown>;
   resize(cols: number, rows: number): Promise<unknown>;

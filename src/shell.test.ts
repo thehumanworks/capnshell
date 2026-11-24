@@ -970,3 +970,18 @@ test("Windows PTY sessions run PowerShell on a ConPTY with input, size, screen a
   assert.equal(timedOut.timedOut, true);
   assert.ok(timedOut.elapsedMs < 8000);
 });
+
+test("a named shell session says whether a command has its terminal, and one that runs a command cannot say", { skip: windows }, async (t) => {
+  const previous = process.env.SHELL;
+  process.env.SHELL = "/bin/sh";
+  t.after(() => { if (previous === undefined) delete process.env.SHELL; else process.env.SHELL = previous; });
+  const api = registryFor(t).connect();
+  const shell = api.startPtySession("shell", {});
+  await eventually(async () => shell.info().outputBytes, (bytes) => bytes > 0);
+  assert.equal(await eventually(() => shell.busy(), (busy) => busy === false), false);
+  shell.write("sleep 5\r");
+  assert.equal(await eventually(() => shell.busy(), (busy) => busy === true), true);
+  shell.write("\x03");
+  assert.equal(await eventually(() => shell.busy(), (busy) => busy === false), false);
+  assert.equal(await api.startPtySession("job", { command: "sleep 30" }).busy(), null);
+});

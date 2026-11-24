@@ -123,6 +123,7 @@ class GrantedNamedPty extends RpcTarget {
     require(this.#grants, this.#peer, [permission]);
   }
   info() { this.#check("sessions:view"); return this.#inner.info(); }
+  busy() { this.#check("sessions:view"); return this.#inner.busy(); }
   write(data: string | Uint8Array) { this.#check("sessions:control"); return this.#inner.write(data); }
   keys(keys: string[], options?: KeysOptions) { this.#check("sessions:control"); return this.#inner.keys(keys, options); }
   resize(cols: number, rows: number) { this.#check("sessions:control"); return this.#inner.resize(cols, rows); }

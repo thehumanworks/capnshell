@@ -360,3 +360,28 @@ test("shell -d types commands into a session that stays running, and starts it o
   }
   for (const name of ["work", "job", "shell-1", "shell-2"]) assert.equal((await cli("kill", "studio", name)).code, 0);
 });
+
+test("shell -d --screen types a command, waits for it to end and prints what it showed, leaving the session running", { timeout: 60000, skip: !posix }, async (t) => {
+  const { cli: run } = await studioAndLaptop(t, { SHELL: "/bin/bash" });
+  const cli = async (...args: string[]) => {
+    const { code, stdout, stderr } = await run(args);
+    return { code, stdout, stderr };
+  };
+  // The form with flags only: the command waits a second between its lines, and all of them are printed.
+  const first = await cli("shell", "-d", "-D", "studio", "-s", "build", "-p", "--", "printf 'a\\nb\\n'; sleep 1; echo done:$((40 + 2))");
+  assert.deepEqual([first.code, first.stderr], [0, "cns: started the session build on studio\n"], first.stdout);
+  const lines = first.stdout.split("\n");
+  assert.match(lines[0]!, /printf 'a\\nb\\n'; sleep 1; echo done:\$\(\(40 \+ 2\)\)$/, first.stdout);
+  assert.deepEqual(lines.slice(1, 4), ["a", "b", "done:42"], first.stdout);
+  // The next prints from its own line on, not what came before it, in the same shell.
+  const second = await cli("shell", "studio", "-d", "--session", "build", "--screen", "--", "echo", "second:$((6 * 7))");
+  assert.equal(second.code, 0, second.stderr);
+  assert.match(second.stdout, /echo second:\$\(\(6 \* 7\)\)\nsecond:42\n/);
+  assert.doesNotMatch(second.stdout, /done:42/);
+  const [info] = JSON.parse((await cli("sessions", "studio", "--json")).stdout);
+  assert.deepEqual([info.name, info.running], ["build", true]);
+  // A shell that exits ends the session, and cns exits with its status.
+  const exited = await cli("shell", "studio", "-d", "-s", "build", "-p", "--", "exit", "3");
+  assert.deepEqual([exited.code, exited.stderr], [3, "cns: the session build on studio has ended (exited 3)\n"], exited.stdout);
+  assert.equal((await cli("kill", "-D", "studio", "-s", "build")).code, 0);
+});
