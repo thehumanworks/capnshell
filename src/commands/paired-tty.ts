@@ -155,8 +155,12 @@ export async function attachPaired(config: PeerConfig): Promise<number | typeof 
   try {
     // --kitty-keys passes the kitty keyboard protocol between the session's programs and this
     // terminal: both this terminal and the device's cns must know it.
-    let keyboard = !!config.kittyKeys && terminal && await terminalKeyboard();
-    if (config.kittyKeys && terminal && !keyboard) say("this terminal does not speak the kitty keyboard protocol; --kitty-keys changes nothing here");
+    const speaks = config.kittyKeys && terminal ? await terminalKeyboard() : false;
+    let keyboard = speaks === true;
+    if (config.kittyKeys && terminal && !keyboard) {
+      say(speaks === undefined ? "this terminal did not say in time whether it speaks the kitty keyboard protocol; --kitty-keys changes nothing here"
+        : "this terminal does not speak the kitty keyboard protocol; --kitty-keys changes nothing here");
+    }
     for (;;) {
       const deadline = Date.now() + RECONNECT_MS;
       let wait = RETRY_MIN_MS;
@@ -201,7 +205,7 @@ export async function attachPaired(config: PeerConfig): Promise<number | typeof 
           ...(sized ? { cols: options.cols, rows: options.rows } : {}),
           ...(keys ? { keyboard: true } : {}),
         }), { cols: config.cols, rows: config.rows }, {
-          signal: interrupted.signal, detachKey: detach?.byte, normalScreen: true, keyboard: keys,
+          signal: interrupted.signal, detachKey: detach?.byte, normalScreen: true, keyboard: keys, lateKeyboardReply: speaks === undefined,
           onFirstOutput: reattached, onOutput: (end) => { if (end !== undefined) seen = end; },
           onInputRefused: (reason) => say(`${expect.name} lets this device watch ${session} but not type into it (${explainDenial(printable(reason), expect.name)})`),
         });

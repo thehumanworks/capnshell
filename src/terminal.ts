@@ -5,7 +5,7 @@ import type {
 } from "./shell.js";
 import { MAX_PTY_INPUT_BYTES } from "./shell.js";
 import type { PeerController } from "./console.js";
-import { findControlKey, KEYBOARD_QUERY, keyboardReply, withoutKeyboardReplies } from "./kitty-keyboard.js";
+import { findControlKey, KEYBOARD_QUERY, keyboardReply, withoutKeyboardReplies, withoutLateKeyboardReplies } from "./kitty-keyboard.js";
 import { AttachedScreen, NormalScreen } from "./redraw.js";
 import { BareLineFeeds, QueryFilter } from "./terminal-output.js";
 
@@ -79,6 +79,11 @@ export interface AttachOptions {
    */
   keyboard?: boolean;
   /**
+   * This terminal had not answered terminalKeyboard when it stopped waiting: the answer, when
+   * it comes, is taken out of the input instead of being typed into the session.
+   */
+  lateKeyboardReply?: boolean;
+  /**
    * With `alternateScreen`: the caller has already switched the terminal to its alternate
    * screen and keeps it there, as cns ui does between sessions. On return, only the modes
    * the program set are reset, so moving to the next view never flashes the user's shell.
@@ -125,7 +130,7 @@ export class OutputSink extends RpcTarget implements PtySink {
  * input is forwarded verbatim; its end is not translated into a keystroke, because
  * Ctrl-D would also quit TUIs started with stdin closed.
  */
-export async function attachTerminal(open: OpenPty, options: PtyOptions, { signal, screen, detachKey, alternateScreen, keepAlternateScreen, normalScreen, keyboard, onOutput, onFirstOutput, onInputRefused }: AttachOptions = {}): Promise<AttachResult> {
+export async function attachTerminal(open: OpenPty, options: PtyOptions, { signal, screen, detachKey, alternateScreen, keepAlternateScreen, normalScreen, keyboard, lateKeyboardReply, onOutput, onFirstOutput, onInputRefused }: AttachOptions = {}): Promise<AttachResult> {
   const input = process.stdin;
   const interactive = !!(input.isTTY && process.stdout.isTTY);
   // The remote screen answers the program's terminal queries, such as cursor-position
@@ -229,7 +234,13 @@ export async function attachTerminal(open: OpenPty, options: PtyOptions, { signa
     return writing;
   };
   const onData = (chunk: Buffer | string) => {
-    let data = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+    let data: Uint8Array = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+    if (lateKeyboardReply && interactive) {
+      const input = withoutLateKeyboardReplies(data);
+      data = input.data;
+      if (input.done) lateKeyboardReply = false;
+      if (!data.length) return;
+    }
     // A full-screen program may have the terminal report keys as escape sequences: this finds the key in each form.
     const detach = interactive && detachKey !== undefined ? findControlKey(data, detachKey) : -1;
     if (detach >= 0) data = data.subarray(0, detach);
@@ -274,17 +285,18 @@ const KEYBOARD_REPLY_MS = 1000;
 
 /**
  * Ask this process's terminal whether it speaks the kitty keyboard protocol. Keys typed
- * while it answers stay in the input. False when stdin and stdout are not a terminal.
+ * while it answers stay in the input. False when stdin and stdout are not a terminal, and
+ * undefined when the terminal did not answer in time: its answer may still come, as input.
  */
-export async function terminalKeyboard(): Promise<boolean> {
+export async function terminalKeyboard(): Promise<boolean | undefined> {
   const input = process.stdin;
   if (!input.isTTY || !process.stdout.isTTY) return false;
   const wasRaw = input.isRaw;
   let received = "";
   input.setRawMode(true);
   try {
-    return await new Promise<boolean>((resolve) => {
-      const done = (speaks: boolean) => {
+    return await new Promise<boolean | undefined>((resolve) => {
+      const done = (speaks: boolean | undefined) => {
         clearTimeout(timer);
         input.off("data", onData);
         input.pause();
@@ -295,7 +307,7 @@ export async function terminalKeyboard(): Promise<boolean> {
         const speaks = keyboardReply(received);
         if (speaks !== undefined) done(speaks);
       };
-      const timer = setTimeout(() => done(false), KEYBOARD_REPLY_MS);
+      const timer = setTimeout(() => done(undefined), KEYBOARD_REPLY_MS);
       input.on("data", onData);
       input.resume();
       process.stdout.write(KEYBOARD_QUERY);

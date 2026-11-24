@@ -222,3 +222,17 @@ export function keyboardReply(received: string): boolean | undefined {
 export function withoutKeyboardReplies(received: string): string {
   return received.replace(KEYBOARD_REPLY, "").replace(ATTRIBUTES_REPLY, "");
 }
+
+const LATE_REPLIES = new RegExp(`${KEYBOARD_REPLY.source}|${ATTRIBUTES_REPLY.source}`, "g");
+
+/**
+ * Terminal input without the replies to KEYBOARD_QUERY, for a terminal that had not answered
+ * when cns stopped waiting: its answer is then not typed into the session. `done` once the
+ * device attributes, which come last, have passed. No key a person types sends these.
+ */
+export function withoutLateKeyboardReplies(data: Uint8Array): { data: Uint8Array; done: boolean } {
+  if (!data.includes(0x1b)) return { data, done: false };
+  const text = Buffer.from(data).toString("latin1");
+  const kept = text.replace(LATE_REPLIES, "");
+  return { data: kept.length === text.length ? data : Buffer.from(kept, "latin1"), done: ATTRIBUTES_REPLY.test(text) };
+}

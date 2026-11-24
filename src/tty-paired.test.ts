@@ -69,12 +69,14 @@ function inTerminal(t: TestContext, args: string[], env: Record<string, string>,
  * pseudo-terminal's driver, which converts line feeds as the driver of a real terminal does.
  * Like a real terminal, it keeps the lines that scroll off the top of its normal screen.
  */
-function inEmulator(t: TestContext, args: string[], env: Record<string, string>, cols: number, rows: number, { kitty = false } = {}) {
+function inEmulator(t: TestContext, args: string[], env: Record<string, string>, cols: number, rows: number, { kitty = false, answerAfterMs = 0 } = {}) {
   const screen = new Screen({ cols, rows, scrollback: 1000, allowProposedApi: true });
   t.after(() => screen.dispose());
   /** Everything the emulator sent that nobody typed. */
   const sent: string[] = [];
-  let send = (_text: string) => {};
+  let write = (_text: string) => {};
+  // `answerAfterMs` is a terminal far away, whose answers take that long to arrive.
+  const send = (text: string) => { if (answerAfterMs) setTimeout(() => write(text), answerAfterMs); else write(text); };
   let recent = "";
   // With `kitty` the model speaks the kitty keyboard protocol, as kitty, Ghostty and Rex do.
   // Without it, it stays silent but still notes what it was sent, so a test can see that nothing was.
@@ -83,15 +85,15 @@ function inEmulator(t: TestContext, args: string[], env: Record<string, string>,
     sent.push(reply);
     send(reply.replace("\x1b[?1;2c", "\x1b[?62;22c").replace("\x1b[?2048;0$y", "\x1b[?2048;2$y"));
   });
-  const terminal = inTerminal(t, args, env, { cols, rows, read: (data, write) => {
-    send = write;
+  const terminal = inTerminal(t, args, env, { cols, rows, read: (data, writer) => {
+    write = writer;
     screen.write(data);
     recent = (recent + Buffer.from(data).toString("latin1")).slice(-4096);
     if (!recent.includes("\x1b[?2048h")) return;
     recent = "";
     const report = `\x1b[48;${rows};${cols};0;0t`;
     sent.push(report);
-    write(report);
+    writer(report);
   } });
   /** The rows of the emulator's screen, once it has drawn all it received. */
   const drawn = async () => {
@@ -214,7 +216,7 @@ async function pairedStudio(t: TestContext) {
   return {
     root, cli, pair, laptop, sessions, gone, throughProxy,
     terminal: (dev: { env: Record<string, string> }, args: string[]) => inTerminal(t, args, dev.env),
-    emulator: (dev: { env: Record<string, string> }, args: string[], cols: number, rows: number, options?: { kitty?: boolean }) => inEmulator(t, args, dev.env, cols, rows, options),
+    emulator: (dev: { env: Record<string, string> }, args: string[], cols: number, rows: number, options?: { kitty?: boolean; answerAfterMs?: number }) => inEmulator(t, args, dev.env, cols, rows, options),
   };
 }
 
@@ -692,6 +694,26 @@ test("stopping cns while a program has set the terminal's keyboard mode gives th
   assert.deepEqual(await keyed.keyboard(), [0, 0, 0, 0]);
   assert.equal((await keyed.state()).screen, "normal");
   await gone(name);
+});
+
+// cns waits a second for the terminal's answer. One that comes later used to have nowhere to
+// go but the session, where the shell read it as typed keys.
+test("a terminal that answers too late is treated as one without the protocol, and its answer is not typed into the session", { skip: !posix, timeout: 60000 }, async (t) => {
+  const { laptop, emulator } = await pairedStudio(t);
+  const shell = emulator(laptop, ["tty", "studio", "--kitty-keys"], 100, 12, { kitty: true, answerAfterMs: 2500 });
+  await shell.attached();
+  assert.match(shell.output, /this terminal did not say in time whether it speaks the kitty keyboard protocol; --kitty-keys changes nothing here/);
+  await shell.shows("$");
+  // cat -v shows every byte that reaches the session, the answer included if it did.
+  shell.write("cat -v\r");
+  await pause(2500);
+  assert.deepEqual(shell.sent, ["\x1b[?0u", "\x1b[?1;2c"], "the terminal did answer");
+  shell.write("typed\r");
+  await shell.shows("typed");
+  const rows = (await shell.drawn()).join("\n");
+  assert.doesNotMatch(rows, /0u|22c|\^\[/, rows);
+  shell.write("\x1d");
+  assert.equal(await shell.exited, 0);
 });
 
 test("keys typed while cns asks the terminal about its keyboard reach the session", { skip: !posix, timeout: 60000 }, async (t) => {

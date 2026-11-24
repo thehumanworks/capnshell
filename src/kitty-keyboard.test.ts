@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { findControlKey, KeyboardMode, KeyboardModes, keyboardReply, TerminalKeyboard, withoutKeyboardReplies } from "./kitty-keyboard.js";
+import { findControlKey, KeyboardMode, KeyboardModes, keyboardReply, TerminalKeyboard, withoutKeyboardReplies, withoutLateKeyboardReplies } from "./kitty-keyboard.js";
 
 const CSI = "\x1b[";
 /** Every `CSI prefix params u` in `text`, applied to a terminal's mode. */
@@ -193,4 +193,19 @@ test("a program's full reset leaves nothing for cns to take back from the termin
   // The program starts again from nothing.
   assert.equal(keys.request("=", [1]), `${CSI}>1u`);
   assert.equal(keys.end(), `${CSI}<u`);
+});
+
+test("a terminal's late answer is taken out of the input, and typed keys are not", () => {
+  const late = (text: string) => {
+    const { data, done } = withoutLateKeyboardReplies(Buffer.from(text, "latin1"));
+    return [Buffer.from(data).toString("latin1"), done];
+  };
+  assert.deepEqual(late("ls -la\r"), ["ls -la\r", false]);
+  assert.deepEqual(late(`${CSI}?0u`), ["", false], "the attributes are still to come");
+  assert.deepEqual(late(`l${CSI}?0us${CSI}?62;22c\r`), ["ls\r", true]);
+  assert.deepEqual(late(`${CSI}?1;2c`), ["", true], "a terminal without the protocol answers only the second half");
+  // Keys a terminal reports as escape sequences are not answers.
+  assert.deepEqual(late(`${CSI}A${CSI}93;5u${CSI}1;5C\x1b`), [`${CSI}A${CSI}93;5u${CSI}1;5C\x1b`, false]);
+  const typed = Buffer.from("plain");
+  assert.equal(withoutLateKeyboardReplies(typed).data, typed, "input without an answer is passed as it is");
 });
