@@ -159,6 +159,16 @@ test("-d --screen stops waiting on Ctrl-C and says the command goes on; a shell 
     { code: 3, stdout: "$ exit 3\n", stderr: "cns: the session work on studio has ended (exited 3)\n" });
 });
 
+test("-d --screen ends once the shell has had the terminal back a while, though a job in the background prints on", async (t) => {
+  // The shell never gives the terminal away, and the output never stops.
+  const printing = Array.from({ length: 2000 }, (_, i) => ({ outputBytes: 10 + i }));
+  const studio = device({ work: printing }, { busy: [false], screens: [screen(["$ "], 1, 0), screen(["$ make", "tick", "$ "], 3, 2)] });
+  const began = Date.now();
+  assert.deepEqual(await detached(t, studio, { name: "work", screen: { history: 0 } }, undefined, true), { code: 0, stderr: "", stdout: "$ make\ntick\n$ \n" });
+  assert.ok(Date.now() - began >= fast.guessMs, "ended before the shell had had the terminal for guessMs");
+  assert.ok(Date.now() - began < 2000 * fast.pollMs, "waited for the output to stop");
+});
+
 test("-d says when it typed into a program that was running in the session", async (t) => {
   const studio = device({ work: [{ outputBytes: 5 }] }, { busy: [true] });
   assert.deepEqual(await detached(t, studio, { name: "work" }), { code: 0, stderr: "cns: a program was running in the session work on studio, and the command was typed into it\n" });

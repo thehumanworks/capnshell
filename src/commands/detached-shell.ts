@@ -136,11 +136,15 @@ async function printWhenDone(handle: RemoteNamedPty, typed: { name: string; devi
 /**
  * Wait until the command has ended: the shell has the terminal back and the session has
  * printed nothing for a moment, or, when the device cannot say who has the terminal, has
- * printed nothing for longer. The session's info when it ended, or "stopped" on Ctrl-C.
+ * printed nothing for longer. A job in the background can go on printing after the command
+ * ends, so a shell that has had the terminal back for that longer while is taken as the end
+ * too. The session's info when it ended, or "stopped" on Ctrl-C.
  */
 async function finished(handle: RemoteNamedPty, { bytes: from, known }: { bytes: number; known: boolean }, signal: AbortSignal, { pollMs, endMs, guessMs }: Readiness): Promise<PtySessionInfo | "stopped"> {
   let bytes = from;
   let since = Date.now();
+  /** Since when the shell has had the terminal, while it echoed or printed something. */
+  let back: number | undefined;
   try {
     while (!signal.aborted) {
       await pause(pollMs, signal);
@@ -148,6 +152,8 @@ async function finished(handle: RemoteNamedPty, { bytes: from, known }: { bytes:
       const info = await plain(handle.info());
       if (!info.running) return info;
       const busy = known && await handle.busy();
+      back = busy || !known || info.outputBytes === from ? undefined : back ?? Date.now();
+      if (back !== undefined && Date.now() - back >= guessMs) return info;
       if (busy || info.outputBytes !== bytes) {
         bytes = info.outputBytes;
         since = Date.now();

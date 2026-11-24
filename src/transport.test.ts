@@ -380,6 +380,14 @@ test("shell -d --screen types a command, waits for it to end and prints what it 
   assert.doesNotMatch(second.stdout, /done:42/);
   const [info] = JSON.parse((await cli("sessions", "studio", "--json")).stdout);
   assert.deepEqual([info.name, info.running], ["build", true]);
+  // A job in the background that prints on does not keep it waiting.
+  assert.equal((await cli("shell", "studio", "-d", "-s", "build", "--", "(while :; do echo tick; sleep 0.1; done) &")).code, 0);
+  const began = Date.now();
+  const beside = await cli("shell", "studio", "-d", "-s", "build", "-p", "--", "echo", "third:$((6 * 7))");
+  assert.equal(beside.code, 0, beside.stderr);
+  assert.match(beside.stdout, /^third:42$/m);
+  assert.ok(Date.now() - began < 15000, "waited for the background job");
+  assert.equal((await cli("shell", "studio", "-d", "-s", "build", "--", "kill %1")).code, 0);
   // A shell that exits ends the session, and cns exits with its status.
   const exited = await cli("shell", "studio", "-d", "-s", "build", "-p", "--", "exit", "3");
   assert.deepEqual([exited.code, exited.stderr], [3, "cns: the session build on studio has ended (exited 3)\n"], exited.stdout);
