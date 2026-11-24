@@ -12,3 +12,4 @@ result-*
 relay-token
 .dev.vars
 evals/*/results/
+.claude/worktrees/
