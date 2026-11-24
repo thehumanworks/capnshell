@@ -1,5 +1,6 @@
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { Terminal as Screen } from "@xterm/headless";
+import { TerminalKeyboard } from "./kitty-keyboard.js";
 
 const encoder = new TextEncoder();
 // The serializer writes the normal buffer, then this, then the alternate buffer.
@@ -20,6 +21,8 @@ export function redraw(screen: Screen, serializer: SerializeAddon, { flat = fals
 
 const SWITCHES = new Set(["47", "1047", "1049"]);
 const PRIVATE_MODES = /\x1b\[\?([0-9;]*)([hl])/g;
+// What NormalScreen acts on: private modes, the kitty keyboard protocol's requests, and a full reset.
+const FOLLOWED = /\x1b(?:\[\?([0-9;]*)([hl])|\[([<=>])([0-9;]*)u|c)/g;
 // A private mode sequence that the next chunk may complete.
 const PARTIAL = /\x1b(?:\[(?:\?[0-9;]*)?)?$/;
 
@@ -75,14 +78,23 @@ export class AttachedScreen {
 /**
  * Follows a session shown on a local terminal's normal screen, as ssh shows a shell: lines
  * that scroll off the top go to the terminal's own scrollback, and the program's switches to
- * the alternate screen reach the terminal as they are. This only remembers which screen the
+ * the alternate screen reach the terminal as they are. This remembers which screen the
  * program has the terminal on, so that leaving the session can return it to the normal one.
+ *
+ * With `keyboard`, the terminal speaks the kitty keyboard protocol and the session's output
+ * still holds the program's requests for it. They are replaced by what sets the program's
+ * mode in an entry of cns's own, which leaving the session pops: see TerminalKeyboard.
  *
  * It reads output that QueryFilter has passed, in which no escape sequence is split.
  */
 export class NormalScreen {
   /** The mode that switched the terminal to its alternate screen, while it is on it. */
   #alternate: string | undefined;
+  #keyboard: TerminalKeyboard | undefined;
+
+  constructor({ keyboard = false } = {}) {
+    this.#keyboard = keyboard ? new TerminalKeyboard() : undefined;
+  }
 
   /**
    * What scrolls everything a terminal of `rows` rows shows, down to the cursor's row, into
@@ -90,16 +102,44 @@ export class NormalScreen {
    */
   static scrollAway(rows: number): string { return "\r\n".repeat(rows); }
 
-  /** Note the screen switches in a chunk of output written to the terminal. */
-  follow(data: Uint8Array): void {
-    if (!data.includes(0x1b)) return;
-    for (const match of Buffer.from(data).toString("latin1").matchAll(PRIVATE_MODES)) {
-      for (const mode of match[1]!.split(";")) {
-        if (SWITCHES.has(mode)) this.#alternate = match[2] === "h" ? mode : undefined;
+  /** Note the screen switches in a chunk of output, and return the chunk as the terminal must receive it. */
+  show(data: Uint8Array): Uint8Array {
+    if (!data.includes(0x1b)) return data;
+    const text = Buffer.from(data).toString("latin1");
+    let output = "";
+    let kept = 0;
+    for (const match of text.matchAll(FOLLOWED)) {
+      const end = match.index + match[0].length;
+      let before = "";
+      let after = "";
+      let sequence = match[0];
+      if (match[2]) {
+        for (const mode of match[1]!.split(";")) {
+          if (!SWITCHES.has(mode)) continue;
+          const to = match[2] === "h" ? mode : undefined;
+          if (to && !this.#alternate) after += this.#keyboard?.enter() ?? "";
+          else if (!to && this.#alternate) before += this.#keyboard?.exit() ?? "";
+          this.#alternate = to;
+        }
+      } else if (match[3]) {
+        // Without `keyboard` QueryFilter has removed these, and none arrives here.
+        sequence = this.#keyboard?.request(match[3], match[4]!.split(";").filter(Boolean).map(Number)) ?? "";
+      } else {
+        // A full reset returns the terminal to its normal screen.
+        this.#alternate = undefined;
+        this.#keyboard?.reset();
       }
+      if (!before && !after && sequence === match[0]) continue;
+      output += text.slice(kept, match.index) + before + sequence + after;
+      kept = end;
     }
+    return kept ? Buffer.from(output + text.slice(kept), "latin1") : data;
   }
 
-  /** What returns the terminal to its normal screen: nothing when it is on it. */
-  leave(): string { return this.#alternate ? `\x1b[?${this.#alternate}l` : ""; }
+  /** What returns the terminal to its normal screen and to its own keyboard mode: nothing when it has both. */
+  leave(): string {
+    const sequence = `${this.#keyboard?.exit() ?? ""}${this.#alternate ? `\x1b[?${this.#alternate}l` : ""}${this.#keyboard?.end() ?? ""}`;
+    this.#alternate = undefined;
+    return sequence;
+  }
 }

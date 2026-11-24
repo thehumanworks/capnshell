@@ -13,7 +13,9 @@
  *
  *   - queries: device attributes, status and cursor reports, mode and setting requests,
  *     window reports, colour and clipboard reads, capability and graphics probes;
- *   - the kitty keyboard protocol, so that keys such as the detach key stay single bytes;
+ *   - the kitty keyboard protocol, so that keys such as the detach key stay single bytes.
+ *     A terminal that passes the protocol on (cns tty --kitty-keys) keeps the program's
+ *     requests, for NormalScreen to act on (src/redraw.ts); the query goes either way;
  *   - in-band resize reports (mode 2048). A program that receives them ignores its PTY's
  *     size, and so never follows a terminal of another size that attaches later.
  *
@@ -39,7 +41,7 @@ const READABLE_OSC = /^(?:4|5|1[0-9]|21|52);/;
 const GRAPHICS_QUERY = /(?:^|,)a=q(?:,|$)/;
 
 /** What to write in place of a complete CSI sequence: undefined keeps it as it is. */
-function csi(prefix: string, params: string, intermediates: string, final: string): string | undefined {
+function csi(prefix: string, params: string, intermediates: string, final: string, keyboard: boolean): string | undefined {
   if (intermediates === "$") return "pwu".includes(final) ? "" : undefined; // DECRQM, DECRQPSR, DECRQTSR
   if (intermediates === "*") return final === "y" ? "" : undefined; // DECRQCRA
   if (intermediates) return undefined;
@@ -48,7 +50,7 @@ function csi(prefix: string, params: string, intermediates: string, final: strin
     case "c": return prefix === "?" ? undefined : "";
     case "n": return prefix === "" || prefix === "?" ? "" : undefined; // DSR, CPR, DECXCPR
     // The kitty keyboard protocol: its query and its flags. A bare `CSI u` restores the cursor.
-    case "u": return prefix ? "" : undefined;
+    case "u": return prefix === "?" || (prefix && !keyboard) ? "" : undefined;
     case "q": return prefix === ">" ? "" : undefined; // XTVERSION
     case "t": return prefix === "" && WINDOW_REPORTS.has(params.split(";")[0]!) ? "" : undefined;
     case "x": return prefix === "" ? "" : undefined; // DECREQTPARM
@@ -67,6 +69,10 @@ function csi(prefix: string, params: string, intermediates: string, final: strin
 
 export class QueryFilter {
   #carry = "";
+  #keyboard: boolean;
+
+  /** `keyboard` keeps the kitty keyboard protocol's requests, for a terminal that passes them on. */
+  constructor({ keyboard = false } = {}) { this.#keyboard = keyboard; }
 
   /** The part of a chunk of session output that an attached terminal may show. */
   filter(data: Uint8Array): Uint8Array {
@@ -119,7 +125,7 @@ export class QueryFilter {
         CSI_PARTIAL.lastIndex = at;
         return CSI_PARTIAL.test(text) ? undefined : at + 1;
       }
-      const replacement = csi(match[1]!, match[2]!, match[3]!, match[4]!);
+      const replacement = csi(match[1]!, match[2]!, match[3]!, match[4]!, this.#keyboard);
       if (replacement !== undefined) replace(CSI.lastIndex, replacement);
       return CSI.lastIndex;
     }

@@ -72,17 +72,17 @@ test("screen switches split across chunks are still caught", async () => {
 test("a session on the normal screen leaves the alternate screen the way its program entered it", () => {
   const screen = new NormalScreen();
   assert.equal(screen.leave(), "");
-  screen.follow(Buffer.from("$ vim\r\n\x1b[?1049h\x1b[2J"));
+  screen.show(Buffer.from("$ vim\r\n\x1b[?1049h\x1b[2J"));
   assert.equal(screen.leave(), "\x1b[?1049l");
-  screen.follow(Buffer.from("\x1b[?25l text \x1b[?1049l$ "));
+  screen.show(Buffer.from("\x1b[?25l text \x1b[?1049l$ "));
   assert.equal(screen.leave(), "");
   // Among other modes, and the older switches.
-  screen.follow(Buffer.from("\x1b[?1;47;25h"));
+  screen.show(Buffer.from("\x1b[?1;47;25h"));
   assert.equal(screen.leave(), "\x1b[?47l");
-  screen.follow(Buffer.from("\x1b[?47l\x1b[?1047h\x1b[?1h"));
+  screen.show(Buffer.from("\x1b[?47l\x1b[?1047h\x1b[?1h"));
   assert.equal(screen.leave(), "\x1b[?1047l");
   // The last switch in a chunk decides, as it does for the terminal.
-  screen.follow(Buffer.from("\x1b[?1047l\x1b[?1049h\x1b[?1049l"));
+  screen.show(Buffer.from("\x1b[?1047l\x1b[?1049h\x1b[?1049l"));
   assert.equal(screen.leave(), "");
 });
 
@@ -103,4 +103,39 @@ test("what a terminal shows is scrolled into its scrollback before a redraw clea
   assert.deepEqual(kept.slice(0, 7), ["1", "2", "3", "4", "5", "6", "7"]);
   local.dispose();
   full.dispose();
+});
+
+test("a session's output reaches the terminal as it is, unless the terminal is told the program's keyboard mode", () => {
+  const output = Buffer.from("$ vim\r\n\x1b[?1049h\x1b[2J text \x1b[?1049l\x1bc$ ", "latin1");
+  // Without the kitty protocol nothing is rewritten: the same bytes, not a copy.
+  assert.equal(new NormalScreen().show(output), output);
+  assert.equal(new NormalScreen({ keyboard: true }).show(output), output);
+  // A terminal that does not pass the protocol on never has the program's requests typed at it.
+  assert.equal(Buffer.from(new NormalScreen().show(Buffer.from("a\x1b[>5ub\x1b[<uc"))).toString("latin1"), "abc");
+});
+
+test("with the kitty protocol, the program's keyboard mode goes into an entry cns pushes and takes back", () => {
+  const screen = new NormalScreen({ keyboard: true });
+  const shown = (text: string) => Buffer.from(screen.show(Buffer.from(text, "latin1"))).toString("latin1");
+  // A redraw that starts with the mode a shell had set, then an editor that sets its own.
+  assert.equal(shown("\x1b[=1;1u\x1b[0m\x1b[H\x1b[2J$ "), "\x1b[>1u\x1b[0m\x1b[H\x1b[2J$ ");
+  assert.equal(shown("vim\r\n\x1b[?1049h\x1b[>15u\x1b[2J"), "vim\r\n\x1b[?1049h\x1b[>0u\x1b[=15;1u\x1b[2J");
+  // Leaving from the editor: its entry goes while the terminal is still on the alternate screen.
+  assert.equal(screen.leave(), "\x1b[<u\x1b[?1049l\x1b[<u");
+  assert.equal(screen.leave(), "");
+
+  // The editor leaving by itself pops before the switch back, and the shell's mode stays.
+  const again = new NormalScreen({ keyboard: true });
+  const next = (text: string) => Buffer.from(again.show(Buffer.from(text, "latin1"))).toString("latin1");
+  assert.equal(next("\x1b[>1u\x1b[?1049h\x1b[>5u"), "\x1b[>1u\x1b[?1049h\x1b[>0u\x1b[=5;1u");
+  assert.equal(next("\x1b[<u\x1b[?1049l$ "), "\x1b[=0;1u\x1b[<u\x1b[?1049l$ ");
+  assert.equal(again.leave(), "\x1b[<u");
+  // A program that only pops, as one does that pushed before cns attached, sends nothing.
+  const quiet = new NormalScreen({ keyboard: true });
+  assert.equal(Buffer.from(quiet.show(Buffer.from("a\x1b[<ub"))).toString("latin1"), "ab");
+  assert.equal(quiet.leave(), "");
+  // After a full reset the terminal holds nothing of cns's.
+  const reset = new NormalScreen({ keyboard: true });
+  reset.show(Buffer.from("\x1b[>5u\x1b[?1049h\x1bc"));
+  assert.equal(reset.leave(), "");
 });

@@ -5,6 +5,7 @@ import type {
 } from "./shell.js";
 import { MAX_PTY_INPUT_BYTES } from "./shell.js";
 import type { PeerController } from "./console.js";
+import { findControlKey, KEYBOARD_QUERY, keyboardReply, withoutKeyboardReplies } from "./kitty-keyboard.js";
 import { AttachedScreen, NormalScreen } from "./redraw.js";
 import { BareLineFeeds, QueryFilter } from "./terminal-output.js";
 
@@ -72,6 +73,12 @@ export interface AttachOptions {
    */
   normalScreen?: boolean;
   /**
+   * With `normalScreen`: this terminal speaks the kitty keyboard protocol (terminalKeyboard
+   * says) and the session was attached with `keyboard`, so the program's requests for the
+   * protocol reach the terminal. Leaving the session gives the terminal its own mode back.
+   */
+  keyboard?: boolean;
+  /**
    * With `alternateScreen`: the caller has already switched the terminal to its alternate
    * screen and keeps it there, as cns ui does between sessions. On return, only the modes
    * the program set are reset, so moving to the next view never flashes the user's shell.
@@ -118,7 +125,7 @@ export class OutputSink extends RpcTarget implements PtySink {
  * input is forwarded verbatim; its end is not translated into a keystroke, because
  * Ctrl-D would also quit TUIs started with stdin closed.
  */
-export async function attachTerminal(open: OpenPty, options: PtyOptions, { signal, screen, detachKey, alternateScreen, keepAlternateScreen, normalScreen, onOutput, onFirstOutput, onInputRefused }: AttachOptions = {}): Promise<AttachResult> {
+export async function attachTerminal(open: OpenPty, options: PtyOptions, { signal, screen, detachKey, alternateScreen, keepAlternateScreen, normalScreen, keyboard, onOutput, onFirstOutput, onInputRefused }: AttachOptions = {}): Promise<AttachResult> {
   const input = process.stdin;
   const interactive = !!(input.isTTY && process.stdout.isTTY);
   // The remote screen answers the program's terminal queries, such as cursor-position
@@ -139,9 +146,9 @@ export async function attachTerminal(open: OpenPty, options: PtyOptions, { signa
   if (signal?.aborted) throw new Error("PTY session cancelled.");
   signal?.addEventListener("abort", abort, { once: true });
   const local = interactive && alternateScreen ? new AttachedScreen(size().cols, size().rows) : undefined;
-  const inline = interactive && normalScreen && !local ? new NormalScreen() : undefined;
+  const inline = interactive && normalScreen && !local ? new NormalScreen({ keyboard }) : undefined;
   // Only a terminal answers queries and converts line feeds; a file or a pipe gets every byte.
-  const terminal = process.stdout.isTTY ? { queries: new QueryFilter(), lineFeeds: new BareLineFeeds() } : undefined;
+  const terminal = process.stdout.isTTY ? { queries: new QueryFilter({ keyboard: !!(inline && keyboard) }), lineFeeds: new BareLineFeeds() } : undefined;
   const print = (data: Uint8Array | string) => new Promise((resolve) => process.stdout.write(data, resolve));
   let closed = false;
   let drawn = false;
@@ -157,8 +164,8 @@ export async function attachTerminal(open: OpenPty, options: PtyOptions, { signa
       if (inline) await print(NormalScreen.scrollAway(process.stdout.rows || size().rows));
       if (closed) return;
     }
-    inline?.follow(translated);
-    await print(terminal ? terminal.lineFeeds.keep(translated) : translated);
+    const followed = inline ? inline.show(translated) : translated;
+    await print(terminal ? terminal.lineFeeds.keep(followed) : followed);
   };
   const sink = new OutputSink(write, finish, (reason) => finish({ detached: reason }), onOutput);
   // Switch before any output arrives; leaving the alternate screen restores the user's.
@@ -223,7 +230,8 @@ export async function attachTerminal(open: OpenPty, options: PtyOptions, { signa
   };
   const onData = (chunk: Buffer | string) => {
     let data = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
-    const detach = interactive && detachKey !== undefined ? data.indexOf(detachKey) : -1;
+    // A full-screen program may have the terminal report keys as escape sequences: this finds the key in each form.
+    const detach = interactive && detachKey !== undefined ? findControlKey(data, detachKey) : -1;
     if (detach >= 0) data = data.subarray(0, detach);
     // Hold further input until the peer has accepted this chunk.
     input.pause();
@@ -258,6 +266,44 @@ export async function attachTerminal(open: OpenPty, options: PtyOptions, { signa
     restore();
     process.off("exit", onExit);
     pty[Symbol.dispose]();
+  }
+}
+
+/** How long a terminal has to answer KEYBOARD_QUERY. Every terminal answers its second half at once. */
+const KEYBOARD_REPLY_MS = 1000;
+
+/**
+ * Ask this process's terminal whether it speaks the kitty keyboard protocol. Keys typed
+ * while it answers stay in the input. False when stdin and stdout are not a terminal.
+ */
+export async function terminalKeyboard(): Promise<boolean> {
+  const input = process.stdin;
+  if (!input.isTTY || !process.stdout.isTTY) return false;
+  const wasRaw = input.isRaw;
+  let received = "";
+  input.setRawMode(true);
+  try {
+    return await new Promise<boolean>((resolve) => {
+      const done = (speaks: boolean) => {
+        clearTimeout(timer);
+        input.off("data", onData);
+        input.pause();
+        resolve(speaks);
+      };
+      const onData = (chunk: Buffer | string) => {
+        received += Buffer.from(chunk as Buffer).toString("latin1");
+        const speaks = keyboardReply(received);
+        if (speaks !== undefined) done(speaks);
+      };
+      const timer = setTimeout(() => done(false), KEYBOARD_REPLY_MS);
+      input.on("data", onData);
+      input.resume();
+      process.stdout.write(KEYBOARD_QUERY);
+    });
+  } finally {
+    try { input.setRawMode(wasRaw); } catch {}
+    const typed = withoutKeyboardReplies(received);
+    if (typed) input.unshift(Buffer.from(typed, "latin1"));
   }
 }
 

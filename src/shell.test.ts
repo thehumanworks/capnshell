@@ -712,6 +712,51 @@ test("finished named sessions keep their screen; late viewers get the redraw and
   assert.deepEqual(api.ptySessions(), []);
 });
 
+// What changed: a session never said its terminal speaks the kitty keyboard protocol, so
+// programs could not tell Shift+Enter from Enter. It says so now while a terminal that passes
+// the protocol on is attached, and such a terminal's redraw starts with the program's mode.
+test("a session speaks the kitty keyboard protocol only while a terminal that passes it on is attached", { skip: windows }, async (t) => {
+  // Asks as programs do: the keyboard mode, then device attributes, which always answer.
+  const ask = "printf '\\033[?u\\033[c'; IFS= read -rs -d c reply; printf ' %s=%s\\n' \"$1\" \"$(printf %s \"$reply\" | tr -d '\\033' | tr '[' :)\"";
+  const session = registryFor(t).connect().startPtySession("keys", {
+    cols: 60, rows: 8,
+    command: `ask() { ${ask}; }; ask alone; read -r _; ask watched; read -r _; printf '\\033[>1u\\033[>5u'; ask pushed; read -r _; printf '\\033[?1049h\\033[=8;1u'; ask editor; read -r _; ask after`,
+  });
+  // Nobody attached: silence, then the attributes. That is a terminal without the protocol.
+  assert.match((await session.wait({ text: "alone=", timeoutMs: 10000 })).screen.text, /alone=:\?1;2$/m);
+  // A terminal that does not pass the protocol on changes nothing.
+  const plain = ptySink();
+  const watching = session.attach(plain.sink);
+  session.keys(["Enter"]);
+  assert.match((await session.wait({ text: "watched=", timeoutMs: 10000 })).screen.text, /watched=:\?1;2$/m);
+  assert.doesNotMatch(plain.output, /\x1b\[[<=>][0-9;]*u/);
+  // One that does: the session answers with the mode in force, which the program then sets.
+  const first = ptySink();
+  const attachment = session.attach(first.sink, { keyboard: true });
+  session.keys(["Enter"]);
+  assert.match((await session.wait({ text: "pushed=", timeoutMs: 10000 })).screen.text, /pushed=:\?5u:\?1;2$/m);
+  // The alternate screen has a mode of its own.
+  session.keys(["Enter"]);
+  assert.match((await session.wait({ text: "editor=", timeoutMs: 10000 })).screen.text, /editor=:\?8u:\?1;2$/m);
+  // A terminal attaching now is told both: the normal screen's mode and its stack before the
+  // redraw, which ends on the alternate screen, and that screen's mode after it.
+  const late = ptySink();
+  const joined = session.attach(late.sink, { keyboard: true });
+  await late.waitFor("editor=");
+  joined[Symbol.dispose]();
+  assert.match(late.output, /^\x1b\[=0;1u\x1b\[>1u\x1b\[>5u\x1b\[0m\x1b\[H\x1b\[2J[^]*\x1b\[\?1049h[^]*\x1b\[=8;1u$/);
+  const other = ptySink();
+  const unaware = session.attach(other.sink);
+  await other.waitFor("editor=");
+  unaware[Symbol.dispose]();
+  assert.doesNotMatch(other.output, /\x1b\[[<=>][0-9;]*u/, "a terminal that does not pass the protocol on is sent no keyboard mode");
+  // Once the terminals that pass it on are gone, the session stops saying it speaks it.
+  attachment[Symbol.dispose]();
+  watching[Symbol.dispose]();
+  session.keys(["Enter"]);
+  assert.match((await session.wait({ text: "after=", timeoutMs: 10000 })).screen.text, /after=:\?1;2$/m);
+});
+
 test("named sessions answer terminal queries unless an attached terminal does", { skip: windows }, async (t) => {
   const session = registryFor(t).connect().startPtySession("queries", {
     cols: 40, rows: 4,

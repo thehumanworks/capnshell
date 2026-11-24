@@ -8,6 +8,7 @@ import type { TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { connectControl, stopDaemon } from "./commands/daemon.js";
 import { makePrivateDirectory } from "./config.js";
+import { KeyboardModes } from "./kitty-keyboard.js";
 import { selfInvocation } from "./runtime.js";
 
 export const PROJECT_ROOT = fileURLToPath(new URL("../", import.meta.url));
@@ -57,7 +58,7 @@ export async function unusedPort(host = LOOPBACK): Promise<string> {
 
 /** Keep user CLI defaults out of tests unless explicitly supplied. */
 export function cliEnvironment(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
-  return { ...process.env, CNS_BIND: undefined, CNS_PORT: undefined, CNS_CWD: undefined, CNS_KEY: undefined, ...overrides };
+  return { ...process.env, CNS_BIND: undefined, CNS_PORT: undefined, CNS_CWD: undefined, CNS_KEY: undefined, CNS_KITTY_KEYS: undefined, ...overrides };
 }
 
 /** Exercise actual CLI processes, keeping exact streams available for run assertions. */
@@ -195,4 +196,33 @@ export async function settledLink(control: Awaited<ReturnType<typeof connectCont
     if (Date.now() > deadline) throw new Error(`No settled link to ${name}`);
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
+}
+
+/** The part of a model terminal (an @xterm/headless Terminal) that kittyKeyboard needs. */
+interface ModelTerminal {
+  buffer: { active: { type: string } };
+  parser: { registerCsiHandler(id: { prefix?: string; final: string }, callback: (params: (number | number[])[]) => boolean): unknown };
+}
+
+/**
+ * Make a model terminal speak the kitty keyboard protocol, as kitty and Ghostty do: it keeps
+ * a keyboard mode for each of its screens and answers `CSI ? u` through `reply`. Returns the
+ * mode of the screen it shows: `flags` in force and `depth` of what is pushed under them.
+ */
+export function kittyKeyboard(screen: ModelTerminal, reply: (text: string) => void) {
+  const modes = new KeyboardModes();
+  const mode = () => screen.buffer.active.type === "alternate" ? modes.alternate : modes.main;
+  for (const prefix of [">", "<", "="]) {
+    screen.parser.registerCsiHandler({ prefix, final: "u" }, (params) => {
+      mode().apply(prefix, params.map((param) => typeof param === "number" ? param : param[0] ?? 0));
+      return true;
+    });
+  }
+  screen.parser.registerCsiHandler({ prefix: "?", final: "u" }, () => { reply(`\x1b[?${mode().flags}u`); return true; });
+  return {
+    get flags() { return mode().flags; },
+    get depth() { return mode().depth; },
+    /** Both screens: the flags in force and the depth, normal screen first. */
+    get all() { return [modes.main.flags, modes.main.depth, modes.alternate.flags, modes.alternate.depth]; },
+  };
 }

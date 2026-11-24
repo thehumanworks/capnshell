@@ -8,7 +8,7 @@ import test, { type TestContext } from "node:test";
 import { Client, type CallToolResult } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { Terminal as Screen } from "@xterm/headless";
-import { cliEnvironment, cliInvocation, launchCli, unusedPort } from "./test-support.js";
+import { cliEnvironment, cliInvocation, kittyKeyboard, launchCli, unusedPort } from "./test-support.js";
 
 const posix = process.platform !== "win32";
 const decoder = new TextDecoder();
@@ -69,13 +69,16 @@ function inTerminal(t: TestContext, args: string[], env: Record<string, string>,
  * pseudo-terminal's driver, which converts line feeds as the driver of a real terminal does.
  * Like a real terminal, it keeps the lines that scroll off the top of its normal screen.
  */
-function inEmulator(t: TestContext, args: string[], env: Record<string, string>, cols: number, rows: number) {
+function inEmulator(t: TestContext, args: string[], env: Record<string, string>, cols: number, rows: number, { kitty = false } = {}) {
   const screen = new Screen({ cols, rows, scrollback: 1000, allowProposedApi: true });
   t.after(() => screen.dispose());
   /** Everything the emulator sent that nobody typed. */
   const sent: string[] = [];
   let send = (_text: string) => {};
   let recent = "";
+  // With `kitty` the model speaks the kitty keyboard protocol, as kitty, Ghostty and Rex do.
+  // Without it, it stays silent but still notes what it was sent, so a test can see that nothing was.
+  const keyboard = kittyKeyboard(screen, (reply) => { if (kitty) { sent.push(reply); send(reply); } });
   screen.onData((reply) => {
     sent.push(reply);
     send(reply.replace("\x1b[?1;2c", "\x1b[?62;22c").replace("\x1b[?2048;0$y", "\x1b[?2048;2$y"));
@@ -106,6 +109,19 @@ function inEmulator(t: TestContext, args: string[], env: Record<string, string>,
     sent,
     drawn,
     scrollback,
+    /** The emulator's keyboard mode, once it has read all it received: flags and depth of the normal screen, then of the alternate one. */
+    keyboard: async () => {
+      await new Promise<void>((resolve) => screen.write("", resolve));
+      return keyboard.all;
+    },
+    /** Wait until the emulator's keyboard mode is `mode`. */
+    keyboardIs: async (mode: number[]) => {
+      for (const end = Date.now() + 15000; ; await pause(20)) {
+        await new Promise<void>((resolve) => screen.write("", resolve));
+        if (keyboard.all.join() === mode.join()) return;
+        if (Date.now() > end) throw new Error(`Waiting for the keyboard mode ${mode.join()}; it is ${keyboard.all.join()}`);
+      }
+    },
     /** The emulator's state now: which screen it shows, where its cursor is and what it reports. */
     state: async () => {
       await new Promise<void>((resolve) => screen.write("", resolve));
@@ -198,7 +214,7 @@ async function pairedStudio(t: TestContext) {
   return {
     root, cli, pair, laptop, sessions, gone, throughProxy,
     terminal: (dev: { env: Record<string, string> }, args: string[]) => inTerminal(t, args, dev.env),
-    emulator: (dev: { env: Record<string, string> }, args: string[], cols: number, rows: number) => inEmulator(t, args, dev.env, cols, rows),
+    emulator: (dev: { env: Record<string, string> }, args: string[], cols: number, rows: number, options?: { kitty?: boolean }) => inEmulator(t, args, dev.env, cols, rows, options),
   };
 }
 
@@ -588,6 +604,103 @@ test("--key names the key that detaches, and none sends every key to the session
   all.write("exit 5\r");
   assert.equal(await all.exited, 5);
   assert.match((await cli(laptop, ["tty", "studio", "--key", "C-c"])).stderr, /--key cannot be Ctrl-C: the session needs it/);
+});
+
+// Asks as programs do: the keyboard mode, then device attributes, which every terminal answers.
+const ASK_KEYBOARD = `printf '\\033[?u\\033[c'; IFS= read -rs -d c reply; printf 'speaks=%s.\\n' "$(printf %s "$reply" | tr -d '\\033' | tr '[' :)"`;
+
+// What changed: cns tty kept the kitty keyboard protocol from the terminal, so a program on
+// the device saw Shift+Enter as Enter. With --kitty-keys the session says its terminal speaks
+// the protocol, the terminal is put in the program's mode, and the detach key, which then
+// arrives as an escape sequence, still detaches.
+test("--kitty-keys gives a session's program the terminal's kitty keyboard protocol, and the detach key keeps detaching", { skip: !posix, timeout: 60000 }, async (t) => {
+  const { laptop, sessions, emulator } = await pairedStudio(t);
+  const shell = emulator(laptop, ["tty", "studio", "--kitty-keys"], 100, 12, { kitty: true });
+  const name = await shell.attached();
+  await shell.shows("$");
+  // cns asked the terminal once, before attaching; nothing the session asks reaches it.
+  assert.deepEqual(shell.sent, ["\x1b[?0u", "\x1b[?1;2c"]);
+  shell.write(`${ASK_KEYBOARD}\r`);
+  await shell.shows("speaks=:?0u:?1;2.");
+  assert.equal(shell.sent.length, 2, "the session's screen answers, not the terminal");
+  assert.deepEqual(await shell.keyboard(), [0, 0, 0, 0], "a program that sets no mode leaves the terminal's alone");
+  // The program asks for a mode: the terminal has it, in one entry of cns's.
+  shell.write("printf '\\033[>5u'; cat -v\r");
+  await shell.keyboardIs([5, 1, 0, 0]);
+  // Shift+Enter, as the terminal now reports it, reaches the program as its own key.
+  shell.write("\x1b[13;2u\r");
+  await shell.shows("^[[13;2u");
+  // Ctrl-], as the terminal now reports it.
+  shell.write("\x1b[93;5u");
+  assert.equal(await shell.exited, 0);
+  assert.match(shell.output, new RegExp(`detached from ${name}; it keeps running on studio`));
+  assert.deepEqual(await shell.keyboard(), [0, 0, 0, 0], "detaching gives the terminal its own keyboard mode back");
+  assert.deepEqual(await sessions(), [name]);
+
+  // A terminal that joins later is put in the mode the program set before it came.
+  const back = emulator(laptop, ["tty", "studio", "--attach", name, "--kitty-keys"], 100, 12, { kitty: true });
+  await back.shows("cat -v");
+  await back.keyboardIs([5, 1, 0, 0]);
+  // A full-screen program's own mode, on the alternate screen, and the way out of it.
+  back.write("\x03");
+  await pause(300);
+  back.write("printf '\\033[?1049h\\033[>15u\\033[3;1Heditor'; cat -v\r");
+  await back.shows("editor");
+  await back.keyboardIs([5, 1, 15, 1]);
+  // Ctrl-], as a terminal reports it to a program that asked for modifyOtherKeys.
+  back.write("\x1b[27;5;93~");
+  assert.equal(await back.exited, 0);
+  assert.deepEqual(await back.keyboard(), [0, 0, 0, 0]);
+  assert.equal((await back.state()).screen, "normal");
+
+  // Without --kitty-keys the same terminal is asked nothing and keeps its mode.
+  const plain = emulator(laptop, ["tty", "studio", "--attach", name], 100, 12, { kitty: true });
+  await plain.shows("editor");
+  assert.deepEqual(plain.sent, []);
+  assert.deepEqual(await plain.keyboard(), [0, 0, 0, 0]);
+  plain.write("\x1d");
+  assert.equal(await plain.exited, 0);
+});
+
+test("--kitty-keys at a terminal without the protocol says so and changes nothing", { skip: !posix, timeout: 60000 }, async (t) => {
+  const { laptop, emulator } = await pairedStudio(t);
+  const shell = emulator(laptop, ["tty", "studio", "--kitty-keys"], 100, 12);
+  await shell.attached();
+  assert.match(shell.output, /this terminal does not speak the kitty keyboard protocol; --kitty-keys changes nothing here/);
+  await shell.shows("$");
+  shell.write(`${ASK_KEYBOARD}\r`);
+  await shell.shows("speaks=:?1;2.");
+  // A program that sets a mode without asking gets nowhere, and Ctrl-] is a byte as ever.
+  shell.write("printf '\\033[>5u'; cat -v\r");
+  await pause(300);
+  assert.deepEqual(await shell.keyboard(), [0, 0, 0, 0]);
+  shell.write("\x1d");
+  assert.equal(await shell.exited, 0);
+});
+
+test("stopping cns while a program has set the terminal's keyboard mode gives the terminal its own mode back", { skip: !posix, timeout: 60000 }, async (t) => {
+  const { laptop, gone, emulator } = await pairedStudio(t);
+  // CNS_KITTY_KEYS is the same setting as --kitty-keys.
+  const keyed = emulator({ env: { ...laptop.env, CNS_KITTY_KEYS: "1" } }, ["tty", "studio"], 100, 12, { kitty: true });
+  const name = await keyed.attached();
+  await keyed.shows("$");
+  keyed.write("printf '\\033[>1u\\033[?1049h\\033[>15u\\033[3;1Hfull-screen'; cat\r");
+  await keyed.shows("full-screen");
+  await keyed.keyboardIs([1, 1, 15, 1]);
+  keyed.terminate();
+  assert.equal(await keyed.exited, 143);
+  assert.deepEqual(await keyed.keyboard(), [0, 0, 0, 0]);
+  assert.equal((await keyed.state()).screen, "normal");
+  await gone(name);
+});
+
+test("keys typed while cns asks the terminal about its keyboard reach the session", { skip: !posix, timeout: 60000 }, async (t) => {
+  const { laptop, emulator } = await pairedStudio(t);
+  const shell = emulator(laptop, ["tty", "studio", "--kitty-keys"], 100, 12, { kitty: true });
+  // Typed before cns has started, so it is waiting when the terminal's answers arrive.
+  shell.write("echo early-$((40+2)); exit 6\r");
+  assert.equal(await shell.exited, 6);
+  assert.match(shell.output, /early-42/);
 });
 
 test("a device that may only watch sessions does not land in another terminal's session", { skip: !posix, timeout: 60000 }, async (t) => {

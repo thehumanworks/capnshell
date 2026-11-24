@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { Terminal as Screen } from "@xterm/headless";
+import { kittyKeyboard } from "./test-support.js";
 
 const posix = process.platform !== "win32";
 
@@ -48,4 +49,48 @@ test("an error that ends cns while a full-screen program has the terminal still 
     { screen: screen.buffer.active.type, mouse: screen.modes.mouseTrackingMode, bracketedPaste: screen.modes.bracketedPasteMode },
     { screen: "normal", mouse: "none", bracketedPaste: false },
   );
+});
+
+// A session whose shell and editor each set a keyboard mode with the kitty protocol, attached
+// by a process that passes the protocol on and then fails with an error nothing catches.
+const FAILING_WITH_KEYS = String.raw`
+import { attachTerminal } from ${JSON.stringify(path.join(import.meta.dirname, "terminal.ts"))};
+void attachTerminal(async (sink) => {
+  await sink.output(Buffer.from("\x1b[=1;1u\x1b[0m\x1b[H\x1b[2J$ vim\r\n\x1b[?1049h\x1b[>15u\x1b[3;1Hfull-screen"), 10);
+  setTimeout(() => { throw new Error("the failure nothing catches"); }, 300);
+  return { write() {}, resize() {}, capture: async () => { throw new Error("unused"); }, [Symbol.dispose]() {} };
+}, {}, { normalScreen: true, keyboard: true });
+`;
+
+// Without this, a terminal left in a program's keyboard mode types codes such as 9;5u into
+// the shell for every key with a modifier, until the user runs reset.
+test("an error that ends cns while a program has set the terminal's keyboard mode gives the terminal its own mode back", { skip: !posix }, async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "cns-terminal-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const script = path.join(dir, "failing-with-keys.ts");
+  await writeFile(script, FAILING_WITH_KEYS);
+  const screen = new Screen({ cols: 80, rows: 10, scrollback: 100, allowProposedApi: true });
+  t.after(() => screen.dispose());
+  const keyboard = kittyKeyboard(screen, () => {});
+  // The terminal's own mode, from before cns ran: one a shell had pushed.
+  await new Promise<void>((resolve) => screen.write("\x1b[>3u", resolve));
+  assert.deepEqual(keyboard.all, [3, 1, 0, 0]);
+  let taken = false;
+  const child = Bun.spawn([process.execPath, script], {
+    terminal: {
+      cols: 80, rows: 10, name: "xterm-256color",
+      data: (_terminal, data) => {
+        screen.write(data.slice(), () => {
+          // The editor's mode on the alternate screen, the shell's on the normal one under it.
+          if (keyboard.all.join() === "1,2,15,1") taken = true;
+        });
+      },
+    },
+  });
+  t.after(() => { if (child.exitCode === null) child.kill(); });
+  assert.notEqual(await child.exited, 0);
+  await new Promise<void>((resolve) => screen.write("", resolve));
+  assert.equal(taken, true, "the programs never set the terminal's keyboard mode, so the test shows nothing");
+  assert.equal(screen.buffer.active.type, "normal");
+  assert.deepEqual(keyboard.all, [3, 1, 0, 0]);
 });

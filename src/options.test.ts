@@ -39,7 +39,7 @@ after(() => {
 // Exercise Commander's real environment handling without inheriting user defaults
 // or leaking an individual test's environment to other tests.
 function withEnvironment<T>(env: NodeJS.ProcessEnv, parse: () => T): T {
-  const names = ["CNS_BIND", "CNS_PORT", "CNS_CWD", "CNS_KEY"];
+  const names = ["CNS_BIND", "CNS_PORT", "CNS_CWD", "CNS_KEY", "CNS_KITTY_KEYS"];
   const saved = names.map((name) => process.env[name]);
   try {
     for (const name of names) {
@@ -174,6 +174,17 @@ test("tty --key names the key that detaches, CNS_KEY does when it is not given, 
   // The key belongs to terminals: other commands neither take it nor read CNS_KEY.
   assert.equal(parseOptions(["run", "studio", "--", "pwd"], { CNS_KEY: "bogus" }).detachKey, undefined);
   assert.throws(() => parseOptions(["run", "studio", "--key", "C-b", "--", "pwd"]));
+});
+
+test("tty --kitty-keys is off unless asked for, on the command line or with CNS_KITTY_KEYS", { skip: !posix }, () => {
+  assert.equal(parseOptions(["tty", "studio"]).kittyKeys, undefined);
+  assert.equal(parseOptions(["tty", "studio", "--kitty-keys"]).kittyKeys, true);
+  assert.equal(parseOptions(["tty", "studio", "--attach", "build", "--kitty-keys"]).kittyKeys, true);
+  for (const on of ["1", "true", "YES", " on "]) assert.equal(parseOptions(["tty", "studio"], { CNS_KITTY_KEYS: on }).kittyKeys, true, on);
+  for (const off of ["", "0", "false", "no", "off", "2"]) assert.equal(parseOptions(["tty", "studio"], { CNS_KITTY_KEYS: off }).kittyKeys, undefined, off);
+  // It belongs to terminals: other commands neither take it nor read the variable.
+  assert.equal(parseOptions(["run", "studio", "--", "pwd"], { CNS_KITTY_KEYS: "1" }).kittyKeys, undefined);
+  assert.throws(() => parseOptions(["run", "studio", "--kitty-keys", "--", "pwd"]));
 });
 
 test("tty opens a login shell or one quoted command with optional terminal settings", { skip: !posix }, () => {

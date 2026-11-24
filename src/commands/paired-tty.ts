@@ -6,7 +6,8 @@ import type { PeerConfig } from "../options.js";
 import { openDeviceLink } from "../device-link.js";
 import { secureReady } from "../secure.js";
 import type { PtySessionInfo, PtySessionOptions, ShellApi } from "../shell.js";
-import { attachTerminal, ConnectionLost, DETACH_KEY, plain, type RemoteNamedPty } from "../terminal.js";
+import { findControlKey } from "../kitty-keyboard.js";
+import { attachTerminal, ConnectionLost, DETACH_KEY, plain, terminalKeyboard, type RemoteNamedPty } from "../terminal.js";
 import { afterOpenFailure, RETRY_MIN_MS, sessionReplaced } from "../tty-recovery.js";
 import { commandExitCode, describeExit } from "./one-shot.js";
 
@@ -70,6 +71,8 @@ export async function startTerminal(remote: RpcStub<ShellApi>, options: PtySessi
  * The session is shown on the terminal's normal screen, as ssh shows a shell: its lines
  * scroll into the terminal's own scrollback, where the wheel and the terminal's keys reach
  * them. cns takes one key from the session, the detach key (--key, CNS_KEY), or none.
+ * With --kitty-keys, programs that ask for the kitty keyboard protocol get it from this
+ * terminal, and so tell keys such as Shift+Enter from Enter: see kitty-keyboard.ts.
  *
  * Either way, when the connection drops, keep trying to reach the device again for
  * RECONNECT_MS, then reattach to the same session, reporting how much output was written
@@ -116,8 +119,8 @@ export async function attachPaired(config: PeerConfig): Promise<number | typeof 
   let dropped = 0;
   const discard = (chunk: Buffer | string) => {
     const data = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
-    if (data.includes(CTRL_C)) { exitOnSignal = 130; interrupted.abort(); return; }
-    if (detach && data.includes(detach.byte)) { gaveUp = true; interrupted.abort(); return; }
+    if (findControlKey(data, CTRL_C) >= 0) { exitOnSignal = 130; interrupted.abort(); return; }
+    if (detach && findControlKey(data, detach.byte) >= 0) { gaveUp = true; interrupted.abort(); return; }
     dropped += data.length;
   };
   const disconnectedInput = (on: boolean) => {
@@ -150,6 +153,10 @@ export async function attachPaired(config: PeerConfig): Promise<number | typeof 
     return exitOnSignal;
   };
   try {
+    // --kitty-keys passes the kitty keyboard protocol between the session's programs and this
+    // terminal: both this terminal and the device's cns must know it.
+    let keyboard = !!config.kittyKeys && terminal && await terminalKeyboard();
+    if (config.kittyKeys && terminal && !keyboard) say("this terminal does not speak the kitty keyboard protocol; --kitty-keys changes nothing here");
     for (;;) {
       const deadline = Date.now() + RECONNECT_MS;
       let wait = RETRY_MIN_MS;
@@ -190,12 +197,20 @@ export async function attachPaired(config: PeerConfig): Promise<number | typeof 
       first = false;
       try {
         const sized = !!process.stdout.isTTY || config.cols !== undefined || config.rows !== undefined;
-        const result = await attachTerminal((sink, options) => connected.session.attach(sink, {
+        const attach = (keys: boolean) => attachTerminal((sink, options) => connected.session.attach(sink, {
           ...(sized ? { cols: options.cols, rows: options.rows } : {}),
+          ...(keys ? { keyboard: true } : {}),
         }), { cols: config.cols, rows: config.rows }, {
-          signal: interrupted.signal, detachKey: detach?.byte, normalScreen: true,
+          signal: interrupted.signal, detachKey: detach?.byte, normalScreen: true, keyboard: keys,
           onFirstOutput: reattached, onOutput: (end) => { if (end !== undefined) seen = end; },
           onInputRefused: (reason) => say(`${expect.name} lets this device watch ${session} but not type into it (${explainDenial(printable(reason), expect.name)})`),
+        });
+        const result = await attach(keyboard).catch((error: unknown) => {
+          // A cns from before --kitty-keys refuses an attach option it does not know.
+          if (!keyboard || !/unrecognized.key/i.test(errorMessage(error)) || !/keyboard/.test(errorMessage(error))) throw error;
+          keyboard = false;
+          say(`${expect.name} runs a cns from before --kitty-keys, which changes nothing until cns is updated there`);
+          return attach(false);
         });
         if (result.exit) {
           // This terminal's session ends with its program; one joined with --attach keeps its final screen for others.

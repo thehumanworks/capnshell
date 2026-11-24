@@ -214,3 +214,12 @@ test("output is not changed in place, and is the same chunk when nothing changes
   assert.equal(raw.toString("latin1"), "one\ntwo");
   assert.equal(Buffer.from(kept).toString("latin1"), "one\x0btwo");
 });
+
+test("a terminal that passes the kitty keyboard protocol on keeps the program's requests, not its question", () => {
+  const passing = new QueryFilter({ keyboard: true });
+  const text = (data: Uint8Array) => Buffer.from(data).toString("latin1");
+  assert.equal(text(passing.filter(bytes("a\x1b[?u\x1b[cb\x1b[>5u\x1b[=1;2u\x1b[<2uc"))), "ab\x1b[>5u\x1b[=1;2u\x1b[<2uc");
+  // A request split between chunks arrives whole.
+  assert.equal(text(passing.filter(bytes("x\x1b[>1"))), "x");
+  assert.equal(text(passing.filter(bytes("5uy"))), "\x1b[>15uy");
+});

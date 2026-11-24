@@ -7,6 +7,7 @@ import { RpcTarget } from "capnweb";
 import treeKill from "tree-kill";
 import { z } from "zod";
 import { encodeKeys, MAX_KEYS } from "./keys.js";
+import { KeyboardModes } from "./kitty-keyboard.js";
 import { redraw } from "./redraw.js";
 import { bash, commandSchema, MAX_TIMEOUT_MS, optionsSchema, powershell, powershellArgs } from "./platform.js";
 
@@ -75,6 +76,12 @@ const attachOptionsSchema = z.strictObject({
   rows: dimension.optional(),
   /** The viewer's own terminal answers queries, so the screen stops answering them. */
   answers: z.boolean().default(false),
+  /**
+   * The viewer's terminal speaks the kitty keyboard protocol and the viewer passes it on:
+   * while it is attached, the screen tells programs that ask that their terminal speaks it,
+   * and the viewer's redraw starts with the keyboard mode the program has set.
+   */
+  keyboard: z.boolean().default(false),
 });
 export type AttachOptions = z.input<typeof attachOptionsSchema>;
 const ptyInputSchema = z.union([z.string(), z.instanceof(Uint8Array)])
@@ -148,6 +155,7 @@ interface Viewer {
   sink: SinkStub;
   stream: boolean;
   answers: boolean;
+  keyboard: boolean;
   queue: Uint8Array[];
   /** The output offset after each queued item. */
   ends: number[];
@@ -197,6 +205,8 @@ class Pty {
   #terminal: Bun.Terminal;
   #screen: Screen;
   #serializer = new SerializeAddon();
+  /** The keyboard mode the program has set with the kitty keyboard protocol: kitty-keyboard.ts. */
+  #keyboard = new KeyboardModes();
   #title = "";
   #viewers = new Set<Viewer>();
   #waiters = new Set<Waiter>();
@@ -219,6 +229,20 @@ class Pty {
       if (![...this.#viewers].some((viewer) => viewer.answers) && !this.#ended && !this.#terminal.closed) this.#terminal.write(reply);
     };
     this.#screen.onData(answer);
+    const keyboard = () => this.#screen.buffer.active.type === "alternate" ? this.#keyboard.alternate : this.#keyboard.main;
+    for (const prefix of [">", "<", "="]) {
+      this.#screen.parser.registerCsiHandler({ prefix, final: "u" }, (params) => {
+        keyboard().apply(prefix, params.map((param) => typeof param === "number" ? param : param[0] ?? 0));
+        return true;
+      });
+    }
+    // A program takes silence, followed by the device attributes it asks for next, as a
+    // terminal that does not speak the protocol: the answer when no viewer passes it on.
+    this.#screen.parser.registerCsiHandler({ prefix: "?", final: "u" }, () => {
+      if ([...this.#viewers].some((viewer) => viewer.keyboard)) answer(`\x1b[?${keyboard().flags}u`);
+      return true;
+    });
+    this.#screen.parser.registerEscHandler({ final: "c" }, () => { this.#keyboard.reset(); return false; });
     this.#screen.parser.registerDcsHandler({ intermediates: "+", final: "q" }, (names) => {
       for (const name of names.split(";")) answer(`\x1bP${CAPABILITIES.has(name.toUpperCase()) ? 1 : 0}+r${name}\x1b\\`);
       return true;
@@ -349,7 +373,7 @@ class Pty {
    * Add a viewer. A replay first draws the current screen, so a terminal attaching
    * mid-session shows what the program has drawn so far.
    */
-  view(sink: SinkStub, { stream, answers, replay, owner }: { stream: boolean; answers: boolean; replay: boolean; owner: boolean }): Viewer {
+  view(sink: SinkStub, { stream, answers, keyboard = false, replay, owner }: { stream: boolean; answers: boolean; keyboard?: boolean; replay: boolean; owner: boolean }): Viewer {
     this.#live();
     if (this.#viewers.size >= MAX_VIEWERS) throw new Error("Too many viewers are attached to this PTY session.");
     let ready!: () => void;
@@ -357,7 +381,7 @@ class Pty {
     const at = this.#emitted;
     const viewer: Viewer = {
       // Parameters are released after the call returns; keep our own reference.
-      sink: sink.dup?.() ?? sink, stream, answers, owner, queue: [], ends: [], lastEnd: at, queued: 0,
+      sink: sink.dup?.() ?? sink, stream, answers, keyboard, owner, queue: [], ends: [], lastEnd: at, queued: 0,
       ready: new Promise((resolve) => { ready = resolve; }), paused: replay, gone: false,
     };
     this.#viewers.add(viewer);
@@ -366,7 +390,9 @@ class Pty {
       // replay holds exactly the output received before this viewer was added.
       this.#screen.write("", () => {
         if (!viewer.gone) {
-          const data = encoder.encode(redraw(this.#screen, this.#serializer));
+          // The redraw draws the normal screen first, and ends on the one the program is on.
+          const keys = keyboard ? { before: this.#keyboard.main.replay(), after: this.#screen.buffer.active.type === "alternate" ? this.#keyboard.alternate.replay() : "" } : undefined;
+          const data = encoder.encode(`${keys?.before ?? ""}${redraw(this.#screen, this.#serializer)}${keys?.after ?? ""}`);
           viewer.queue.unshift(data);
           viewer.ends.unshift(at);
           viewer.queued += data.length;
@@ -676,11 +702,11 @@ export class NamedPty extends PtyControls {
    */
   attach(sink: PtySink, options: AttachOptions = {}): PtyAttachment {
     if (!sink || (typeof sink !== "object" && typeof sink !== "function")) throw new Error("A PTY sink is required.");
-    const { cols, rows, answers } = attachOptionsSchema.parse(options);
+    const { cols, rows, answers, keyboard } = attachOptionsSchema.parse(options);
     const pty = this.#lookup();
     // The latest viewer's terminal size wins, as in tmux.
     if (cols !== undefined || rows !== undefined) pty.resize(cols ?? pty.size.cols, rows ?? pty.size.rows);
-    return new PtyAttachment(this.#lookup, pty.view(sink as SinkStub, { stream: true, answers, replay: true, owner: false }), this.#scope);
+    return new PtyAttachment(this.#lookup, pty.view(sink as SinkStub, { stream: true, answers, keyboard, replay: true, owner: false }), this.#scope);
   }
   /** Hang up if still running and remove the session. Resolves with how it ended. */
   async kill(): Promise<PtyExit> { return await this.#registry.kill(this.#name, this.#lookup()); }
