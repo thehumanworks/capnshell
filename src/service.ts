@@ -207,6 +207,26 @@ export function installedServiceRuns(service: { kind: ServiceKind; path: string 
   return { managedByNix: target.startsWith(store), runsThis: contents.includes(needle) };
 }
 
+/**
+ * The systemd drop-ins whose ExecStart runs something other than `executable`. Whatever the unit
+ * file says, every restart then brings back what they name, such as a runtime drop-in left under
+ * /run/user/UID/systemd/user/cns.service.d from an earlier recovery. Empty for launchd, and when
+ * systemd cannot say.
+ */
+export function serviceOverrides(kind: ServiceKind, executable: string, runner: Runner = runCommand): string[] {
+  if (kind !== "systemd") return [];
+  const result = runner("systemctl", ["--user", "show", SERVICE_UNIT, "--property=DropInPaths", "--value"]);
+  if (result.code !== 0) return [];
+  return result.output.split(/\s+/).filter((file) => {
+    if (!path.posix.isAbsolute(file)) return false;
+    let contents: string;
+    try { contents = readFileSync(file, "utf8"); } catch { return false; }
+    // A bare `ExecStart=` only clears the unit's command; the lines after it set the new one.
+    const commands = [...contents.matchAll(/^[ \t]*ExecStart[ \t]*=[ \t]*(\S.*)$/gm)].map((match) => match[1]!);
+    return commands.some((command) => !command.includes(executable));
+  });
+}
+
 /** Start an installed daemon that is not running, as after cns stop. */
 export function startService(kind: ServiceKind, runner: Runner = runCommand): void {
   if (kind === "launchd") must(runner, "launchctl", ["kickstart", `${launchdDomain()}/${SERVICE_LABEL}`]);

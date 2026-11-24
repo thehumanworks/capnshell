@@ -3,7 +3,7 @@ import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { installService, installedService, installedServiceRuns, launchdPlist, serviceEnvironment, serviceFailed, serviceFile, servicePath, systemdUnit, uninstallService, type Runner, type ServiceSpec } from "./service.js";
+import { installService, installedService, installedServiceRuns, launchdPlist, serviceEnvironment, serviceFailed, serviceFile, serviceOverrides, servicePath, systemdUnit, uninstallService, type Runner, type ServiceSpec } from "./service.js";
 import { launchCli, unusedPort } from "./test-support.js";
 
 const spec: ServiceSpec = {
@@ -171,6 +171,36 @@ test("the Nix modules run the daemon command that cns up --install writes", asyn
     const words = /\[\s*(?:exe\s+)?((?:"[^"]*"\s+)+)"--state"/.exec(source)?.[1]?.match(/"[^"]*"/g)?.map((word) => JSON.parse(word));
     assert.deepEqual(words, ["daemon", "--service"], module);
   }
+});
+
+test("systemd drop-ins whose ExecStart runs another cns are found, others are not", { skip: process.platform === "win32" }, async (t) => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-service-overrides-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const self = "/nix/store/new-capnweb-shell-1.8.0/bin/cns";
+  const files = {
+    // As left on a device: the unit's command cleared, then replaced with an older cns.
+    recovery: "[Service]\nExecStart=\nExecStart=/nix/store/old-capnweb-shell-1.0.0/bin/cns daemon --service --state /home/a/.cns/daemon.json\nRestartSec=30s\n",
+    limits: "[Unit]\nStartLimitBurst=5\n[Service]\nRestartSec=30s\nExecStartPre=/bin/true\n# ExecStart=/opt/old/cns\n",
+    clearOnly: "[Service]\nExecStart=\n",
+    sameCns: `[Service]\nExecStart=\nExecStart="${self}" "daemon" "--service"\n`,
+  };
+  const paths = Object.fromEntries(await Promise.all(Object.entries(files).map(async ([name, contents]) => {
+    const file = path.join(root, `${name}.conf`);
+    await writeFile(file, contents);
+    return [name, file] as const;
+  })));
+  const calls: string[][] = [];
+  const shows = (output: string, code = 0): Runner => (file, args) => { calls.push([file, ...args]); return { code, output }; };
+  const all = `${Object.values(paths).join(" ")} ${path.join(root, "gone.conf")}\n`;
+  assert.deepEqual(serviceOverrides("systemd", self, shows(all)), [paths.recovery]);
+  assert.deepEqual(calls[0], ["systemctl", "--user", "show", "cns.service", "--property=DropInPaths", "--value"]);
+  assert.deepEqual(serviceOverrides("systemd", self, shows("")), []);
+  assert.deepEqual(serviceOverrides("systemd", self, shows("Failed to connect to bus", 1)), []);
+  // Only absolute paths are read: anything else in the output is not a drop-in.
+  assert.deepEqual(serviceOverrides("systemd", self, shows(`relative.conf ${paths.recovery}`)), [paths.recovery]);
+  calls.length = 0;
+  assert.deepEqual(serviceOverrides("launchd", self, shows(all)), []);
+  assert.equal(calls.length, 0);
 });
 
 test("a systemd service that failed, or waits to restart after failing, is reported failed", () => {
