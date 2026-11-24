@@ -120,7 +120,7 @@ export class ControlApi extends RpcTarget {
   /** A fork of the peer's whole shell, proxied by reference; releasing it kills its commands. */
   shell(id: string) { return this.#controller.shell(id); }
   /**
-   * Lend a command, such as cns run or cns tty, this daemon's standing link to the paired
+   * Lend a command, such as cns run or cns shell, this daemon's standing link to the paired
    * device with `publicKey`, so the command uses it rather than dialing the device: a device
    * this one cannot dial, such as one in WSL behind its host's firewall, may have dialed
    * this daemon, and a link that is already up costs no handshake. The command gets a fork

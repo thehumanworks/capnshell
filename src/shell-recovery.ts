@@ -4,11 +4,11 @@ import { explainDenial } from "./peers.js";
 import type { PtySessionInfo } from "./shell.js";
 
 /**
- * What `cns tty DEVICE` does when it cannot reach its session, on the first attempt or while
- * reconnecting after the connection dropped (src/commands/paired-tty.ts). The attach loop
+ * What `cns shell DEVICE` does when it cannot reach its session, on the first attempt or while
+ * reconnecting after the connection dropped (src/commands/paired-shell.ts). The attach loop
  * there does the connecting and the terminal; these pure decisions say whether to stop, end
  * with an exit status, fall back to an unnamed terminal, retry after a wait, or give up, so
- * tty-recovery.test.ts can check every failure in every situation as a table.
+ * shell-recovery.test.ts can check every failure in every situation as a table.
  *
  *   connecting ──open──▶ attached ──connection lost──▶ reconnecting ──open──▶ attached
  *       │                   │                              │
@@ -45,7 +45,7 @@ export function classify(error: unknown, device: string, name: string, first: bo
   return undefined;
 }
 
-/** Whether the device refuses this one a new session, so a plain terminal is all `cns tty DEVICE` can give. */
+/** Whether the device refuses this one a new session, so a plain terminal is all `cns shell DEVICE` can give. */
 export const noSessionAccess = (error: unknown) => /^Permission denied: sessions:(view|create) not granted/.test(errorMessage(error));
 
 /**
@@ -54,7 +54,7 @@ export const noSessionAccess = (error: unknown) => /^Permission denied: sessions
  */
 export function sessionReplaced(original: Pick<PtySessionInfo, "pid" | "startedAt">, info: Pick<PtySessionInfo, "pid" | "startedAt">, device: string, session: string, own: boolean): Final | undefined {
   if (info.pid === original.pid && info.startedAt === original.startedAt) return undefined;
-  return new Final(`${session} on ${device} ended and was replaced while disconnected; ${own ? `cns tty ${device} opens a new terminal` : `run cns tty ${device} --attach ${session} again to attach to the new one`}.`, 1);
+  return new Final(`${session} on ${device} ended and was replaced while disconnected; ${own ? `cns shell ${device} opens a new terminal` : `run cns shell ${device} --attach ${session} again to attach to the new one`}.`, 1);
 }
 
 export interface OpenFailure {

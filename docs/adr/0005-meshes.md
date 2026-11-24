@@ -47,6 +47,17 @@ grants, and without changing the handshake, the relay or the gateway.
   the member then forgets the mesh. Only the admin's own link can tell a device that.
   A mesh that cannot be read here fails the whole exchange rather than seeming to have
   been dropped.
+  Since cns 2.0.0 the admin ends a mesh with `cns mesh delete NAME`, which is refused
+  while the list names any other member, and `cns mesh leave NAME` on the admin is refused
+  too. Before, the admin's `leave` ended a mesh with members still in it, each of which
+  found out only when it next reached the admin; now every member is removed by name
+  first, so ending a mesh is never a side effect of one device leaving.
+  Deleting leaves the mesh's last version on the admin (`meshes-ended/NAME`), and a mesh
+  the same admin later makes under that name starts one above it. Members take any list
+  the admin signed with a higher version, and a device that was away when the old mesh
+  ended may still hold and offer one of its lists; without this the old list, with the old
+  members, would replace the new mesh's. A mesh ended by a cns from before 2.0.0 left no
+  such record: make the next one under a new name.
 - **Dialing.** Mesh records are dialed like any other. A member that refuses this one
   as unknown may not have the newest list yet, so a member's dial loop keeps retrying
   with backoff instead of stopping.

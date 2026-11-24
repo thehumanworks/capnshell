@@ -170,11 +170,11 @@ test("a command's connection offers nothing back, and ending it ends its remote 
   assert.equal(timed.code, 124);
 });
 
-test("tty runs programs on a remote terminal with piped input and returns their status", { timeout: 30000, skip: !posix }, async (t) => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "cns tty "));
+test("shell runs programs on a remote terminal with piped input and returns their status", { timeout: 30000, skip: !posix }, async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "cns shell "));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const { cli, launch } = await studioAndLaptop(t);
-  const tty = launch(["tty", "studio", "--cwd", directory, "--cols", "100", "--rows", "30", "--term", "vt100", "--",
+  const tty = launch(["shell", "studio", "--cwd", directory, "--cols", "100", "--rows", "30", "--term", "vt100", "--",
     `tty -s && printf 'IS''TTY %s %s ' "$TERM" "$(pwd)"; stty size; read -r line; printf 'got:%s\n' "$line"; exit 5`]);
   await tty.waitFor("ISTTY");
   tty.child.stdin.write("héllo\r");
@@ -185,29 +185,29 @@ test("tty runs programs on a remote terminal with piped input and returns their 
   assert.match(tty.stdout, /got:héllo\r\n/);
   assert.equal(tty.stderr, "");
 
-  const timed = await cli(["tty", "studio", "--timeout", "100", "--", "sleep 60"]);
+  const timed = await cli(["shell", "studio", "--timeout", "100", "--", "sleep 60"]);
   assert.equal(timed.code, 124);
   assert.match(timed.stderr, /timed out/);
 
   // --screen prints the rendered terminal, not the escape sequences that drew it.
   const drawn = "printf '\\033[?1049h\\033[2J\\033[2;3Hdrawn\\033[1;1Htop'; sleep 60";
-  const screen = await cli(["tty", "studio", "--screen", "--cols", "20", "--rows", "4", "--timeout", "1000", "--", drawn]);
+  const screen = await cli(["shell", "studio", "--screen", "--cols", "20", "--rows", "4", "--timeout", "1000", "--", drawn]);
   assert.equal(screen.code, 124, screen.output);
   assert.equal(screen.stdout, "top\n  drawn\n");
-  const history = await cli(["tty", "studio", "--screen", "--rows", "3", "--history", "2", "--", "seq 1 8; exit 4"]);
+  const history = await cli(["shell", "studio", "--screen", "--rows", "3", "--history", "2", "--", "seq 1 8; exit 4"]);
   assert.equal(history.code, 4, history.output);
   assert.equal(history.stdout, "5\n6\n7\n8\n");
   assert.equal(history.stderr, "");
 });
 
-test("named tty sessions persist across CLI calls for keys, screens, attach and kill", { timeout: 60000, skip: !posix }, async (t) => {
+test("named shell sessions persist across CLI calls for keys, screens, attach and kill", { timeout: 60000, skip: !posix }, async (t) => {
   const { cli: run, launch } = await studioAndLaptop(t);
   const cli = async (...args: string[]) => {
     const { code, stdout, stderr } = await run(args);
     return { code, stdout, stderr };
   };
   const program = "printf 'ready\\n'; while IFS= read -r line; do printf 'got:%s\\n' \"$line\"; [ \"$line\" = quit ] && exit 6; done";
-  assert.deepEqual(await cli("tty", "studio", "--name", "app", "--cols", "40", "--rows", "6", "--", program), { code: 0, stdout: "", stderr: "" });
+  assert.deepEqual(await cli("shell", "studio", "--name", "app", "--cols", "40", "--rows", "6", "--", program), { code: 0, stdout: "", stderr: "" });
   assert.deepEqual(await cli("screen", "studio", "app", "--until", "ready"), { code: 0, stdout: "ready\n", stderr: "" });
   assert.deepEqual(await cli("keys", "studio", "app", "hello there", "Enter"), { code: 0, stdout: "", stderr: "" });
   const shown = await cli("screen", "studio", "app", "--until", "got:hello there");
@@ -221,11 +221,11 @@ test("named tty sessions persist across CLI calls for keys, screens, attach and 
   const [info] = JSON.parse(listed.stdout);
   assert.deepEqual([info.name, info.running, info.cols, info.rows, info.viewers], ["app", true, 40, 6, 0]);
   assert.ok((await cli("sessions", "studio")).stdout.startsWith(`app  running  40x6  0 attached  ${program.slice(0, 20)}`));
-  assert.equal((await cli("tty", "studio", "--name", "app", "--", "true")).code, 1);
+  assert.equal((await cli("shell", "studio", "--name", "app", "--", "true")).code, 1);
 
   // Attaching without a terminal redraws the screen and streams until the program exits.
   // It does not resize a session that others may share.
-  const attached = launch(["tty", "studio", "--attach", "app"]);
+  const attached = launch(["shell", "studio", "--attach", "app"]);
   await attached.waitFor("got:hello there");
   attached.child.stdin.write("quit\r");
   assert.equal(await attached.exited, 6, attached.output);
@@ -251,13 +251,13 @@ test("a named session can be manually reattached after an abrupt client loss", {
     return { code, stdout, stderr };
   };
   const command = "printf 'READY\\n'; while IFS= read -r line; do case \"$line\" in check) printf 'PID:%s CWD:%s\\n' \"$$\" \"$PWD\";; quit) exit 6;; esac; done";
-  const started = await cli("tty", "studio", "--name", "work", "--cwd", directory, "--", command);
+  const started = await cli("shell", "studio", "--name", "work", "--cwd", directory, "--", command);
   assert.equal(started.code, 0, started.stderr);
   const before = JSON.parse((await cli("sessions", "studio", "--json")).stdout)[0];
   assert.ok(before.pid > 0);
   assert.equal(before.cwd, directory);
 
-  const first = launch(["tty", "studio", "--attach", "work"]);
+  const first = launch(["shell", "studio", "--attach", "work"]);
   await first.waitFor("READY");
   first.child.kill("SIGKILL");
   await first.exited;
@@ -268,7 +268,7 @@ test("a named session can be manually reattached after an abrupt client loss", {
 
   const after = JSON.parse((await cli("sessions", "studio", "--json")).stdout)[0];
   assert.deepEqual([after.pid, after.cwd, after.running], [before.pid, directory, true]);
-  const second = launch(["tty", "studio", "--attach", "work"]);
+  const second = launch(["shell", "studio", "--attach", "work"]);
   await second.waitFor("READY");
   second.child.stdin.write("check\r");
   await second.waitFor(`PID:${before.pid} CWD:${directory}`);
@@ -277,7 +277,7 @@ test("a named session can be manually reattached after an abrupt client loss", {
   assert.equal((await cli("kill", "studio", "work")).code, 0);
   assert.deepEqual(JSON.parse((await cli("sessions", "studio", "--json")).stdout), []);
 
-  assert.equal((await cli("tty", "studio", "--name", "lost", "--", "sleep 60")).code, 0);
+  assert.equal((await cli("shell", "studio", "--name", "lost", "--", "sleep 60")).code, 0);
   const lost = JSON.parse((await cli("sessions", "studio", "--json")).stdout)[0];
   assert.equal((await devices.cli(studio, ["stop", "--state", studio.state])).code, 0);
   await eventually(async () => {
@@ -295,4 +295,68 @@ test("run reports an unreachable device as failure", { timeout: 15000, skip: !po
   assert.notEqual(run.code, 0);
   assert.equal(run.stdout, "");
   assert.match(run.stderr, /Cannot connect to studio/);
+});
+
+test("shell -d types commands into a session that stays running, and starts it on first use", { timeout: 60000, skip: !posix }, async (t) => {
+  const directory = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-detached-")));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const { cli: run } = await studioAndLaptop(t, { SHELL: "/bin/bash" });
+  const cli = async (...args: string[]) => {
+    const { code, stdout, stderr } = await run(args);
+    return { code, stdout, stderr };
+  };
+  const screen = async (name: string, text: string) => {
+    const shown = await cli("screen", "studio", name, "--until", text, "--timeout", "10000");
+    assert.equal(shown.code, 0, shown.stderr + shown.stdout);
+    return shown.stdout;
+  };
+
+  // The first use of a name starts a login shell there and types the command into it.
+  assert.deepEqual(await cli("shell", "studio", "-d", "--session", "work", "--cwd", directory, "--", "cd", "$PWD;", "COUNT=41;", "echo", "one:$PWD"),
+    { code: 0, stdout: "", stderr: "cns: started the session work on studio\n" });
+  await screen("work", `one:${directory}`);
+  // The next types into the same shell: its variables carry over, and --command is the same as --.
+  assert.deepEqual(await cli("shell", "studio", "-d", "--session", "work", "--command", "echo two:$((COUNT + 1))"), { code: 0, stdout: "", stderr: "" });
+  await screen("work", "two:42");
+  const [info] = JSON.parse((await cli("sessions", "studio", "--json")).stdout);
+  assert.deepEqual([info.name, info.running, info.command], ["work", true, null]);
+
+  // What describes a session being started is refused once it runs, and nothing is typed.
+  const late = await cli("shell", "studio", "-d", "--session", "work", "--cwd", "/", "--", "echo", "three:$PWD");
+  assert.deepEqual(late, { code: 1, stdout: "", stderr: "The session work is already running on studio, and --cwd applies only when a session starts. Nothing was typed. Run the command without it, or in a new session.\n" });
+  assert.deepEqual(await cli("shell", "studio", "-d", "--session", "work", "--", "echo", "four:done"), { code: 0, stdout: "", stderr: "" });
+  assert.doesNotMatch(await screen("work", "four:done"), /three:\//);
+
+  // Without a name the session is the next free shell-N, and stdout carries the name alone.
+  const unnamed = await cli("shell", "studio", "-d", "--", "echo", "auto:$((6 * 7))");
+  assert.deepEqual(unnamed, { code: 0, stdout: "shell-1\n", stderr: "cns: started the session shell-1 on studio\n" });
+  await screen("shell-1", "auto:42");
+  // No command: the session starts and waits.
+  assert.deepEqual(await cli("shell", "studio", "-d"), { code: 0, stdout: "shell-2\n", stderr: "cns: started the session shell-2 on studio\n" });
+  assert.deepEqual(await cli("shell", "studio", "-d", "--session", "shell-2", "--", "echo", "later:ok"), { code: 0, stdout: "", stderr: "" });
+  await screen("shell-2", "later:ok");
+
+  // A session that runs a command is not a shell to type into, and one that ended takes nothing.
+  assert.equal((await cli("shell", "studio", "--name", "job", "--", "sleep 30")).code, 0);
+  const job = await cli("shell", "studio", "-d", "--session", "job", "--", "echo", "no");
+  assert.deepEqual([job.code, job.stdout], [1, ""]);
+  assert.equal(job.stderr, 'The session job on studio runs "sleep 30", not a shell, so -d cannot type a command into it. Send it keys with cns keys studio job, or name another session.\n');
+  assert.deepEqual(await cli("shell", "studio", "-d", "--session", "work", "--", "exit", "3"), { code: 0, stdout: "", stderr: "" });
+  let listing = "";
+  await eventually(async () => /^work +exited 3 /m.test(listing = (await cli("sessions", "studio")).stdout), "the shell exits").catch((error) => { throw new Error(`${error.message}\n${listing}`); });
+  const ended = await cli("shell", "studio", "-d", "--session", "work", "--", "echo", "no");
+  assert.deepEqual([ended.code, ended.stdout], [1, ""]);
+  assert.match(ended.stderr, /^The session work on studio has ended \(exited 3\)\. Remove it, then run this again: cns kill studio work\.\n$/);
+
+  // The options that go with -d.
+  for (const [args, message] of [
+    [["shell", "studio", "--session", "work", "--", "true"], /--session names the session -d runs a command in: cns shell studio -d --session work -- command\. To join a session, use --attach work\./],
+    [["shell", "studio", "-d", "--name", "x", "--", "true"], /-d runs a command in a session and returns; it does not go with --name\. Name its session with --session\./],
+    [["shell", "studio", "-d", "--command", "true", "--", "true"], /Give the command once: after --command, or after --\./],
+  ] as const) {
+    const refused = await cli(...args);
+    assert.equal(refused.code, 1, refused.stdout);
+    assert.match(refused.stderr, message);
+  }
+  for (const name of ["work", "job", "shell-1", "shell-2"]) assert.equal((await cli("kill", "studio", name)).code, 0);
 });

@@ -81,3 +81,100 @@ test("mesh secrets reach the members that may read them, set once on any member,
   const gone = await secret(studio, ["get", "home", "API_KEY"]);
   assert.match(gone.stderr, /This device has no mesh named home/);
 });
+
+test("a secret is named without its mesh unless two hold the name, and commands here and on other devices run with secrets as variables", { skip: process.platform === "win32", timeout: 180000 }, async (t) => {
+  const devices = await testDevices(t, "cns-secret-run-");
+  const hub = await devices.device("hub");
+  const laptop = await devices.device("laptop");
+  for (const device of [hub, laptop]) await devices.up(device);
+  await devices.pair(hub, laptop);
+  const mesh = (device: TestDevice, args: string[]) => devices.cli(device, ["mesh", ...args, "--state", device.state]);
+  const secret = (device: TestDevice, args: string[], input = "") => devices.cli(device, ["secret", ...args, ...["set", "rm"].includes(args[0]!) ? ["--state", device.state] : []], input);
+  const fails = async (device: TestDevice, args: string[], message: RegExp) => {
+    const result = await devices.cli(device, args);
+    assert.equal(result.code, 1, result.output);
+    assert.match(result.stderr, message);
+    assert.equal(result.stdout, "");
+  };
+  assert.equal((await mesh(hub, ["create", "home"])).code, 0);
+  assert.equal((await mesh(hub, ["add", "home", "laptop"])).code, 0);
+  assert.equal((await mesh(laptop, ["join", "home", "--via", "hub"])).code, 0);
+
+  // In one mesh, no command needs its name.
+  await fails(laptop, ["secret", "run", "--", "true"], /This device holds no secrets to run the command with\./);
+  const set = await secret(laptop, ["set", "API_KEY"], "sk-home\n");
+  assert.equal(set.code, 0, set.output);
+  assert.match(set.stdout, /Set API_KEY in the mesh home, readable by every member of home, now and later\./);
+  for (const name of [["API_KEY"], ["home:API_KEY"], ["home", "API_KEY"]]) {
+    const got = await secret(laptop, ["get", ...name]);
+    assert.deepEqual([got.code, got.stdout, got.stderr], [0, "sk-home", ""]);
+  }
+  await fails(laptop, ["secret", "get", "MISSING"], /This device holds no secret MISSING\. cns secret list shows the ones here\./);
+  await fails(laptop, ["secret", "get", "nowhere:API_KEY"], /This device has no mesh named nowhere\./);
+  await fails(laptop, ["secret", "get", ":API_KEY"], /:API_KEY names no mesh before its colon\. Write MESH:NAME, such as home:API_KEY\./);
+  await eventually("hub reads laptop's secret", async () => (await secret(hub, ["get", "API_KEY"])).stdout === "sk-home");
+
+  // A second mesh: a new secret must say where it goes, and a name both hold must say which is meant.
+  assert.equal((await mesh(laptop, ["create", "work"])).code, 0);
+  const where = await secret(laptop, ["set", "TOKEN"], "t\n");
+  assert.equal(where.code, 1);
+  assert.match(where.stderr, /This device is in the meshes home and work\. Say which gets TOKEN: cns secret set home:TOKEN, or cns secret set work:TOKEN\./);
+  assert.equal((await secret(laptop, ["set", "work:API_KEY"], "sk-work\n")).code, 0);
+  assert.equal((await secret(laptop, ["set", "work:TOKEN"], "t-work\n")).code, 0);
+  await fails(laptop, ["secret", "get", "API_KEY"], /API_KEY is in the meshes home and work\. Say which: cns secret get home:API_KEY, or cns secret get work:API_KEY\./);
+  assert.equal((await secret(laptop, ["get", "work:API_KEY"])).stdout, "sk-work");
+  assert.equal((await secret(laptop, ["get", "home:API_KEY"])).stdout, "sk-home");
+  assert.equal((await secret(laptop, ["get", "TOKEN"])).stdout, "t-work");
+
+  // secret run: every secret this device reads, or the ones --only names, or all but the ones --exclude names.
+  const show = `printf '%s|%s' "\${API_KEY-unset}" "\${TOKEN-unset}"`;
+  const run = (...args: string[]) => devices.cli(laptop, ["secret", "run", ...args]);
+  await fails(laptop, ["secret", "run", "--", show], /API_KEY is in the meshes home and work, and the variable API_KEY holds one value\. Leave all but one out: --exclude home:API_KEY, or --exclude work:API_KEY\./);
+  await fails(laptop, ["secret", "run", "--only", "API_KEY", "--", show], /Say which: --only home:API_KEY, or --only work:API_KEY\./);
+  assert.deepEqual([(await run("--only", "TOKEN", "--", show)).stdout, (await run("--exclude", "work:API_KEY", "--", show)).stdout, (await run("--exclude", "API_KEY", "--", show)).stdout],
+    ["unset|t-work", "sk-home|t-work", "unset|t-work"]);
+  assert.equal((await run("--only", "work:API_KEY,TOKEN", "--", show)).stdout, "sk-work|t-work");
+  assert.equal((await run("--only", "home:API_KEY", "--only", "TOKEN", "--", show)).stdout, "sk-home|t-work");
+  // The command is the shell's, as with cns run: words are joined, its input and status are its own.
+  const piped = await devices.cli(laptop, ["secret", "run", "--only", "TOKEN", "--", "read", "-r", "line;", "printf", "'%s:%s'", '"$line"', '"$TOKEN";', "exit", "7"], "typed\n");
+  assert.deepEqual([piped.code, piped.stdout], [7, "typed:t-work"]);
+  await fails(laptop, ["secret", "run", "--only", "NOPE", "--", "true"], /--only names NOPE, which this device does not hold\./);
+  await fails(laptop, ["secret", "run", "--only", "TOKEN", "--exclude", "API_KEY", "--", "true"], /Use --only or --exclude, not both\./);
+  await fails(laptop, ["secret", "run", "--only", "TOKEN", "true"], /secret run requires -- before its command: cns secret run -- command\./);
+  // Any member can set a secret of any name. Without --only, one that tells programs what to run
+  // stops the command when another device set it; one this device set, or named with --only, is set.
+  assert.equal((await secret(hub, ["set", "home:BASH_ENV"], "/dev/null\n")).code, 0);
+  assert.equal((await secret(laptop, ["set", "work:PAGER"], "cat\n")).code, 0);
+  await eventually("laptop reads hub's secret", async () => (await secret(laptop, ["get", "BASH_ENV"])).stdout === "/dev/null");
+  const steered = /hub set home:BASH_ENV, and the variable BASH_ENV tells programs what to run or where to connect, so it is set only when you name it\. Leave it out: --exclude home:BASH_ENV\. To set it, name what the command gets: --only home:BASH_ENV\./;
+  await fails(laptop, ["secret", "run", "--exclude", "work:API_KEY", "--", show], steered);
+  const names = `printf '%s|%s|%s' "\${BASH_ENV-unset}" "\${PAGER-unset}" "\${TOKEN-unset}"`;
+  assert.equal((await run("--exclude", "work:API_KEY,home:BASH_ENV", "--", names)).stdout, "unset|cat|t-work");
+  assert.equal((await run("--only", "BASH_ENV,TOKEN", "--", names)).stdout, "/dev/null|unset|t-work");
+  assert.equal((await secret(hub, ["rm", "home:BASH_ENV"])).code, 0);
+  await eventually("laptop drops hub's secret", async () => (await secret(laptop, ["get", "BASH_ENV"])).code === 1);
+  // The secrets go to the command and stay out of this device's own environment.
+  assert.equal((await devices.cli(laptop, ["run", "hub", "--", show])).stdout, "unset|unset");
+
+  // --secret: a command on another device gets the secrets this device reads, whether or not that device is in their mesh.
+  const remote = await devices.cli(laptop, ["run", "hub", "--secret", "TOKEN", "--secret", "home:API_KEY", "--", show]);
+  assert.deepEqual([remote.code, remote.stdout, remote.stderr], [0, "sk-home|t-work", ""]);
+  assert.equal((await devices.cli(laptop, ["run", "hub", "--secret", "work:API_KEY,TOKEN", "--", show])).stdout, "sk-work|t-work");
+  await fails(laptop, ["run", "hub", "--secret", "API_KEY", "--", show], /API_KEY is in the meshes home and work\. Say which: --secret home:API_KEY, or --secret work:API_KEY\./);
+  await fails(laptop, ["run", "hub", "--secret", "home:API_KEY,work:API_KEY", "--", show], /--secret names API_KEY in both home and work, and the variable API_KEY holds one value\./);
+  await fails(laptop, ["run", "hub", "--secret", "NOPE", "--", show], /This device holds no secret NOPE\./);
+  // A terminal's program gets them too, and a session keeps them without showing them in its listing.
+  const terminal = await devices.cli(laptop, ["shell", "hub", "--secret", "TOKEN", "--", show], "");
+  assert.deepEqual([terminal.code, terminal.stdout], [0, "unset|t-work"]);
+  assert.equal((await devices.cli(laptop, ["shell", "hub", "--name", "kept", "--secret", "TOKEN", "--", `${show}; sleep 30`])).code, 0);
+  const screen = await devices.cli(laptop, ["screen", "hub", "kept", "--until", "t-work"]);
+  assert.deepEqual([screen.code, screen.stdout], [0, "unset|t-work\n"]);
+  assert.ok(!(await devices.cli(laptop, ["sessions", "hub", "--json"])).stdout.includes("t-work"));
+  await fails(laptop, ["shell", "hub", "--attach", "kept", "--secret", "TOKEN"], /--attach cannot change --secret; it was set when the session started\./);
+  assert.equal((await devices.cli(laptop, ["kill", "hub", "kept"])).code, 0);
+
+  // rm finds the mesh as get does.
+  await fails(laptop, ["secret", "rm", "API_KEY", "--state", laptop.state], /API_KEY is in the meshes home and work\. Say which: cns secret rm home:API_KEY, or cns secret rm work:API_KEY\./);
+  assert.equal((await secret(laptop, ["rm", "TOKEN"])).code, 0);
+  await fails(laptop, ["secret", "get", "TOKEN"], /This device holds no secret TOKEN\./);
+});

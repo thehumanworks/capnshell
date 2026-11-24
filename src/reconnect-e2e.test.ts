@@ -35,8 +35,8 @@ test("an attached session survives losing the connection and reports what it mis
   assert.equal((await cli(laptop, ["pair", invite, "--yes", "--name", "studio", "--request", "all"])).code, 0);
   assert.equal(await inviting.exited, 0);
 
-  // Piped input to `cns tty studio` gets an unnamed terminal of its own, never a named session.
-  const shell = await cli(laptop, ["tty", "studio"], "echo hi-$((40+2))\nexit 7\n");
+  // Piped input to `cns shell studio` gets an unnamed terminal of its own, never a named session.
+  const shell = await cli(laptop, ["shell", "studio"], "echo hi-$((40+2))\nexit 7\n");
   assert.equal(shell.code, 7, shell.stderr);
   assert.match(shell.stdout, /hi-42/);
   assert.doesNotMatch(shell.stderr, /as session/);
@@ -63,8 +63,8 @@ test("an attached session survives losing the connection and reports what it mis
   // macOS ships bash 3.2, whose `read -t` takes whole seconds only, so a ticker in the
   // background keeps output flowing while the foreground loop blocks on input.
   const program = "printf 'READY\\n'; while :; do printf .; sleep 0.2; done & while IFS= read -r line; do printf 'got:%s\\n' \"$line\"; done";
-  assert.equal((await cli(laptop, ["tty", "studio", "--name", "work", "--", program])).code, 0);
-  const attached = launchCli(t, ["tty", "studio", "--attach", "work"], { env: laptop.env });
+  assert.equal((await cli(laptop, ["shell", "studio", "--name", "work", "--", program])).code, 0);
+  const attached = launchCli(t, ["shell", "studio", "--attach", "work"], { env: laptop.env });
   await attached.waitFor("READY");
   attached.child.stdin.write("one\r");
   await attached.waitFor("got:one");

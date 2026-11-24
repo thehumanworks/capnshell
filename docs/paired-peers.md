@@ -99,9 +99,9 @@ A grant lists the operations one device may perform on another. The granting dev
 
 - `cns up [--name NAME] [--bind ADDRESS] [--port PORT]` starts the peer daemon, or reports the running one. It creates the identity if needed, listens for paired peers, and dials the saved addresses of paired peers to bring links up. There is one daemon per device (the existing `~/.cns/daemon.json` arbitration), and `attach` and `stop` work on it.
 - A link between two devices is one connection whichever side dialed. If both dial at once, the daemon with the lexically smaller public key keeps its outbound link and drops the inbound duplicate; the other does the opposite. Named sessions, grants and reconnection are properties of the pair, not of who dialed.
-- Every peer command takes a **target**: `cns tty studio`, `cns run studio -- 'git status'`, `cns sessions studio`, `cns screen studio main`. The target is a paired device's name; an unknown name fails with `No paired device is saved as studio. Pair with it first: cns pair.`, and nothing falls back to another peer or to a hostname. (Address-book aliases, `ws://` URLs and `--peer NAME` were accepted until the legacy mode was removed.)
+- Every peer command takes a **target**: `cns shell studio`, `cns run studio -- 'git status'`, `cns sessions studio`, `cns screen studio main`. The target is a paired device's name; an unknown name fails with `No paired device is saved as studio. Pair with it first: cns pair.`, and nothing falls back to another peer or to a hostname. (Address-book aliases, `ws://` URLs and `--peer NAME` were accepted until the legacy mode was removed.)
 - A command whose target the local daemon has a standing link to uses that link rather than dialing (`ControlApi.lend`): the daemon hands the command a fork of the device's shell over the link (the shell itself when the device grants no `shell`), which the device releases, ending the command's commands, terminals and handles, when the command's control connection closes, and the daemon closes that control connection when the link ends, so the command sees a lost connection as it would on its own. Only the daemon at the default state path, running as the command's identity, is asked; without a link, or with an older daemon, the command dials. This is what makes a device that can only dial out, such as one in WSL, quick to reach: its link to this daemon is direct even though nothing can dial it.
-- `cns tty studio` with no `--name` creates or attaches to the session named `main` on that peer (**Decision 5**: default session name and whether `tty` without a name should attach to `main` or open an unnamed PTY as today; recommended: `main`, because the walkthrough and recovery both depend on a named session). Superseded on 10 November 2026: two terminals on one device ended up in the same `main`, so each `cns tty studio` now starts a named session of its own, `tty-1`, `tty-2` and so on, which keeps recovery after disconnects; `cns tty studio --attach NAME` joins a shared one.
+- `cns shell studio` with no `--name` creates or attaches to the session named `main` on that peer (**Decision 5**: default session name and whether `shell` without a name should attach to `main` or open an unnamed PTY as today; recommended: `main`, because the walkthrough and recovery both depend on a named session). Superseded on 10 November 2026: two terminals on one device ended up in the same `main`, so each `cns shell studio` now starts a named session of its own, `shell-1`, `shell-2` and so on, which keeps recovery after disconnects; `cns shell studio --attach NAME` joins a shared one.
 - `cns peers [--json]` lists paired and address-book peers:
 
   ```text
@@ -161,7 +161,7 @@ The plan first kept the unauthenticated mode beside paired devices. Once the rel
 | `--peer NAME`, URL arguments, `--bind`/`--port` on commands | Removed. Every command takes a paired device's name as its first argument. |
 | `cns mcp --daemon`, `cns mcp URL` | `cns mcp DEVICE` for one paired device; `cns mcp` alone for the devices linked to the daemon. |
 | Pi's `/cns listen`, `CNS_LISTEN`, `/cns attach host[:port]` | `/cns up`, `CNS_UP`; `/cns attach` takes a paired device's name or a linked device's ID. |
-| Named sessions, `keys`, `screen`, `kill`, `tty --attach` | Unchanged semantics, on a paired device; handles follow PR 19. |
+| Named sessions, `keys`, `screen`, `kill`, `shell --attach` | Unchanged semantics, on a paired device; handles follow PR 19. |
 | Daemon control (`attach`, `stop`, `~/.cns/daemon.json`) | Same daemon; `up` is its only front door. |
 | Older `cns` on one side | Refused at the handshake, with a message saying so. |
 | Windows | Identities and paired devices are kept in `~/.cns`, whose ACL must allow only the user, SYSTEM and Administrators (checked with `icacls /save` by SID). |
@@ -187,7 +187,7 @@ Each slice is a PR with its own tests, merged after review, in this order unless
 2. Link encryption: settled. libsodium `crypto_kx` and `secretstream`, bound to the authenticated handshake (`src/secure.ts`).
 3. Grant granularity: seven permissions with three presets (recommended) or three coarse grants.
 4. Revocation kills running commands at once (recommended) or lets them finish.
-5. `cns tty studio` without a name uses the `main` named session (recommended) or an unnamed PTY.
+5. `cns shell studio` without a name uses the `main` named session (recommended) or an unnamed PTY.
 6. Exclusive-control lease for sessions: not in the first release (recommended).
 7. Session persistence across host restart: not in this plan (recommended).
 8. Transport order: settled. Encrypted WebSocket, direct first and the built-in relay (the Cloudflare Worker in `relay/`, [ADR 0001](adr/0001-built-in-relay.md)) last; iroh evaluated and deferred, see [iroh-evaluation.md](iroh-evaluation.md).

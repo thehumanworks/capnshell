@@ -134,7 +134,7 @@ export class ShellApi extends RpcTarget {
     // RPC callers are not necessarily TypeScript: validate at the trust boundary.
     // Stay below Windows' command-line limit after UTF-16/base64 encoding.
     commandSchema.parse(command);
-    const { timeoutMs, cwd } = optionsSchema.parse(options);
+    const { timeoutMs, cwd, env } = optionsSchema.parse(options);
     if (this.#children.size >= MAX_COMMANDS) throw new Error("Too many simultaneous commands.");
 
     const windows = process.platform === "win32";
@@ -143,6 +143,7 @@ export class ShellApi extends RpcTarget {
     const started = Date.now();
     const child = spawn(executable, args, {
       cwd,
+      ...env ? { env: { ...process.env, ...env } } : {},
       stdio: [stdin ? "pipe" : "ignore", "pipe", "pipe"],
       windowsHide: true,
       detached: !windows,

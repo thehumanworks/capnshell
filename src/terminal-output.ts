@@ -14,7 +14,7 @@
  *   - queries: device attributes, status and cursor reports, mode and setting requests,
  *     window reports, colour and clipboard reads, capability and graphics probes;
  *   - the kitty keyboard protocol, so that keys such as the detach key stay single bytes.
- *     A terminal that passes the protocol on (cns tty --kitty-keys) keeps the program's
+ *     A terminal that passes the protocol on (cns shell --kitty-keys) keeps the program's
  *     requests, for NormalScreen to act on (src/redraw.ts); the query goes either way;
  *   - in-band resize reports (mode 2048). A program that receives them ignores its PTY's
  *     size, and so never follows a terminal of another size that attaches later.

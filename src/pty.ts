@@ -218,7 +218,7 @@ class Pty {
   #killTimer?: ReturnType<typeof setTimeout>;
 
   constructor(options: z.output<typeof programOptionsSchema>) {
-    const { command, cwd, cols, rows, term, timeoutMs } = options;
+    const { command, cwd, cols, rows, term, timeoutMs, env } = options;
     this.command = command ?? null;
     this.cwd = cwd;
     this.#screen = new Screen({ cols, rows, scrollback: MAX_SCREEN_HISTORY, allowProposedApi: true, windowOptions: { getWinSizeChars: true } });
@@ -253,7 +253,7 @@ class Pty {
     try {
       this.#process = Bun.spawn(ptyProgram(command), {
         cwd,
-        env: { ...process.env, TERM: term },
+        env: { ...process.env, ...env, TERM: term },
         terminal: {
           cols, rows, name: term,
           data: (_terminal, data) => this.#push(data.slice()),

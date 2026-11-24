@@ -31,12 +31,12 @@ test("cns --version prints this cns's version and nothing else", async (t) => {
 test("the CLI exposes only cross-platform peer commands with side-effect-free help", async (t) => {
   const cwd = await temporaryDirectory(t);
   const { stdout } = await runCli(["--help"], cwd);
-  for (const command of ["up", "pair", "peers", "run", "tty", "cp", "sessions", "ui", "keys", "screen", "kill", "mcp", "attach", "stop"]) {
+  for (const command of ["up", "pair", "peers", "run", "shell", "cp", "sessions", "ui", "keys", "screen", "kill", "mcp", "attach", "stop"]) {
     assert.ok(stdout.includes(command));
     const result = await runCli([command, "--help"], cwd);
     assert.match(result.stdout, /Usage: cns/);
     assert.doesNotMatch(result.stdout, /listening at/);
-    if (command === "run" || command === "tty") assert.match(result.stdout, /CNS_CWD/);
+    if (command === "run" || command === "shell") assert.match(result.stdout, /CNS_CWD/);
   }
   // The daemon command is cns up's to run, and the unauthenticated commands are gone.
   assert.doesNotMatch(stdout, /^\s+(daemon|listen|connect)\b/m);
@@ -49,7 +49,7 @@ test("CLI syntax errors and removed commands exit nonzero without side effects",
   for (const args of [[], ["unknown"], ["connect"], ["connect", "ws://127.0.0.1:1"], ["listen"], ["listen", "--bogus"],
     ["run"], ["run", "ws://127.0.0.1:1", "--", "echo bad"], ["run", "--", "echo bad"],
     ["run", "--peer", "studio", "--", "echo bad"], ["peer", "add", "studio", "ws://127.0.0.1:1"],
-    ["tty", "htop"], ["tty", "--", "echo", "bad"], ["tty", "--cols", "0"], ["tty", "--history", "5"],
+    ["shell", "htop"], ["shell", "--", "echo", "bad"], ["shell", "--cols", "0"], ["shell", "--history", "5"],
     ["mcp", "--daemon"], ["daemon"],
     ["bundle-mac"], ["install-windows"], ["integration-smoke"], ["windows"], ["wsl"]]) {
     const result = await runCli(args, cwd, false);

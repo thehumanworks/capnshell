@@ -8,11 +8,11 @@ import { secureReady } from "../secure.js";
 import type { PtySessionInfo, PtySessionOptions, ShellApi } from "../shell.js";
 import { findControlKey } from "../kitty-keyboard.js";
 import { attachTerminal, ConnectionLost, DETACH_KEY, plain, terminalKeyboard, type RemoteNamedPty } from "../terminal.js";
-import { afterOpenFailure, RETRY_MIN_MS, sessionReplaced } from "../tty-recovery.js";
-import { commandExitCode, describeExit } from "./one-shot.js";
+import { afterOpenFailure, RETRY_MIN_MS, sessionReplaced } from "../shell-recovery.js";
+import { commandExitCode, describeExit, beforeSecrets } from "./one-shot.js";
 
-/** `cns tty DEVICE` starts a session of its own, named tty-1, tty-2 and so on: the first name free on the device. */
-export const SESSION_PREFIX = "tty-";
+/** `cns shell DEVICE` starts a session of its own, named shell-1, shell-2 and so on: the first name free on the device. */
+export const SESSION_PREFIX = "shell-";
 /** How many taken names a new terminal tries before giving up; the device's own session limit usually ends it first. */
 const MAX_NAME_TRIES = 64;
 /** How long a terminal that is stopping waits for its device to end the session it started. */
@@ -25,7 +25,7 @@ const DEFAULT_DETACH = { byte: DETACH_KEY, label: "Ctrl-]" };
 
 const say = (message: string) => process.stderr.write(`${process.stderr.isTTY ? "\r\n" : ""}[cns: ${message}]\n`);
 
-/** The device does not let this one start sessions, so `cns tty DEVICE` uses an unnamed terminal instead. */
+/** The device does not let this one start sessions, so `cns shell DEVICE` uses an unnamed terminal instead. */
 export const NO_SESSIONS = Symbol("no sessions");
 
 /** Settle with `promise`, or reject once `ms` have passed. */
@@ -37,20 +37,27 @@ async function within<T>(promise: Promise<T>, ms: number): Promise<T> {
 }
 
 /**
- * Start a login shell under the first free name of tty-1, tty-2, ... and return the name.
+ * Start a login shell under the first free name of shell-1, shell-2, ... and return the name.
  * Listing needs sessions:list; without it, taken names are found by trying them. Two
  * terminals starting at once both try the same name, and the one refused takes the next.
  */
 export async function startTerminal(remote: RpcStub<ShellApi>, options: PtySessionOptions): Promise<string> {
+  return await startNext(() => plain(remote.ptySessions() as unknown as Promise<PtySessionInfo[]>), async (name) => {
+    using started = await remote.startPtySession(name, options);
+    void started;
+  });
+}
+
+/** startTerminal over any way to list a device's sessions and start one: `start` rejects with "already exists" for a taken name. */
+export async function startNext(sessions: () => Promise<PtySessionInfo[]>, start: (name: string) => Promise<unknown>): Promise<string> {
   let taken = new Set<string>();
-  try { taken = new Set((await plain(remote.ptySessions() as unknown as Promise<PtySessionInfo[]>)).map((session) => session.name)); }
+  try { taken = new Set((await sessions()).map((session) => session.name)); }
   catch (error) { if (!/^Permission denied/.test(errorMessage(error))) throw error; }
   for (let number = 1, tries = 0; ; number++) {
     const name = `${SESSION_PREFIX}${number}`;
     if (taken.has(name)) continue;
     try {
-      using started = await remote.startPtySession(name, options);
-      void started;
+      await start(name);
       return name;
     } catch (error) {
       if (!/already exists/.test(errorMessage(error)) || ++tries >= MAX_NAME_TRIES) throw error;
@@ -59,10 +66,10 @@ export async function startTerminal(remote: RpcStub<ShellApi>, options: PtySessi
 }
 
 /**
- * `cns tty DEVICE` at a terminal, and `cns tty DEVICE --attach NAME`, for a paired device.
+ * `cns shell DEVICE` at a terminal, and `cns shell DEVICE --attach NAME`, for a paired device.
  *
  * Without --attach, each invocation starts a login shell of its own in a new named session
- * (tty-1, tty-2, ...), so several terminals on one device each get their own. The session
+ * (shell-1, shell-2, ...), so several terminals on one device each get their own. The session
  * belongs to this terminal: it is removed when its program exits, and ended when cns stops
  * or its terminal closes (SIGHUP, SIGTERM, SIGINT) while the device can be reached. Ctrl-]
  * detaches and leaves it running, to rejoin with --attach NAME. --attach joins a session
@@ -134,7 +141,7 @@ export async function attachPaired(config: PeerConfig): Promise<number | typeof 
     const timer = setTimeout(done, ms);
     interrupted.signal.addEventListener("abort", done, { once: true });
   });
-  const rejoin = (session: string) => `cns tty ${expect.name} --attach ${session} returns to it`;
+  const rejoin = (session: string) => `cns shell ${expect.name} --attach ${session} returns to it`;
   /** This terminal's session outlives it: say how to get back to it or end it. */
   const kept = () => { if (own && name !== undefined) say(`${name} keeps running on ${expect.name}: ${rejoin(name)}, cns kill ${expect.name} ${name} ends it`); };
   /** End and remove the session this terminal started; false when the device could not do it in time. */
@@ -171,7 +178,7 @@ export async function attachPaired(config: PeerConfig): Promise<number | typeof 
           connected = await open();
           break;
         } catch (error) {
-          // Stop, end, fall back, give up or retry: tty-recovery.ts decides.
+          // Stop, end, fall back, give up or retry: shell-recovery.ts decides.
           const next = afterOpenFailure(error, { device: expect.name, name, first, own, aborted: interrupted.signal.aborted, now: Date.now(), deadline, reconnectMs: RECONNECT_MS, wait });
           if (next.kind === "stopped") return await stopped();
           if (next.kind === "no-sessions") return NO_SESSIONS;
@@ -256,7 +263,10 @@ export async function attachPaired(config: PeerConfig): Promise<number | typeof 
     let handle: RemoteNamedPty | undefined;
     try {
       if (name === undefined) {
-        name = await startTerminal(remote, { cwd: config.cwd, cols: config.cols ?? process.stdout.columns, rows: config.rows ?? process.stdout.rows, term: config.term, timeoutMs: config.timeoutMs });
+        name = await startTerminal(remote, {
+          cwd: config.cwd, cols: config.cols ?? process.stdout.columns, rows: config.rows ?? process.stdout.rows, term: config.term, timeoutMs: config.timeoutMs,
+          ...config.env ? { env: config.env } : {},
+        }).catch((error: unknown) => { throw config.env ? beforeSecrets(error, expect.name) : error; });
         started = true;
         say(`started a login shell on ${expect.name} as session ${name}`);
       }

@@ -63,12 +63,12 @@ const help = `
     :info              Show the selected peer's platform, shell and process ID.
     :cwd [PATH]        Show/set its remote working directory (absolute, no quotes).
     :timeout [MS]      Show/set its deadline; 0 disables it (the default).
-    :tty [COMMAND]     Open an interactive terminal (login shell or COMMAND) on it.
-    :sessions          List its named PTY sessions (started with cns tty --name).
+    :shell [COMMAND]     Open an interactive terminal (login shell or COMMAND) on it.
+    :sessions          List its named PTY sessions (started with cns shell --name).
     :attach NAME       Attach to a named session; Ctrl-] detaches and leaves it running.
     :help              Show this help.
     :quit              Exit this console; the daemon keeps running.
-  Each command starts a fresh shell without persistent state; use :tty for TUIs.
+  Each command starts a fresh shell without persistent state; use :shell for TUIs.
 `;
 
 /** Selection belongs to a console, never to the shared daemon or another attachment. */
@@ -95,7 +95,7 @@ export function openConsole(controller: PeerController, onQuit: () => void) {
   // Readline keeps editing the prompt line from keypresses. Detach it while the
   // remote program owns the terminal, then give it back unchanged.
   async function terminal(id: string, target: { command?: string; session?: string }, options: { cwd: string; timeoutMs: number }) {
-    if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error(":tty and :attach require an interactive local terminal. Use cns tty with piped input.");
+    if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error(":shell and :attach require an interactive local terminal. Use cns shell with piped input.");
     const keypress = process.stdin.listeners("keypress") as ((...args: unknown[]) => void)[];
     for (const listener of keypress) process.stdin.off("keypress", listener);
     try {
@@ -189,7 +189,7 @@ export function openConsole(controller: PeerController, onQuit: () => void) {
                 options.timeoutMs = value;
               }
               console.log(options.timeoutMs === 0 ? "Timeout: disabled" : `Timeout: ${options.timeoutMs} ms`);
-            } else if (line === ":tty" || line.startsWith(":tty ")) {
+            } else if (line === ":shell" || line.startsWith(":shell ")) {
               await terminal(id, { command: line.slice(5).trim() || undefined }, { ...options });
             } else if (line === ":sessions") {
               const sessions = await controller.ptySessions(id);

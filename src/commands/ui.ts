@@ -11,8 +11,8 @@ import {
   type Effect, type SessionRef, type SwitcherState,
 } from "../switcher.js";
 import { attachTerminal, ConnectionLost, plain, type RemoteNamedPty } from "../terminal.js";
-import { classify, sessionReplaced } from "../tty-recovery.js";
-import { startTerminal } from "./paired-tty.js";
+import { classify, sessionReplaced } from "../shell-recovery.js";
+import { startTerminal } from "./paired-shell.js";
 import { showPanes } from "./ui-panes.js";
 
 /** How often the switcher asks every device for its sessions while it is open. */
@@ -69,17 +69,17 @@ class Links {
  * between them. The switch key (Ctrl-] unless --key or CNS_KEY says otherwise) opens the
  * switcher; picking a session detaches from the one on screen, which keeps running, and
  * attaches to the next. Detaching from cns ui, or closing its terminal, leaves every session
- * running, as tmux does; `cns tty DEVICE` keeps its own rule and ends its session with its window.
+ * running, as tmux does; `cns shell DEVICE` keeps its own rule and ends its session with its window.
  */
 export async function ui(options: UiOptions = {}): Promise<number> {
   const input = process.stdin;
-  // CNS_KEY=none is how cns tty keeps every key for its session. The switcher cannot do without a key.
+  // CNS_KEY=none is how cns shell keeps every key for its session. The switcher cannot do without a key.
   const shared = process.env.CNS_KEY !== undefined && /^none$/i.test(process.env.CNS_KEY.trim()) ? undefined : process.env.CNS_KEY;
   const { byte: switchKey, label: switchLabel } = parseSwitchKey(options.key ?? shared ?? "C-]");
   const target = options.target === undefined ? undefined : parseTarget(options.target);
   if (target) resolvePeer(target.device);
   if (!input.isTTY || !process.stdout.isTTY) {
-    throw new Error("cns ui needs a terminal. Without one, cns sessions lists sessions, and cns screen, cns keys and cns tty --attach use them.");
+    throw new Error("cns ui needs a terminal. Without one, cns sessions lists sessions, and cns screen, cns keys and cns shell --attach use them.");
   }
   const { identity } = ensureIdentity();
   await secureReady();
@@ -231,7 +231,7 @@ export async function ui(options: UiOptions = {}): Promise<number> {
     return `Lost the connection to ${ref.device}. ${refKey(ref)} keeps running there; Esc tries again, - removes its pane.`;
   };
 
-  /** Start the next free tty-N, at this terminal's size. */
+  /** Start the next free shell-N, at this terminal's size. */
   const create = async (deviceName: string): Promise<SessionRef | string> => {
     try {
       const link = await links.get(byName(deviceName)!);

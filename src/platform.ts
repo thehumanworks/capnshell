@@ -11,10 +11,24 @@ export const MAX_TIMEOUT_MS = 2_147_483_647;
 
 export const commandSchema = z.string().max(8192, "Command must be at most 8192 characters.")
   .refine((value) => value.trim().length > 0, "Command must be nonempty.");
+/** The most variables a caller adds to a command's environment, and the size of each value: those of mesh secrets. */
+export const MAX_ENV_VARIABLES = 64;
+export const MAX_ENV_VALUE_BYTES = 16 * 1024;
+/**
+ * Variables a caller adds to the environment of the command or terminal it starts, such as
+ * the secrets `--secret` names. They reach the program and nothing else: no session listing,
+ * screen or log holds them.
+ */
+export const envSchema = z.record(
+  z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/, "Environment variable names have letters, digits and _, and do not start with a digit."),
+  z.string().refine((value) => !value.includes("\0"), "Environment values cannot hold a NUL byte.")
+    .refine((value) => Buffer.byteLength(value) <= MAX_ENV_VALUE_BYTES, `Environment values hold at most ${MAX_ENV_VALUE_BYTES} bytes.`),
+).refine((env) => Object.keys(env).length <= MAX_ENV_VARIABLES, `At most ${MAX_ENV_VARIABLES} environment variables.`);
 export const optionsSchema = z.strictObject({
   timeoutMs: z.int().min(0).max(MAX_TIMEOUT_MS).default(0),
   cwd: z.string().refine(path.isAbsolute, "cwd must be an absolute path on the executing peer.")
     .default(() => os.homedir()),
+  env: envSchema.optional(),
 });
 export type RunOptions = z.input<typeof optionsSchema>;
 

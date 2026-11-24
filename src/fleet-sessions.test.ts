@@ -28,7 +28,7 @@ test("every device is asked at once and reported in the order given, however it 
   const started: string[] = [];
   const results = await listEverywhere([device("slow"), device("denied"), device("gone"), device("stranger"), device("quick")], async (target) => {
     started.push(target.name);
-    if (target.name === "slow") { await pause(80); return { sessions: [session("tty-1")], via: "relay" }; }
+    if (target.name === "slow") { await pause(80); return { sessions: [session("shell-1")], via: "relay" }; }
     if (target.name === "denied") throw new Error("Permission denied: sessions:list not granted to laptop.");
     if (target.name === "gone") throw new Error("connect ECONNREFUSED 127.0.0.1:47381");
     if (target.name === "stranger") throw new AuthError("not-paired", "This device is not paired here.");
@@ -38,7 +38,7 @@ test("every device is asked at once and reported in the order given, however it 
   assert.deepEqual(results.map((result) => [result.device, result.state]), [
     ["slow", "listed"], ["denied", "refused"], ["gone", "unreachable"], ["stranger", "refused"], ["quick", "listed"],
   ]);
-  assert.deepEqual(results[0], { device: "slow", state: "listed", sessions: [session("tty-1")], via: "relay" });
+  assert.deepEqual(results[0], { device: "slow", state: "listed", sessions: [session("shell-1")], via: "relay" });
   // A refusal says what to run on the device that refused.
   assert.match((results[1] as { reason: string }).reason, /To allow it, run on denied: cns peer grant laptop sessions:list$/);
   assert.match((results[2] as { reason: string }).reason, /ECONNREFUSED/);
@@ -71,15 +71,15 @@ test("stopping the listing rejects at once", async () => {
 
 test("the table names each session's device and prefers the title a program set", () => {
   const results: DeviceSessions[] = [
-    { device: "lf", state: "listed", via: "direct", sessions: [session("tty-1"), session("build", { command: "make test", running: false, exit: { exitCode: 2, signal: null, signalNumber: null, timedOut: false, elapsedMs: 1, error: null } })] },
+    { device: "lf", state: "listed", via: "direct", sessions: [session("shell-1"), session("build", { command: "make test", running: false, exit: { exitCode: 2, signal: null, signalNumber: null, timedOut: false, elapsedMs: 1, error: null } })] },
     { device: "beelink", state: "not-granted", reason: "beelink does not let this device list its sessions" },
     { device: "thestudio", state: "listed", via: "relay", sessions: [session("main", { title: "Claude Code\u001b]0;evil\u0007", viewers: 1, cols: 293, rows: 48 })] },
   ];
   assert.equal(formatEverywhere(results), [
-    "DEVICE     NAME   STATUS    SIZE    ATTACHED  TITLE OR COMMAND",
-    "lf         tty-1  running   80x24   0         (login shell)",
-    "lf         build  exited 2  80x24   0         make test",
-    "thestudio  main   running   293x48  1         Claude Code?]0;evil?",
+    "DEVICE     NAME     STATUS    SIZE    ATTACHED  TITLE OR COMMAND",
+    "lf         shell-1  running   80x24   0         (login shell)",
+    "lf         build    exited 2  80x24   0         make test",
+    "thestudio  main     running   293x48  1         Claude Code?]0;evil?",
   ].join("\n"));
   assert.deepEqual(notesEverywhere(results), ["beelink: not listed: beelink does not let this device list its sessions"]);
   assert.equal(everywhereExitCode(results), 0, "a device that was never asked is not a failure");

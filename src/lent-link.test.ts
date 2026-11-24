@@ -97,9 +97,9 @@ test("commands reach a device that cannot be dialed over the link it dialed to t
   assert.equal(existsSync(marker), false, "the command was killed on wsl");
   assert.deepEqual(await links(studio, wsl), ["direct"], "the link outlives the command");
 
-  // cns tty at a terminal attaches through the link too, and two terminals get a shell each.
+  // cns shell at a terminal attaches through the link too, and two terminals get a shell each.
   const inTerminal = () => {
-    const invocation = cliInvocation(["tty", "wsl"]);
+    const invocation = cliInvocation(["shell", "wsl"]);
     let screen = "";
     let notify = () => {};
     const terminal = Bun.spawn([invocation.file, ...invocation.args], {
@@ -122,7 +122,7 @@ test("commands reach a device that cannot be dialed over the link it dialed to t
   await Promise.all([one.waitFor("connected to wsl via this device's daemon (directly)"), two.waitFor("connected to wsl via this device's daemon (directly)")]);
   const [nameOne, nameTwo] = [one, two].map((terminal) => /session (\S+)\. Ctrl-\] detaches/.exec(terminal.screen)?.[1]);
   assert.notEqual(nameOne, nameTwo, `both terminals attached to the session ${nameOne}`);
-  assert.deepEqual([nameOne, nameTwo].sort(), ["tty-1", "tty-2"]);
+  assert.deepEqual([nameOne, nameTwo].sort(), ["shell-1", "shell-2"]);
   await new Promise((resolve) => setTimeout(resolve, 500));
   const [fromOne, fromTwo] = [one.screen.length, two.screen.length];
   // Labelled answers: a shell may print escape sequences that carry hex IDs, such as

@@ -1,6 +1,6 @@
 /**
  * The kitty keyboard protocol (https://sw.kovidgoyal.net/kitty/keyboard-protocol/), as cns
- * carries it between a program in a session and the terminal of a `cns tty --kitty-keys`.
+ * carries it between a program in a session and the terminal of a `cns shell --kitty-keys`.
  * With it a program can tell keys apart that otherwise send the same bytes, such as
  * Shift+Enter and Enter.
  *

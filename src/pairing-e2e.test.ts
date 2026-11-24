@@ -126,7 +126,7 @@ test("two devices pair, run commands within their grants, and refuse everyone el
   assert.deepEqual([piped.code, piped.stdout], [0, "PIPED INPUT"]);
   const sessions = await cli(laptop, ["sessions", "studio", "--json"]);
   assert.deepEqual([sessions.code, JSON.parse(sessions.stdout)], [0, []]);
-  const started = await cli(laptop, ["tty", "studio", "--name", "work", "--", "printf READY; sleep 30"]);
+  const started = await cli(laptop, ["shell", "studio", "--name", "work", "--", "printf READY; sleep 30"]);
   assert.equal(started.code, 0, started.stderr);
   const screen = await cli(laptop, ["screen", "studio", "work", "--until", "READY"]);
   assert.deepEqual([screen.code, screen.stdout], [0, "READY\n"]);

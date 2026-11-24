@@ -102,10 +102,38 @@ test("mesh members reach each other as far as each allows, and the admin's list 
   const refused = await devices.cli(studio, ["run", "laptop", "--", "true"]);
   assert.equal(refused.code, 3, refused.output);
 
-  // Ending the mesh on the admin ends it on every member it reaches; each keeps its own pairing.
-  assert.equal((await mesh(hub, ["leave", "home"])).code, 0);
-  await eventually("laptop leaves the ended mesh", () => !has(laptop, "meshes", "home"));
+  // The admin cannot leave its mesh, and deletes it only once every other member is out of it.
+  const stays = await mesh(hub, ["leave", "home"]);
+  assert.equal(stays.code, 1);
+  assert.match(stays.stderr, /This device runs the mesh home, so it cannot leave it\. To end the mesh, run: cns mesh remove home laptop, then cns mesh delete home\./);
+  const occupied = await mesh(hub, ["delete", "home"]);
+  assert.equal(occupied.code, 1);
+  assert.match(occupied.stderr, /The mesh home still has a member: laptop\. Remove it first: cns mesh remove home laptop, then cns mesh delete home\./);
+  assert.ok(has(hub, "meshes", "home"), "a refused delete changes nothing");
+  // Only the admin deletes it.
+  const notMine = await mesh(laptop, ["delete", "home"]);
+  assert.equal(notMine.code, 1);
+  assert.match(notMine.stderr, /Only the device that runs a mesh deletes it, and hub runs home\. To take this device out of it, run: cns mesh leave home\./);
+  assert.equal((await mesh(hub, ["remove", "home", "laptop"])).code, 0);
+  const versionOf = async () => JSON.parse((await mesh(hub, ["list", "home", "--json"])).stdout)[0].version as number;
+  const last = await versionOf();
+  const deleted = await mesh(hub, ["delete", "home"]);
+  assert.equal(deleted.code, 0, deleted.output);
+  assert.match(deleted.stdout, /^Deleted the mesh home\.\n$/);
+  assert.ok(!has(hub, "meshes", "home"));
+  // The members it reaches leave the mesh; each keeps its own pairing.
+  await eventually("laptop leaves the deleted mesh", () => !has(laptop, "meshes", "home"));
   assert.ok(has(laptop, "peers", "hub"));
+  const gone = await mesh(hub, ["delete", "home"]);
+  assert.equal(gone.code, 1);
+  assert.match(gone.stderr, /This device has no mesh named home\./);
+  // A mesh made again under the name starts above the old one's lists, so none of those,
+  // which the same key signed for the same name, can replace its list and bring members back.
+  assert.equal((await mesh(hub, ["create", "home"])).code, 0);
+  assert.equal(await versionOf(), last + 1);
+  assert.equal((await mesh(hub, ["delete", "home"])).code, 0);
+  assert.equal((await mesh(hub, ["create", "home"])).code, 0);
+  assert.equal(await versionOf(), last + 2);
 });
 
 test("a mesh bot token makes a machine nobody sits at a member that others reach, until the admin removes it", { skip: process.platform === "win32", timeout: 120000 }, async (t) => {

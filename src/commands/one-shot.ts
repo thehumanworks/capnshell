@@ -1,5 +1,6 @@
 import { RpcTarget } from "capnweb";
 import type { ConnectionController } from "../console.js";
+import { errorMessage } from "../errors.js";
 import type { PeerConfig } from "../options.js";
 import { MAX_EXEC_CHUNK_BYTES, type ExecInput, type ExecSink, type PtyExit, type PtyScreen, type PtySessionInfo, type RunResult } from "../shell.js";
 import { attachSession, attachTerminal, plain } from "../terminal.js";
@@ -75,16 +76,34 @@ export class StdinSource extends RpcTarget implements ExecInput {
   }
 }
 
+/**
+ * A device running a cns from before --secret refuses the option that carries the
+ * variables, before it starts anything: say that, in place of its schema error.
+ */
+export function beforeSecrets(error: unknown, device: string): unknown {
+  const message = errorMessage(error);
+  if (!/unrecognized.key/i.test(message) || !/\benv\b/.test(message)) return error;
+  return new Error(`${device} runs a cns from before --secret, so nothing was started there. Update cns on ${device} to 2.0.0 or later.`);
+}
+
 /** Run a connect-mode command against peer `id` and return the CLI exit status. */
 export async function runOneShot(config: PeerConfig, controller: ConnectionController, id: string, signal: AbortSignal): Promise<number> {
+  if (!config.env) return await oneShot(config, controller, id, signal);
+  try { return await oneShot(config, controller, id, signal); }
+  catch (error) { throw beforeSecrets(error, config.expect.name); }
+}
+
+async function oneShot(config: PeerConfig, controller: ConnectionController, id: string, signal: AbortSignal): Promise<number> {
   const { command, cwd, timeoutMs, cols, rows, term, name } = config;
+  // Only a command that names secrets sends the option, so every other command still runs on a device with an older cns.
+  const env = config.env ? { env: config.env } : {};
   switch (config.role) {
     case "run": {
       // Like ssh: piped or redirected input reaches the command, a terminal's does not; --no-stdin closes it.
       const input = config.stdin !== false && !process.stdin.isTTY ? new StdinSource() : undefined;
       const sink = new StdioSink();
       try {
-        const result = await controller.exec(id, sink, command!, { cwd, timeoutMs }, input);
+        const result = await controller.exec(id, sink, command!, { cwd, timeoutMs, ...env }, input);
         if (result.timedOut) console.error("cns: command timed out");
         return commandExitCode(result);
       } catch (error) {
@@ -95,9 +114,13 @@ export async function runOneShot(config: PeerConfig, controller: ConnectionContr
         input?.close();
       }
     }
-    case "tty": {
+    case "shell": {
+      if (config.detached) {
+        const { runDetached } = await import("./detached-shell.js");
+        return await runDetached(config, controller, id, signal);
+      }
       if (name && !config.attach) {
-        await controller.startPtySession(id, name, { command, cwd, timeoutMs, cols, rows, term });
+        await controller.startPtySession(id, name, { command, cwd, timeoutMs, cols, rows, term, ...env });
         return 0;
       }
       if (name) {
@@ -115,7 +138,7 @@ export async function runOneShot(config: PeerConfig, controller: ConnectionContr
         return 0;
       }
       const result = await attachTerminal((sink, options) => controller.openPty(id, sink, options),
-        { command, cwd, timeoutMs, cols, rows, term }, { signal, screen: config.screen });
+        { command, cwd, timeoutMs, cols, rows, term, ...env }, { signal, screen: config.screen });
       // An unnamed session ends with its program, so it never detaches.
       const exit = result.exit!;
       if ("screen" in result && result.screen) printScreen(result.screen);

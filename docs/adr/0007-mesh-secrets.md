@@ -62,6 +62,43 @@ and with nothing readable by a device that may not read it.
 - A cns older than secrets does not answer `secrets`, so it receives nothing. The member
   list is unchanged, so older members stay in the mesh.
 
+## Addendum, 2026-11-24: using a secret without printing it (cns 2.0.0)
+
+- **Naming.** A secret is written `NAME` or `MESH:NAME`. `get` and `rm` look in every mesh
+  the device is in and need the mesh only when two hold the name; then they refuse and
+  show both. `set` takes a bare name on a device in one mesh and asks which in several:
+  it never chooses where a value goes.
+- **`cns secret run [--only NAMES | --exclude NAMES] -- COMMAND`** runs a command on this
+  device with the secrets it reads as environment variables, so a value need not pass
+  through `$(cns secret get ...)` and a shell's history. Two meshes holding one name among
+  the chosen stop the command: one variable holds one value, and picking silently would
+  hand a program the wrong key. The command follows the rules of `cns run`: its words are
+  joined with spaces and a shell runs them, so a word with spaces must be quoted for that
+  shell. Running the words as an argument list, as `env` does, was the alternative; it
+  keeps argument boundaries but makes `cns secret run -- 'a | b'` and `cns run DEVICE --
+  'a | b'` behave differently.
+- **Variables another member chose.** Any member may set a secret of any name, and before
+  `secret run` a name was only a label. Now a member could set `PATH` or `BASH_ENV` and so
+  run code in every command another member starts with all its secrets. Without `--only`,
+  `secret run` therefore refuses a variable that tells programs what to run or where to
+  connect when a device other than this one set it, and says who did; `--only` names what
+  the command gets and is not checked. The list of such names cannot be complete, since
+  any program may read a variable of its own, so a mesh with members that are not trusted
+  to run commands on the others needs `--only`.
+- **`--secret NAMES` on `cns run` and `cns shell`** opens the secrets on the calling device
+  and sends them as an `env` option of the call that starts the program, over the encrypted
+  link. cns never puts them in the command string or in the arguments of what it starts,
+  and a session's listing does not include them; a command that expands one into another
+  program's arguments puts it there itself. The target need not be a member of the mesh,
+  nor the device a `--device` secret was set for: a reader can already print the value and
+  send it any other way, so the option is no new power, but it is a new and easy path by
+  which a value reaches a device outside the mesh, where the program, its children and
+  that device's user can read it. A device that starts a session receives the variables
+  before it can refuse the call for another reason. A device from before this refuses the
+  unknown option before starting anything, and the caller says to update it.
+- The first consequence above about agents holds here too: an agent with `shell` on a
+  reader can run `cns secret run`. There are still no MCP or pi tools for secrets.
+
 ## Alternatives considered
 
 - **Fetching from the owner when needed.** Simpler, but it fails whenever the owner sleeps,

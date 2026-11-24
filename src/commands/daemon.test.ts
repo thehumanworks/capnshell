@@ -293,7 +293,7 @@ test("the daemon starts, proxies a linked device to attached consoles, survives 
   const command = "printf ATTACHED_RUN";
   await attachment.send(command, "ATTACHED_RUN");
   await attachment.waitFor("[exit=0;");
-  await attachment.send(":tty", ":tty and :attach require an interactive local terminal");
+  await attachment.send(":shell", ":shell and :attach require an interactive local terminal");
   attachment.child.stdin.write(":quit\n");
   assert.equal(await attachment.exited, 0, attachment.output);
   // EOF may arrive before asynchronous RPCs finish. Drain queued commands without

@@ -143,7 +143,7 @@ function inEmulator(t: TestContext, args: string[], env: Record<string, string>,
 
 /** A device, studio, running its daemon, and laptop paired with it with every grant. */
 async function pairedStudio(t: TestContext) {
-  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-tty-paired-")));
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-shell-paired-")));
   // Hooks run in the order they were added: stop the daemon and proxy, then remove the directory.
   const cleanups: Array<() => Promise<unknown>> = [];
   t.after(async () => { for (const cleanup of cleanups.reverse()) await cleanup(); await rm(root, { recursive: true, force: true }); });
@@ -220,27 +220,27 @@ async function pairedStudio(t: TestContext) {
   };
 }
 
-// What changed: cns tty DEVICE at a terminal used to join the device's session main, so every
+// What changed: cns shell DEVICE at a terminal used to join the device's session main, so every
 // terminal on a device typed into the same shell. Each now starts a session of its own.
 
-test("two terminals running cns tty DEVICE each get a shell of their own", { skip: !posix, timeout: 60000 }, async (t) => {
+test("two terminals running cns shell DEVICE each get a shell of their own", { skip: !posix, timeout: 60000 }, async (t) => {
   const { laptop, sessions, terminal } = await pairedStudio(t);
-  const [a, b] = [terminal(laptop, ["tty", "studio"]), terminal(laptop, ["tty", "studio"])];
+  const [a, b] = [terminal(laptop, ["shell", "studio"]), terminal(laptop, ["shell", "studio"])];
   const [nameA, nameB] = await Promise.all([a.attached(), b.attached()]);
   assert.notEqual(nameA, nameB, `both terminals attached to the session ${nameA}`);
-  assert.deepEqual([nameA, nameB].sort(), ["tty-1", "tty-2"]);
+  assert.deepEqual([nameA, nameB].sort(), ["shell-1", "shell-2"]);
   a.write("echo typed-$((2+3))-in-a\r");
   b.write("echo typed-$((3+4))-in-b\r");
   await Promise.all([a.waitFor("typed-5-in-a"), b.waitFor("typed-7-in-b")]);
   await pause(300);
   assert.doesNotMatch(b.output, /typed-5-in-a/, "terminal b shows what was typed in terminal a");
   assert.doesNotMatch(a.output, /typed-7-in-b/, "terminal a shows what was typed in terminal b");
-  assert.deepEqual(await sessions(), ["tty-1", "tty-2"]);
+  assert.deepEqual(await sessions(), ["shell-1", "shell-2"]);
 });
 
 test("cns sessions without a device lists every paired device's sessions, and names the ones it may not list", { skip: !posix, timeout: 60000 }, async (t) => {
   const { cli, pair, laptop } = await pairedStudio(t);
-  assert.equal((await cli(laptop, ["tty", "studio", "--name", "build", "--", "sleep 60"])).code, 0);
+  assert.equal((await cli(laptop, ["shell", "studio", "--name", "build", "--", "sleep 60"])).code, 0);
   const listed = await cli(laptop, ["sessions"]);
   assert.equal(listed.code, 0, listed.stderr);
   assert.match(listed.stdout, /^DEVICE +NAME +STATUS +SIZE +ATTACHED +TITLE OR COMMAND\nstudio +build +running +80x24 +0 +sleep 60\n$/);
@@ -258,7 +258,7 @@ test("cns sessions without a device lists every paired device's sessions, and na
 
 test("cns ui moves between sessions with its switch key, starts new ones and detaches leaving them all running", { skip: !posix, timeout: 60000 }, async (t) => {
   const { cli, laptop, sessions, terminal } = await pairedStudio(t);
-  assert.equal((await cli(laptop, ["tty", "studio", "--name", "build", "--", "exec bash --noprofile --norc"])).code, 0);
+  assert.equal((await cli(laptop, ["shell", "studio", "--name", "build", "--", "exec bash --noprofile --norc"])).code, 0);
   const ui = terminal(laptop, ["ui"]);
   await ui.waitFor("cns ui · 1 device · 1 session");
   await ui.waitFor("1  build");
@@ -272,7 +272,7 @@ test("cns ui moves between sessions with its switch key, starts new ones and det
   ui.write("\x1d");
   await ui.waitFor("cns ui · 1 device", mark);
   await ui.waitFor("Esc studio/build", mark);
-  // n starts the next tty-N there and opens it.
+  // n starts the next shell-N there and opens it.
   ui.write("n");
   await pause(500);
   ui.write("echo in-new-$((1+1))\r");
@@ -290,15 +290,15 @@ test("cns ui moves between sessions with its switch key, starts new ones and det
   ui.write("d");
   await ui.waitFor("left cns ui; every session keeps running", mark);
   assert.equal(await ui.exited, 0);
-  assert.deepEqual(await sessions(), ["build", "tty-1"]);
+  assert.deepEqual(await sessions(), ["build", "shell-1"]);
   const listed = await cli(laptop, ["sessions", "studio", "--json"]);
   assert.ok((JSON.parse(listed.stdout) as Array<{ running: boolean }>).every((session) => session.running));
 });
 
 test("cns ui opens a session named on the command line, and the switcher's x kills after asking", { skip: !posix, timeout: 60000 }, async (t) => {
   const { cli, laptop, sessions, gone, terminal } = await pairedStudio(t);
-  assert.equal((await cli(laptop, ["tty", "studio", "--name", "work", "--", "printf 'work-ready\\n'; exec bash --noprofile --norc"])).code, 0);
-  assert.equal((await cli(laptop, ["tty", "studio", "--name", "spare", "--", "sleep 60"])).code, 0);
+  assert.equal((await cli(laptop, ["shell", "studio", "--name", "work", "--", "printf 'work-ready\\n'; exec bash --noprofile --norc"])).code, 0);
+  assert.equal((await cli(laptop, ["shell", "studio", "--name", "spare", "--", "sleep 60"])).code, 0);
   const ui = terminal(laptop, ["ui", "studio/work", "--key", "C-b"]);
   await ui.waitFor("work-ready");
   let mark = ui.output.length;
@@ -325,7 +325,7 @@ test("cns ui opens a session named on the command line, and the switcher's x kil
 
 test("cns ui shows sessions side by side: + adds a pane, keys go to the current one, - removes it", { skip: !posix, timeout: 60000 }, async (t) => {
   const { cli, laptop, sessions, terminal } = await pairedStudio(t);
-  for (const name of ["left", "right"]) assert.equal((await cli(laptop, ["tty", "studio", "--name", name, "--", "exec bash --noprofile --norc"])).code, 0);
+  for (const name of ["left", "right"]) assert.equal((await cli(laptop, ["shell", "studio", "--name", name, "--", "exec bash --noprofile --norc"])).code, 0);
   const screen = async (name: string) => (await cli(laptop, ["screen", "studio", name])).stdout;
   const ui = terminal(laptop, ["ui", "studio/left"]);
   await pause(300);
@@ -384,7 +384,7 @@ test("cns ui refuses to run without a terminal, and names what to use instead", 
 
 test("a terminal's session is removed when its shell exits", { skip: !posix, timeout: 60000 }, async (t) => {
   const { laptop, sessions, gone, terminal } = await pairedStudio(t);
-  const shell = terminal(laptop, ["tty", "studio"]);
+  const shell = terminal(laptop, ["shell", "studio"]);
   const name = await shell.attached();
   assert.deepEqual(await sessions(), [name]);
   shell.write("exit 3\r");
@@ -394,7 +394,7 @@ test("a terminal's session is removed when its shell exits", { skip: !posix, tim
 
 test("Ctrl-C while a terminal is still attaching stops cns and ends its session", { skip: !posix, timeout: 60000 }, async (t) => {
   const { laptop, gone, terminal } = await pairedStudio(t);
-  const shell = terminal(laptop, ["tty", "studio"]);
+  const shell = terminal(laptop, ["shell", "studio"]);
   // The session has started, and the attachment to it is being made.
   const name = await shell.attached();
   shell.interrupt();
@@ -405,7 +405,7 @@ test("Ctrl-C while a terminal is still attaching stops cns and ends its session"
 
 test("closing a terminal ends the session it started, as closing an ssh window does", { skip: !posix, timeout: 60000 }, async (t) => {
   const { laptop, sessions, gone, terminal } = await pairedStudio(t);
-  const shell = terminal(laptop, ["tty", "studio"]);
+  const shell = terminal(laptop, ["shell", "studio"]);
   const name = await shell.attached();
   assert.deepEqual(await sessions(), [name]);
   shell.close();
@@ -416,18 +416,18 @@ test("closing a terminal ends the session it started, as closing an ssh window d
 
 test("Ctrl-] leaves a terminal's session running, says how to return, and --attach NAME rejoins it", { skip: !posix, timeout: 60000 }, async (t) => {
   const { laptop, sessions, terminal } = await pairedStudio(t);
-  const shell = terminal(laptop, ["tty", "studio"]);
+  const shell = terminal(laptop, ["shell", "studio"]);
   const name = await shell.attached();
   shell.write("\x1d");
   assert.equal(await shell.exited, 0);
   assert.deepEqual(await sessions(), [name], "the session keeps running");
-  const back = terminal(laptop, ["tty", "studio", "--attach", name]);
+  const back = terminal(laptop, ["shell", "studio", "--attach", name]);
   assert.equal(await back.attached(), name);
   back.write("echo back-$((4+4))\r");
   await back.waitFor("back-8");
   back.write("\x1d");
   assert.equal(await back.exited, 0);
-  assert.match(shell.output, new RegExp(`detached from ${name}; it keeps running on studio: cns tty studio --attach ${name} returns to it`));
+  assert.match(shell.output, new RegExp(`detached from ${name}; it keeps running on studio: cns shell studio --attach ${name} returns to it`));
 });
 
 // What a full-screen program does with its terminal, as Neovim does it: it asks whether the
@@ -478,7 +478,7 @@ test("a full-screen program draws where it means to, follows the terminal attach
   const { root, laptop, emulator } = await pairedStudio(t);
   const [program, result] = [path.join(root, "full-screen.mjs"), path.join(root, "result.json")];
   await writeFile(program, FULL_SCREEN_PROGRAM);
-  const first = emulator(laptop, ["tty", "studio"], 100, 30);
+  const first = emulator(laptop, ["shell", "studio"], 100, 30);
   const name = await first.attached();
   // The program's own terminal passes its output on unchanged, as a full-screen program sets it.
   first.write(`stty raw -echo; "${process.execPath}" "${program}" "${result}"; stty sane; echo left-$((1+1))\r`);
@@ -493,7 +493,7 @@ test("a full-screen program draws where it means to, follows the terminal attach
   assert.ok((await first.drawn()).some((row) => row.includes(`detached from ${name}`)), "the screen from before the program is back, with what cns said");
 
   // A terminal of another size takes over: the program must learn the new size from the session.
-  const second = emulator(laptop, ["tty", "studio", "--attach", name], 80, 20);
+  const second = emulator(laptop, ["shell", "studio", "--attach", name], 80, 20);
   assert.deepEqual((await second.shows("size 80x20.")).slice(2, 4), ["         ab", "           cd"]);
   assert.equal((await second.state()).screen, "alternate", "joining a session on its alternate screen puts the terminal on its own");
 
@@ -510,12 +510,12 @@ test("a full-screen program draws where it means to, follows the terminal attach
   assert.equal((await second.state()).screen, "normal");
 });
 
-// What changed: cns tty used to show a session on the terminal's alternate screen, as tmux
+// What changed: cns shell used to show a session on the terminal's alternate screen, as tmux
 // does. That screen keeps no scrollback, and terminals turn the wheel into arrow keys on it,
 // so scrolling up went through the shell's history instead.
 test("a terminal's session scrolls into the terminal's own scrollback, and leaves its output behind", { skip: !posix, timeout: 60000 }, async (t) => {
   const { laptop, emulator } = await pairedStudio(t);
-  const shell = emulator(laptop, ["tty", "studio"], 100, 12);
+  const shell = emulator(laptop, ["shell", "studio"], 100, 12);
   const name = await shell.attached();
   await shell.shows("$");
   assert.equal((await shell.state()).screen, "normal");
@@ -548,7 +548,7 @@ test("a terminal's session scrolls into the terminal's own scrollback, and leave
 
 test("stopping cns while a full-screen program has the terminal gives the terminal back", { skip: !posix, timeout: 60000 }, async (t) => {
   const { laptop, gone, emulator } = await pairedStudio(t);
-  const shell = emulator(laptop, ["tty", "studio"], 100, 12);
+  const shell = emulator(laptop, ["shell", "studio"], 100, 12);
   const name = await shell.attached();
   await shell.shows("$");
   shell.write("printf '\\033[?1049h\\033[?1003h\\033[?1006h\\033[?2004h\\033[3;1Hfull-screen'; cat\r");
@@ -561,9 +561,9 @@ test("stopping cns while a full-screen program has the terminal gives the termin
   await gone(name);
 });
 
-test("CNS_KEY=none, which is for cns tty, leaves cns ui its Ctrl-]", { skip: !posix, timeout: 60000 }, async (t) => {
+test("CNS_KEY=none, which is for cns shell, leaves cns ui its Ctrl-]", { skip: !posix, timeout: 60000 }, async (t) => {
   const { cli, laptop } = await pairedStudio(t);
-  assert.equal((await cli(laptop, ["tty", "studio", "--name", "build", "--", "exec bash --noprofile --norc"])).code, 0);
+  assert.equal((await cli(laptop, ["shell", "studio", "--name", "build", "--", "exec bash --noprofile --norc"])).code, 0);
   const ui = inTerminal(t, ["ui", "studio/build"], { ...laptop.env, CNS_KEY: "none" });
   await pause(500);
   ui.write("echo here-$((2+2))\r");
@@ -579,7 +579,7 @@ test("CNS_KEY=none, which is for cns tty, leaves cns ui its Ctrl-]", { skip: !po
 
 test("--key names the key that detaches, and none sends every key to the session", { skip: !posix, timeout: 60000 }, async (t) => {
   const { laptop, cli, sessions, terminal } = await pairedStudio(t);
-  const shell = terminal(laptop, ["tty", "studio", "--key", "C-b"]);
+  const shell = terminal(laptop, ["shell", "studio", "--key", "C-b"]);
   await shell.waitFor("Ctrl-B detaches.");
   const name = /session (\S+)\. Ctrl-B detaches/.exec(shell.output)![1]!;
   // Ctrl-] is the session's now: cat -v shows it as it shows any control key.
@@ -593,7 +593,7 @@ test("--key names the key that detaches, and none sends every key to the session
   assert.deepEqual(await sessions(), [name]);
 
   // CNS_KEY is the same setting; with none, both keys reach the program.
-  const all = inTerminal(t, ["tty", "studio", "--attach", name], { ...laptop.env, CNS_KEY: "none" });
+  const all = inTerminal(t, ["shell", "studio", "--attach", name], { ...laptop.env, CNS_KEY: "none" });
   await all.waitFor(`session ${name}.`);
   assert.doesNotMatch(all.output, /detaches/);
   // The redraw shows what the first terminal left: cat -v is still reading.
@@ -605,19 +605,19 @@ test("--key names the key that detaches, and none sends every key to the session
   await pause(300);
   all.write("exit 5\r");
   assert.equal(await all.exited, 5);
-  assert.match((await cli(laptop, ["tty", "studio", "--key", "C-c"])).stderr, /--key cannot be Ctrl-C: the session needs it/);
+  assert.match((await cli(laptop, ["shell", "studio", "--key", "C-c"])).stderr, /--key cannot be Ctrl-C: the session needs it/);
 });
 
 // Asks as programs do: the keyboard mode, then device attributes, which every terminal answers.
 const ASK_KEYBOARD = `printf '\\033[?u\\033[c'; IFS= read -rs -d c reply; printf 'speaks=%s.\\n' "$(printf %s "$reply" | tr -d '\\033' | tr '[' :)"`;
 
-// What changed: cns tty kept the kitty keyboard protocol from the terminal, so a program on
+// What changed: cns shell kept the kitty keyboard protocol from the terminal, so a program on
 // the device saw Shift+Enter as Enter. With --kitty-keys the session says its terminal speaks
 // the protocol, the terminal is put in the program's mode, and the detach key, which then
 // arrives as an escape sequence, still detaches.
 test("--kitty-keys gives a session's program the terminal's kitty keyboard protocol, and the detach key keeps detaching", { skip: !posix, timeout: 60000 }, async (t) => {
   const { laptop, sessions, emulator } = await pairedStudio(t);
-  const shell = emulator(laptop, ["tty", "studio", "--kitty-keys"], 100, 12, { kitty: true });
+  const shell = emulator(laptop, ["shell", "studio", "--kitty-keys"], 100, 12, { kitty: true });
   const name = await shell.attached();
   await shell.shows("$");
   // cns asked the terminal once, before attaching; nothing the session asks reaches it.
@@ -640,7 +640,7 @@ test("--kitty-keys gives a session's program the terminal's kitty keyboard proto
   assert.deepEqual(await sessions(), [name]);
 
   // A terminal that joins later is put in the mode the program set before it came.
-  const back = emulator(laptop, ["tty", "studio", "--attach", name, "--kitty-keys"], 100, 12, { kitty: true });
+  const back = emulator(laptop, ["shell", "studio", "--attach", name, "--kitty-keys"], 100, 12, { kitty: true });
   await back.shows("cat -v");
   await back.keyboardIs([5, 1, 0, 0]);
   // A full-screen program's own mode, on the alternate screen, and the way out of it.
@@ -656,7 +656,7 @@ test("--kitty-keys gives a session's program the terminal's kitty keyboard proto
   assert.equal((await back.state()).screen, "normal");
 
   // Without --kitty-keys the same terminal is asked nothing and keeps its mode.
-  const plain = emulator(laptop, ["tty", "studio", "--attach", name], 100, 12, { kitty: true });
+  const plain = emulator(laptop, ["shell", "studio", "--attach", name], 100, 12, { kitty: true });
   await plain.shows("editor");
   assert.deepEqual(plain.sent, []);
   assert.deepEqual(await plain.keyboard(), [0, 0, 0, 0]);
@@ -666,7 +666,7 @@ test("--kitty-keys gives a session's program the terminal's kitty keyboard proto
 
 test("--kitty-keys at a terminal without the protocol says so and changes nothing", { skip: !posix, timeout: 60000 }, async (t) => {
   const { laptop, emulator } = await pairedStudio(t);
-  const shell = emulator(laptop, ["tty", "studio", "--kitty-keys"], 100, 12);
+  const shell = emulator(laptop, ["shell", "studio", "--kitty-keys"], 100, 12);
   await shell.attached();
   assert.match(shell.output, /this terminal does not speak the kitty keyboard protocol; --kitty-keys changes nothing here/);
   await shell.shows("$");
@@ -683,7 +683,7 @@ test("--kitty-keys at a terminal without the protocol says so and changes nothin
 test("stopping cns while a program has set the terminal's keyboard mode gives the terminal its own mode back", { skip: !posix, timeout: 60000 }, async (t) => {
   const { laptop, gone, emulator } = await pairedStudio(t);
   // CNS_KITTY_KEYS is the same setting as --kitty-keys.
-  const keyed = emulator({ env: { ...laptop.env, CNS_KITTY_KEYS: "1" } }, ["tty", "studio"], 100, 12, { kitty: true });
+  const keyed = emulator({ env: { ...laptop.env, CNS_KITTY_KEYS: "1" } }, ["shell", "studio"], 100, 12, { kitty: true });
   const name = await keyed.attached();
   await keyed.shows("$");
   keyed.write("printf '\\033[>1u\\033[?1049h\\033[>15u\\033[3;1Hfull-screen'; cat\r");
@@ -700,7 +700,7 @@ test("stopping cns while a program has set the terminal's keyboard mode gives th
 // go but the session, where the shell read it as typed keys.
 test("a terminal that answers too late is treated as one without the protocol, and its answer is not typed into the session", { skip: !posix, timeout: 60000 }, async (t) => {
   const { laptop, emulator } = await pairedStudio(t);
-  const shell = emulator(laptop, ["tty", "studio", "--kitty-keys"], 100, 12, { kitty: true, answerAfterMs: 2500 });
+  const shell = emulator(laptop, ["shell", "studio", "--kitty-keys"], 100, 12, { kitty: true, answerAfterMs: 2500 });
   await shell.attached();
   assert.match(shell.output, /this terminal did not say in time whether it speaks the kitty keyboard protocol; --kitty-keys changes nothing here/);
   await shell.shows("$");
@@ -718,7 +718,7 @@ test("a terminal that answers too late is treated as one without the protocol, a
 
 test("keys typed while cns asks the terminal about its keyboard reach the session", { skip: !posix, timeout: 60000 }, async (t) => {
   const { laptop, emulator } = await pairedStudio(t);
-  const shell = emulator(laptop, ["tty", "studio", "--kitty-keys"], 100, 12, { kitty: true });
+  const shell = emulator(laptop, ["shell", "studio", "--kitty-keys"], 100, 12, { kitty: true });
   // Typed before cns has started, so it is waiting when the terminal's answers arrive.
   shell.write("echo early-$((40+2)); exit 6\r");
   assert.equal(await shell.exited, 6);
@@ -728,9 +728,9 @@ test("keys typed while cns asks the terminal about its keyboard reach the sessio
 test("a device that may only watch sessions does not land in another terminal's session", { skip: !posix, timeout: 60000 }, async (t) => {
   const { laptop, pair, terminal } = await pairedStudio(t);
   const viewer = await pair("viewer", "sessions:view");
-  const shell = terminal(laptop, ["tty", "studio"]);
+  const shell = terminal(laptop, ["shell", "studio"]);
   const name = await shell.attached();
-  const watching = terminal(viewer, ["tty", "studio"]);
+  const watching = terminal(viewer, ["shell", "studio"]);
   const outcome = await Promise.race([watching.exited, watching.attached().then((session) => `attached to ${session}`, () => "neither")]);
   assert.notEqual(outcome, `attached to ${name}`, "the viewer joined laptop's terminal");
   // It may not start a session or open a terminal, so it is refused, saying what to grant.
@@ -742,7 +742,7 @@ test("a device that may only watch sessions does not land in another terminal's 
 
 test("a terminal's session can be attached, captured and typed into from elsewhere while it runs", { skip: !posix, timeout: 60000 }, async (t) => {
   const { cli, laptop, sessions, terminal } = await pairedStudio(t);
-  const shell = terminal(laptop, ["tty", "studio"]);
+  const shell = terminal(laptop, ["shell", "studio"]);
   const name = await shell.attached();
   shell.write("echo marker-$((6*7))\r");
   await shell.waitFor("marker-42");
@@ -755,7 +755,7 @@ test("a terminal's session can be attached, captured and typed into from elsewhe
   await shell.waitFor("keys-4");
 
   // A second terminal joins it with --attach: it is redrawn there, and what it types reaches the first.
-  const second = terminal(laptop, ["tty", "studio", "--attach", name]);
+  const second = terminal(laptop, ["shell", "studio", "--attach", name]);
   assert.equal(await second.attached(), name);
   await second.waitFor("marker-42");
   const from = shell.output.length;
@@ -788,7 +788,7 @@ test("a terminal's session can be attached, captured and typed into from elsewhe
 test("a terminal survives an outage and discards keys typed while disconnected", { skip: !posix, timeout: 60000 }, async (t) => {
   const { root, laptop, throughProxy, emulator } = await pairedStudio(t);
   const proxy = await throughProxy();
-  const shell = emulator(laptop, ["tty", "studio"], 100, 30);
+  const shell = emulator(laptop, ["shell", "studio"], 100, 30);
   const name = await shell.attached();
   shell.write("echo hi-$((40+2))\r");
   await shell.waitFor("hi-42");
@@ -817,14 +817,14 @@ test("a device granted only shell gets an unnamed terminal, and a watcher may no
   const { laptop, pair, terminal } = await pairedStudio(t);
   const shellOnly = await pair("shellonly", "shell");
   const viewer = await pair("viewer", "sessions:view");
-  const plain = terminal(shellOnly, ["tty", "studio"]);
+  const plain = terminal(shellOnly, ["shell", "studio"]);
   await plain.waitFor("opening a terminal that ends with the connection");
   plain.write("exit 5\r");
   assert.equal(await plain.exited, 5);
 
-  const shell = terminal(laptop, ["tty", "studio"]);
+  const shell = terminal(laptop, ["shell", "studio"]);
   const name = await shell.attached();
-  const watching = terminal(viewer, ["tty", "studio", "--attach", name]);
+  const watching = terminal(viewer, ["shell", "studio", "--attach", name]);
   assert.equal(await watching.attached(), name);
   watching.write("x");
   await watching.waitFor(`lets this device watch ${name} but not type into it`);
@@ -835,14 +835,14 @@ test("a device granted only shell gets an unnamed terminal, and a watcher may no
 test("a session replaced while disconnected is not silently joined", { skip: !posix, timeout: 60000 }, async (t) => {
   const { cli, laptop, throughProxy, terminal } = await pairedStudio(t);
   const proxy = await throughProxy();
-  const shell = terminal(laptop, ["tty", "studio"]);
+  const shell = terminal(laptop, ["shell", "studio"]);
   const name = await shell.attached();
   proxy.refusing = true;
   proxy.cut();
   await shell.waitFor("reconnecting");
   await proxy.bypass();
   assert.equal((await cli(laptop, ["kill", "studio", name])).code, 0);
-  assert.equal((await cli(laptop, ["tty", "studio", "--name", name, "--", "sleep 30"])).code, 0);
+  assert.equal((await cli(laptop, ["shell", "studio", "--name", name, "--", "sleep 30"])).code, 0);
   proxy.refusing = false;
   assert.equal(await shell.exited, 1);
   assert.match(shell.output, new RegExp(`${name} on studio ended and was replaced while disconnected`));

@@ -1,16 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { AuthError } from "./auth.js";
-import { afterOpenFailure, Final, RETRY_MAX_MS, RETRY_MIN_MS, sessionReplaced, type AfterOpenFailure, type OpenFailure } from "./tty-recovery.js";
+import { afterOpenFailure, Final, RETRY_MAX_MS, RETRY_MIN_MS, sessionReplaced, type AfterOpenFailure, type OpenFailure } from "./shell-recovery.js";
 
 const MINUTES_10 = 10 * 60 * 1000;
 const NOW = 1_000_000;
 
-/** Where `cns tty studio` is when a try to reach its session fails. */
+/** Where `cns shell studio` is when a try to reach its session fails. */
 const situations = {
-  "cns tty studio, first try": { first: true, own: true, name: undefined },
+  "cns shell studio, first try": { first: true, own: true, name: undefined },
   "--attach work, first try": { first: true, own: false, name: "work" },
-  "cns tty studio, reconnecting": { first: false, own: true, name: "tty-1" },
+  "cns shell studio, reconnecting": { first: false, own: true, name: "shell-1" },
   "--attach work, reconnecting": { first: false, own: false, name: "work" },
 } satisfies Record<string, Pick<OpenFailure, "first" | "own" | "name">>;
 
@@ -67,12 +67,12 @@ const table: Record<keyof typeof failures, Outcome[]> = {
   ],
   "the session is not there": [
     final(1, "there is no session a new session on studio"), final(1, "there is no session work on studio; cns sessions studio lists them."),
-    final(1, "the session tty-1 no longer exists on studio: it was killed, its time limit passed, or studio's daemon restarted."),
+    final(1, "the session shell-1 no longer exists on studio: it was killed, its time limit passed, or studio's daemon restarted."),
     final(1, "the session work no longer exists on studio: it was killed"),
   ],
   "the session ended while being attached": [
     final(1, "the session a new session no longer exists on studio."), final(1, "the session work no longer exists on studio."),
-    final(1, "the session tty-1 no longer exists on studio."), final(1, "the session work no longer exists on studio."),
+    final(1, "the session shell-1 no longer exists on studio."), final(1, "the session work no longer exists on studio."),
   ],
   "studio keeps as many sessions as it may": [...both(final(1, "studio already holds as many named sessions as it keeps")), ...both(final(1, "cns kill studio NAME ends one."))],
   "another session took its name": [...both(final(1, "work on studio ended and was replaced while disconnected.")), ...both(final(1, "was replaced"))],
@@ -115,8 +115,8 @@ test("reconnecting waits 0.5 s, doubling to 15 s, and gives up only once the dea
   assert.deepEqual(waits, [500, 1000, 2000, 4000, 8000, RETRY_MAX_MS, RETRY_MAX_MS, RETRY_MAX_MS]);
 
   const deadline = NOW + MINUTES_10;
-  assert.equal(afterOpenFailure(unreachable, at("cns tty studio, reconnecting", { now: deadline })).kind, "retry");
-  assert.deepEqual(afterOpenFailure(unreachable, at("cns tty studio, reconnecting", { now: deadline + 1 })), {
+  assert.equal(afterOpenFailure(unreachable, at("cns shell studio, reconnecting", { now: deadline })).kind, "retry");
+  assert.deepEqual(afterOpenFailure(unreachable, at("cns shell studio, reconnecting", { now: deadline + 1 })), {
     kind: "give-up", message: "gave up reaching studio after 10 minutes: connect ECONNREFUSED 127.0.0.1:7777",
   });
   // Past the deadline, a failure that has a reason still says it, and a first try still reports its own.
@@ -129,12 +129,12 @@ test("reconnecting waits 0.5 s, doubling to 15 s, and gives up only once the dea
 
 test("a reattach reaches only the session it first attached to", () => {
   const first = { pid: 41, startedAt: "2026-11-10T12:00:00.000Z" };
-  assert.equal(sessionReplaced(first, { ...first }, "studio", "tty-1", true), undefined);
+  assert.equal(sessionReplaced(first, { ...first }, "studio", "shell-1", true), undefined);
   for (const other of [{ ...first, pid: 42 }, { ...first, startedAt: "2026-11-10T12:05:00.000Z" }]) {
-    const own = sessionReplaced(first, other, "studio", "tty-1", true);
-    assert.deepEqual([own?.message, own?.code], ["tty-1 on studio ended and was replaced while disconnected; cns tty studio opens a new terminal.", 1]);
+    const own = sessionReplaced(first, other, "studio", "shell-1", true);
+    assert.deepEqual([own?.message, own?.code], ["shell-1 on studio ended and was replaced while disconnected; cns shell studio opens a new terminal.", 1]);
     const joined = sessionReplaced(first, other, "studio", "work", false);
-    assert.equal(joined?.message, "work on studio ended and was replaced while disconnected; run cns tty studio --attach work again to attach to the new one.");
+    assert.equal(joined?.message, "work on studio ended and was replaced while disconnected; run cns shell studio --attach work again to attach to the new one.");
     // It ends the attach with that message.
     check(afterOpenFailure(joined, at("--attach work, reconnecting")), final(1, joined!.message), "replaced");
   }

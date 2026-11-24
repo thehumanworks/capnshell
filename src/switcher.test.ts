@@ -12,7 +12,7 @@ const session = (name: string, more: Partial<PtySessionInfo> = {}): PtySessionIn
 });
 const ended = { exitCode: 0, signal: null, signalNumber: null, timedOut: false, elapsedMs: 10, error: null };
 const fleet: DeviceListing[] = [
-  { device: "lf", state: "listed", via: "direct", sessions: [session("tty-1", { title: "bun test" }), session("tty-2", { command: "vim src/pty.ts" })] },
+  { device: "lf", state: "listed", via: "direct", sessions: [session("shell-1", { title: "bun test" }), session("shell-2", { command: "vim src/pty.ts" })] },
   { device: "beelink", state: "not-granted", reason: "beelink does not let this device list its sessions (sessions:list)" },
   { device: "thestudio", state: "listed", via: "relay", sessions: [session("build", { command: "nix build", running: false, exit: ended }), session("agent", { title: "Claude Code", owner: "ccg5" })] },
 ];
@@ -21,7 +21,7 @@ const ref = (device: string, name: string): SessionRef => {
   const found = listing?.state === "listed" ? listing.sessions.find((one) => one.name === name) : undefined;
   return { device, name, ...found ? { pid: found.pid, startedAt: found.startedAt } : {} };
 };
-const state = (more: Partial<SwitcherState> = {}): SwitcherState => ({ ...initialState(["lf", "beelink", "thestudio"]), devices: fleet, selected: "lf/tty-1", ...more });
+const state = (more: Partial<SwitcherState> = {}): SwitcherState => ({ ...initialState(["lf", "beelink", "thestudio"]), devices: fleet, selected: "lf/shell-1", ...more });
 const key = (name: Exclude<Key["name"], "char">): Key => ({ name });
 const char = (value: string): Key => ({ name: "char", char: value });
 /** Press keys one after another, returning the final state and every effect along the way. */
@@ -38,7 +38,7 @@ const keys = (start: SwitcherState, ...pressed: Key[]) => {
 
 test("rows list each device, its note-worthy state and its sessions, numbering the first nine", () => {
   assert.deepEqual(rows(state()).map((row) => row.kind === "session" ? `${row.number} ${row.key}` : row.key),
-    ["lf", "1 lf/tty-1", "2 lf/tty-2", "beelink", "thestudio", "3 thestudio/build", "4 thestudio/agent"]);
+    ["lf", "1 lf/shell-1", "2 lf/shell-2", "beelink", "thestudio", "3 thestudio/build", "4 thestudio/agent"]);
   const many: DeviceListing[] = [{ device: "lf", state: "listed", via: "direct", sessions: Array.from({ length: 11 }, (_, index) => session(`s${index + 1}`)) }];
   assert.deepEqual(rows({ devices: many }).flatMap((row) => row.kind === "session" ? [row.number] : []), [1, 2, 3, 4, 5, 6, 7, 8, 9, null, null]);
 });
@@ -47,42 +47,42 @@ test("rows list each device, its note-worthy state and its sessions, numbering t
 const cases: Record<string, { from?: Partial<SwitcherState>; press: Key[]; effects: Effect[]; then?: (after: SwitcherState) => void }> = {
   "down, j, up and k move the selection one row at a time": {
     press: [key("down"), char("j"), key("up")], effects: [],
-    then: (after) => assert.equal(after.selected, "lf/tty-2"),
+    then: (after) => assert.equal(after.selected, "lf/shell-2"),
   },
   "down at the bottom stays at the bottom": { from: { selected: "thestudio/agent" }, press: [key("down"), char("j")], effects: [], then: (after) => assert.equal(after.selected, "thestudio/agent") },
   "up at the top stays at the top": { from: { selected: "lf" }, press: [key("up"), char("k")], effects: [], then: (after) => assert.equal(after.selected, "lf") },
   "Enter on a session opens it": { from: { selected: "thestudio/agent" }, press: [key("enter")], effects: [{ kind: "attach", ref: ref("thestudio", "agent") }] },
-  "Enter on a device starts the next tty-N there": { from: { selected: "beelink" }, press: [key("enter")], effects: [{ kind: "new", device: "beelink" }] },
+  "Enter on a device starts the next shell-N there": { from: { selected: "beelink" }, press: [key("enter")], effects: [{ kind: "new", device: "beelink" }] },
   "a digit opens that numbered session": { press: [char("3")], effects: [{ kind: "attach", ref: ref("thestudio", "build") }], then: (after) => assert.equal(after.selected, "thestudio/build") },
   "a digit with no session says so": { press: [char("9")], effects: [], then: (after) => assert.equal(after.message, "No session 9.") },
-  "Tab opens the session before the last one": { from: { previous: ref("lf", "tty-2"), current: ref("lf", "tty-1") }, press: [key("tab")], effects: [{ kind: "attach", ref: ref("lf", "tty-2") }] },
+  "Tab opens the session before the last one": { from: { previous: ref("lf", "shell-2"), current: ref("lf", "shell-1") }, press: [key("tab")], effects: [{ kind: "attach", ref: ref("lf", "shell-2") }] },
   "Tab with no earlier session says so": { press: [key("tab")], effects: [], then: (after) => assert.equal(after.message, "No previous session yet.") },
-  "Esc returns to the session the switcher was opened from": { from: { current: ref("lf", "tty-2") }, press: [key("escape")], effects: [{ kind: "attach", ref: ref("lf", "tty-2") }] },
-  "the switch key also returns, so pressing it twice is a no-op": { from: { current: ref("lf", "tty-2") }, press: [key("switch")], effects: [{ kind: "attach", ref: ref("lf", "tty-2") }] },
+  "Esc returns to the session the switcher was opened from": { from: { current: ref("lf", "shell-2") }, press: [key("escape")], effects: [{ kind: "attach", ref: ref("lf", "shell-2") }] },
+  "the switch key also returns, so pressing it twice is a no-op": { from: { current: ref("lf", "shell-2") }, press: [key("switch")], effects: [{ kind: "attach", ref: ref("lf", "shell-2") }] },
   "Esc with nowhere to return stays and says what to do": { press: [key("escape")], effects: [], then: (after) => assert.match(after.message!, /press d to leave/) },
-  "n starts the next tty-N on the selected session's device": { from: { selected: "thestudio/agent" }, press: [char("n")], effects: [{ kind: "new", device: "thestudio" }] },
+  "n starts the next shell-N on the selected session's device": { from: { selected: "thestudio/agent" }, press: [char("n")], effects: [{ kind: "new", device: "thestudio" }] },
   "x asks before killing, and y kills": { from: { selected: "thestudio/build" }, press: [char("x"), char("y")], effects: [{ kind: "kill", ref: ref("thestudio", "build") }] },
   "any other answer keeps the session": {
     from: { selected: "thestudio/build" }, press: [char("x"), char("n")], effects: [],
     then: (after) => assert.deepEqual([after.confirmKill, after.message], [null, "Kept thestudio/build."]),
   },
   "x on a device kills nothing": { from: { selected: "lf" }, press: [char("x"), char("y")], effects: [], then: (after) => assert.equal(after.confirmKill, null) },
-  "+ adds the selected session as a pane": { from: { selected: "thestudio/agent", panes: ["lf/tty-1"] }, press: [char("+")], effects: [{ kind: "add-pane", ref: ref("thestudio", "agent") }] },
-  "+ on a device starts a session there in a pane of its own": { from: { selected: "beelink", panes: ["lf/tty-1"] }, press: [char("+")], effects: [{ kind: "new", device: "beelink", pane: true }] },
+  "+ adds the selected session as a pane": { from: { selected: "thestudio/agent", panes: ["lf/shell-1"] }, press: [char("+")], effects: [{ kind: "add-pane", ref: ref("thestudio", "agent") }] },
+  "+ on a device starts a session there in a pane of its own": { from: { selected: "beelink", panes: ["lf/shell-1"] }, press: [char("+")], effects: [{ kind: "new", device: "beelink", pane: true }] },
   "+ on a session already in a pane says so": {
-    from: { selected: "lf/tty-2", panes: ["lf/tty-1", "lf/tty-2"] }, press: [char("+")], effects: [],
-    then: (after) => assert.equal(after.message, "lf/tty-2 is already in a pane."),
+    from: { selected: "lf/shell-2", panes: ["lf/shell-1", "lf/shell-2"] }, press: [char("+")], effects: [],
+    then: (after) => assert.equal(after.message, "lf/shell-2 is already in a pane."),
   },
   "+ with every pane taken says how to free one": {
     from: { selected: "thestudio/agent", panes: ["a/1", "a/2", "a/3", "a/4"] }, press: [char("+")], effects: [],
     then: (after) => assert.match(after.message!, /up to 4 panes; - removes/),
   },
-  "- closes the current session's pane when there are several": { from: { panes: ["lf/tty-1", "lf/tty-2"] }, press: [char("-")], effects: [{ kind: "remove-pane" }] },
-  "- with one session on screen says how to leave": { from: { panes: ["lf/tty-1"] }, press: [char("-")], effects: [], then: (after) => assert.match(after.message!, /Only one session is on screen/) },
+  "- closes the current session's pane when there are several": { from: { panes: ["lf/shell-1", "lf/shell-2"] }, press: [char("-")], effects: [{ kind: "remove-pane" }] },
+  "- with one session on screen says how to leave": { from: { panes: ["lf/shell-1"] }, press: [char("-")], effects: [], then: (after) => assert.match(after.message!, /Only one session is on screen/) },
   "d detaches": { press: [char("d")], effects: [{ kind: "detach" }] },
   "q detaches": { press: [char("q")], effects: [{ kind: "detach" }] },
-  "Ctrl-C detaches, even while asking to kill": { from: { selected: "lf/tty-1" }, press: [char("x"), key("interrupt")], effects: [{ kind: "detach" }] },
-  "a key clears the last message": { from: { message: "Killed lf/tty-9." }, press: [key("down")], effects: [], then: (after) => assert.equal(after.message, null) },
+  "Ctrl-C detaches, even while asking to kill": { from: { selected: "lf/shell-1" }, press: [char("x"), key("interrupt")], effects: [{ kind: "detach" }] },
+  "a key clears the last message": { from: { message: "Killed lf/shell-9." }, press: [key("down")], effects: [], then: (after) => assert.equal(after.message, null) },
 };
 for (const [name, { from, press: pressed, effects, then }] of Object.entries(cases)) {
   test(`switcher: ${name}`, () => {
@@ -93,13 +93,13 @@ for (const [name, { from, press: pressed, effects, then }] of Object.entries(cas
 }
 
 test("entering a session makes it current and the one before it previous, unless it is the same", () => {
-  let current = entered(state(), ref("lf", "tty-1"));
-  assert.deepEqual([current.current?.name, current.previous], ["tty-1", null]);
+  let current = entered(state(), ref("lf", "shell-1"));
+  assert.deepEqual([current.current?.name, current.previous], ["shell-1", null]);
   current = entered(current, ref("thestudio", "agent"));
-  assert.deepEqual([current.current?.name, current.previous?.name, current.selected], ["agent", "tty-1", "thestudio/agent"]);
+  assert.deepEqual([current.current?.name, current.previous?.name, current.selected], ["agent", "shell-1", "thestudio/agent"]);
   current = entered(current, ref("thestudio", "agent"));
-  assert.equal(current.previous?.name, "tty-1", "returning to the same session keeps the one before it");
-  current = entered(current, ref("lf", "tty-1"));
+  assert.equal(current.previous?.name, "shell-1", "returning to the same session keeps the one before it");
+  current = entered(current, ref("lf", "shell-1"));
   assert.equal(current.previous?.name, "agent", "so Tab toggles between the two latest");
 });
 
@@ -139,15 +139,15 @@ const plain = (frame: string) => {
 
 test("the switcher draws devices, numbered sessions, the selected screen and the keys", () => {
   const frame = draw(
-    { ...state({ selected: "thestudio/agent", current: ref("lf", "tty-2"), previous: ref("lf", "tty-1"), panes: ["lf/tty-2", "thestudio/build"] }), preview: { key: "thestudio/agent", text: "> fix the tests\n\n  Running bun test…\n" } },
+    { ...state({ selected: "thestudio/agent", current: ref("lf", "shell-2"), previous: ref("lf", "shell-1"), panes: ["lf/shell-2", "thestudio/build"] }), preview: { key: "thestudio/agent", text: "> fix the tests\n\n  Running bun test…\n" } },
     { cols: 120, rows: 14, switchLabel: "Ctrl-]" },
   );
   const screen = plain(frame);
   assert.equal(screen.length, 14);
-  assert.match(screen[0]!, /^ cns ui · 3 devices · 4 sessions +Esc lf\/tty-2 · Tab lf\/tty-1$/);
+  assert.match(screen[0]!, /^ cns ui · 3 devices · 4 sessions +Esc lf\/shell-2 · Tab lf\/shell-1$/);
   assert.match(screen[1]!, /^ lf +direct · 2 sessions +│thestudio\/agent · 120x40 · 0 attached · running$/);
-  assert.match(screen[2]!, /^ 1 {2}tty-1 +bun test +running +│$/);
-  assert.match(screen[3]!, /^ 2▪ tty-2 +vim src\/pty.ts +running +│> fix the tests$/, "a session on screen is marked");
+  assert.match(screen[2]!, /^ 1 {2}shell-1 +bun test +running +│$/);
+  assert.match(screen[3]!, /^ 2▪ shell-2 +vim src\/pty.ts +running +│> fix the tests$/, "a session on screen is marked");
   assert.match(screen[4]!, /^ beelink +may not list +│$/);
   assert.match(screen[5]!, /^ {3}beelink does not let this device list.*│  Running bun test…$/);
   assert.match(screen[7]!, /^ 3▪ build +nix build +exited 0 +│$/);
@@ -158,9 +158,9 @@ test("the switcher draws devices, numbered sessions, the selected screen and the
 });
 
 test("a narrow switcher drops the preview, and the kill question takes the message line", () => {
-  const screen = plain(draw(state({ confirmKill: ref("lf", "tty-1") }), { cols: 60, rows: 12, switchLabel: "Ctrl-B" }));
+  const screen = plain(draw(state({ confirmKill: ref("lf", "shell-1") }), { cols: 60, rows: 12, switchLabel: "Ctrl-B" }));
   assert.ok(screen.every((line) => !line.includes("│")));
-  assert.match(screen[10]!, /^ Kill lf\/tty-1\? It ends the program\. y to kill/);
+  assert.match(screen[10]!, /^ Kill lf\/shell-1\? It ends the program\. y to kill/);
   assert.match(screen[11]!, /^ Enter open · 1-9 jump .*…$/, "keys that do not fit are cut");
 });
 

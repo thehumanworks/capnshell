@@ -114,6 +114,8 @@ export const removePeerFile: (name: string) => void = peers.remove;
 
 /** The meshes this device has made or joined, one file per mesh name (mesh.ts). */
 export const meshFiles = privateFiles(() => path.join(configDirectory(), "meshes"), "mesh");
+/** The last member list version of each mesh this device ran and deleted, one file per mesh name (mesh.ts). */
+export const endedMeshFiles = privateFiles(() => path.join(configDirectory(), "meshes-ended"), "mesh");
 /** The mesh secrets this device keeps, one file per secret, named by its id (secrets.ts). */
 export const secretFiles = privateFiles(() => path.join(configDirectory(), "secrets"), "secret");
 

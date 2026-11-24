@@ -8,7 +8,7 @@
  * on every new connection. iptables drops SYNs to wsl's port, as the Hyper-V firewall does,
  * so studio's direct dials to wsl hang until they time out; wsl's dials out work.
  *
- * Then, from studio, it times `cns run wsl -- true`, and `cns tty wsl` under a pseudo
+ * Then, from studio, it times `cns run wsl -- true`, and `cns shell wsl` under a pseudo
  * terminal: how long until the shell prompt shows, and how long each typed key takes to
  * echo back.
  *
@@ -135,10 +135,10 @@ function cli(device: Device, args: string[], input = ""): Promise<{ code: number
   });
 }
 
-/** `cns tty wsl` at a pseudo terminal: time to the prompt, then each key's echo. */
-async function ttyRound(device: Device, peer: string): Promise<{ promptMs: number; echoMs: number[] }> {
+/** `cns shell wsl` at a pseudo terminal: time to the prompt, then each key's echo. */
+async function shellRound(device: Device, peer: string): Promise<{ promptMs: number; echoMs: number[] }> {
   const started = performance.now();
-  const child = spawn("script", ["-qfec", `stty rows 24 cols 80; exec ${binary} tty ${peer}`, "/dev/null"], { env: { ...device.env, TERM: "xterm-256color" }, stdio: ["pipe", "pipe", "pipe"] });
+  const child = spawn("script", ["-qfec", `stty rows 24 cols 80; exec ${binary} shell ${peer}`, "/dev/null"], { env: { ...device.env, TERM: "xterm-256color" }, stdio: ["pipe", "pipe", "pipe"] });
   let output = "";
   const waiters = new Set<() => void>();
   child.stdout.on("data", (chunk) => { output += chunk; for (const waiter of waiters) waiter(); });
@@ -273,12 +273,12 @@ async function main() {
     const prompt: number[] = [];
     const echoes: number[] = [];
     for (let i = 0; i < Math.max(1, Math.floor(rounds / 2)); i++) {
-      const round = await ttyRound(studio, "wsl");
+      const round = await shellRound(studio, "wsl");
       prompt.push(round.promptMs);
       echoes.push(...round.echoMs);
     }
-    console.log(`cns tty wsl, to the prompt: ${summary(prompt)}`);
-    console.log(`cns tty wsl, key echo:      ${summary(echoes)}`);
+    console.log(`cns shell wsl, to the prompt: ${summary(prompt)}`);
+    console.log(`cns shell wsl, key echo:      ${summary(echoes)}`);
     console.log(`studio's standing link to wsl afterwards: ${await linkVia() || "none"}`);
   } finally {
     await cleanup();

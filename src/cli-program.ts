@@ -24,11 +24,17 @@ export function createCli(): Command {
       delete process.env.CNS_TOKEN;
     });
   addPeerCommands(program, async (config) => {
-    // At a terminal, each cns tty DEVICE starts a named session of its own, which survives
+    // --secret: read and open the secrets here, before anything connects. They travel as the
+    // program's environment in the command's options, never in the command's text.
+    if (config.secrets) {
+      const { secretEnv } = await import("./commands/secret-cli.js");
+      config = { ...config, env: await secretEnv(config.secrets) };
+    }
+    // At a terminal, each cns shell DEVICE starts a named session of its own, which survives
     // connection loss; --attach NAME joins one. Piped input gets an unnamed terminal.
     const interactive = !!(process.stdin.isTTY && process.stdout.isTTY);
-    if (config.role === "tty" && !config.screen && config.command === undefined && (config.attach || (config.name === undefined && interactive))) {
-      const { attachPaired, NO_SESSIONS } = await import("./commands/paired-tty.js");
+    if (config.role === "shell" && !config.detached && !config.screen && config.command === undefined && (config.attach || (config.name === undefined && interactive))) {
+      const { attachPaired, NO_SESSIONS } = await import("./commands/paired-shell.js");
       const outcome = await attachPaired(config);
       if (typeof outcome === "number") { process.exitCode = outcome; return; }
       void NO_SESSIONS;
@@ -112,18 +118,29 @@ export function createCli(): Command {
   mesh.command("allow <name> <grants...>").description("Set what every member of the mesh may use on this device; none takes it all away")
     .option("--state <path>", "Local daemon state file")
     .action(async (name: string, grants: string[], options) => { await (await meshCommands()).allowMembers(name, grants, options); });
-  mesh.command("leave <name>").description("Forget the mesh and its members here; on the device that runs it, end the mesh")
+  mesh.command("leave <name>").description("Forget the mesh and its members here; the device that runs it deletes it instead")
     .option("--state <path>", "Local daemon state file")
     .action(async (name: string, options) => { await (await meshCommands()).leaveMesh(name, options); });
+  mesh.command("delete <name>").description("Delete a mesh this device runs, once every other member has been removed from it")
+    .option("--state <path>", "Local daemon state file")
+    .addHelpText("after", "\nOnly the device that runs a mesh deletes it, and only when it is the last member: take the others\nout first with cns mesh remove NAME DEVICE..., which names them when any are left. Deleting\nforgets the mesh and its secrets here. Pairings made by hand stay.")
+    .action(async (name: string, options) => { await (await meshCommands()).deleteMesh(name, options); });
   mesh.command("list [name]").description("List this device's meshes and their members")
     .option("--json", "Print a JSON array: { name, admin, version, issuedAt, allow, members: [{ name, fingerprint, admin, limit }] } per mesh")
     .action(async (name: string | undefined, options) => { (await meshCommands()).listMeshesCommand(name, options); });
   const secret = program.command("secret").description("Keep secrets, such as API keys, that every member of a mesh can read, or one member only")
     .addHelpText("after", [
       "",
-      "laptop $ cns secret set home OPENAI_API_KEY                  (asks for the value, hidden)",
-      "laptop $ op read op://dev/npm/token | cns secret set home NPM_TOKEN --device ci",
-      "studio $ cns secret get home OPENAI_API_KEY                  (prints the value)",
+      "laptop $ cns secret set OPENAI_API_KEY                       (asks for the value, hidden)",
+      "laptop $ op read op://dev/npm/token | cns secret set home:NPM_TOKEN --device ci",
+      "studio $ cns secret get OPENAI_API_KEY                       (prints the value)",
+      "studio $ cns secret run --only OPENAI_API_KEY -- 'python agent.py'",
+      "laptop $ cns run studio --secret OPENAI_API_KEY -- 'python agent.py'",
+      "",
+      "A secret is named NAME, or MESH:NAME to say which mesh. The mesh may be left out when it is",
+      "clear: for get, rm, run and --secret, when one mesh holds the name; for set, when this device is",
+      "in one mesh. When two meshes hold the name, the command stops and shows both ways to write it.",
+      "MESH NAME as two words works as well.",
       "",
       "A secret set without --device reaches every member of the mesh, now and later, bots included;",
       "with --device, only that member and the device that set it can read it. On a device, get returns",
@@ -135,20 +152,55 @@ export function createCli(): Command {
     ].join("\n"));
   const secretCommands = () => import("./commands/secret-cli.js");
   const deviceOption = ["--device <name>", "Only this member, besides the device that sets it, may read it"] as const;
-  secret.command("set <mesh> <name>").description("Set or change a secret: the value comes from a hidden prompt, or from stdin")
+  const secretArgument = ["<secret>", "NAME, or MESH:NAME to say which mesh"] as const;
+  secret.command("set").usage("[options] [MESH:]NAME").argument(...secretArgument).argument("[name]")
+    .description("Set or change a secret: the value comes from a hidden prompt, or from stdin")
     .option(...deviceOption)
     .option("--state <path>", "Local daemon state file")
-    .action(async (mesh: string, name: string, options) => { await (await secretCommands()).setSecret(mesh, name, options); });
-  secret.command("get <mesh> <name>").description("Print a secret's value: the one set for this device alone, else the mesh's")
+    .action(async (first: string, second: string | undefined, options) => { await (await secretCommands()).setSecret(first, second, options); });
+  secret.command("get").usage("[options] [MESH:]NAME").argument(...secretArgument).argument("[name]")
+    .description("Print a secret's value: the one set for this device alone, else the mesh's")
     .option("--device <name>", "The one set for this member alone")
-    .action(async (mesh: string, name: string, options) => { await (await secretCommands()).getSecret(mesh, name, options); });
+    .action(async (first: string, second: string | undefined, options) => { await (await secretCommands()).getSecret(first, second, options); });
+  const names = (value: string, earlier: string[] | undefined) => [...earlier ?? [], value];
+  const secretRun = secret.command("run").usage("[options] -- <command...>").argument("[command...]")
+    .description("Run a command on this device with the secrets it reads as environment variables")
+    .option("--only <names>", "Set only these: NAME or MESH:NAME, separated by commas or given again", names)
+    .option("--exclude <names>", "Set every secret but these", names)
+    .addHelpText("after", [
+      "",
+      "Each secret this device reads becomes a variable of its own name, for this command only: the one",
+      "set for this device alone before the mesh's. Without --only or --exclude, all of them. A name that",
+      "two meshes hold stops the command until --only MESH:NAME picks one or --exclude MESH:NAME leaves",
+      "one out. Everything after -- is the command, in this device's shell syntax, with the rules of",
+      "cns run: Bash (PowerShell on Windows) runs it, several words are joined with spaces, and one",
+      "quoted string reaches the shell unchanged, so quote $NAME to have it read there and not here.",
+      "As the words are joined, the shell also reads a word that holds spaces or shell characters, such as",
+      "a file name from a script: quote it for the shell, as over ssh.",
+      "The command gets this terminal or these pipes, and cns exits with its status.",
+      "Every member of a mesh can set a secret of any name. Without --only, a variable that tells programs",
+      "what to run or where to connect, such as PATH, BASH_ENV, NODE_OPTIONS or HTTPS_PROXY, stops the",
+      "command when another device set it: name it with --only, or leave it out with --exclude. cns cannot",
+      "know every program's variables, so use --only when a mesh has members you would not let run commands",
+      "here.",
+      "Examples: cns secret run -- ./deploy.sh    cns secret run --only NPM_TOKEN -- npm publish",
+      "          cns secret run --exclude work:API_KEY -- 'terraform plan | tee plan.txt'",
+    ].join("\n"));
+  secretRun.action(async (words: string[], options: { only?: string[]; exclude?: string[] }) => {
+    // As with cns run: the delimiter stays in the parent's arguments, and the command follows it.
+    if (!program.args.includes("--") || !words.length) throw new Error("secret run requires -- before its command: cns secret run -- command.");
+    const command = words.join(" ");
+    if (!command.trim() || command.length > 8192) throw new Error("Command must contain 1-8192 characters.");
+    process.exitCode = await (await secretCommands()).runWithSecrets(command, options);
+  });
   secret.command("list [mesh]").description("List the secrets this device can read, by name; never their values")
     .option("--json", "Print a JSON array: { mesh, name, for, setBy, version, setAt } per secret; for is null for the whole mesh")
     .action(async (mesh: string | undefined, options) => { await (await secretCommands()).listSecrets(mesh, options); });
-  secret.command("rm <mesh> <name>").description("Remove a secret this device set, from every member")
+  secret.command("rm").usage("[options] [MESH:]NAME").argument(...secretArgument).argument("[name]")
+    .description("Remove a secret this device set, from every member")
     .option("--device <name>", "The one set for this member alone")
     .option("--state <path>", "Local daemon state file")
-    .action(async (mesh: string, name: string, options) => { await (await secretCommands()).removeSecret(mesh, name, options); });
+    .action(async (first: string, second: string | undefined, options) => { await (await secretCommands()).removeSecret(first, second, options); });
   const gateway = program.command("gateway").description("Administer the gateway that lets Claude's connectors reach devices paired with it")
     .addHelpText("after", "\nThe gateway is a Cloudflare Worker you deploy (gateway/README.md). Commands are signed with this\ndevice's identity, which the gateway accepts when its public key is in the gateway's OWNER_KEYS.\nThe gateway's address is CNS_GATEWAY, or --url, or https://gateway.cns.nothuman.work.");
   const gatewayCommand = (name: string, description: string) => gateway.command(name).description(description)
@@ -240,14 +292,14 @@ export function createCli(): Command {
       "with the selected session's screen beside them. In the switcher:",
       "  Enter   open the selected session         1-9   open that numbered session",
       "  Tab     the session before the last one   Esc   back to the session you came from",
-      "  n       start the next tty-N on the selected device",
+      "  n       start the next shell-N on the selected device",
       "  +       add the selected session in a pane, up to four side by side",
       "  -       close the current session's pane; the session keeps running",
       "  x       kill the selected session (asks first)",
       "  d, q    detach: leave cns ui",
       "Detaching, or closing the terminal, leaves every session running; cns ui returns to them.",
       "A device removes a session an hour after its program ends. Each device's grants apply as",
-      "with cns sessions, cns tty --attach and cns kill.",
+      "with cns sessions, cns shell --attach and cns kill.",
       "Examples: cns ui    cns ui studio    cns ui studio/build    cns ui --key C-b",
     ].join("\n"))
     .action(async (target: string | undefined, options: { key?: string }) => {

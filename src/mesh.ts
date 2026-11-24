@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { errorMessage } from "./errors.js";
 import { verify, type Identity, type PublicKey } from "./identity.js";
-import { meshFiles, peerNamePattern, removePeerFile, validatePeerUrl } from "./peer-files.js";
+import { endedMeshFiles, meshFiles, peerNamePattern, removePeerFile, validatePeerUrl } from "./peer-files.js";
 import { expandGrants, grantsSchema, listPeers, publicKeySchema, savePairedPeer, updatePairedPeer, type PairedPeer, type PeerEntry, type Permission } from "./peers.js";
 import { pruneSecrets } from "./secrets.js";
 
@@ -93,9 +93,14 @@ export interface MeshState {
 }
 const meshFileSchema = z.strictObject({ version: z.literal(1), admin: publicKeySchema, allow: grantsSchema, list: signedListSchema });
 
-/** The first list of a new mesh, with only its admin in it. */
-export function firstList(mesh: string, admin: { key: PublicKey; name: string; addresses?: string[] }, now: number): MemberList {
-  return listSchema.parse({ v: 1, mesh, admin: admin.key, version: 1, issuedAt: new Date(now).toISOString(), members: [{ key: admin.key, name: admin.name, ...admin.addresses?.length ? { addresses: admin.addresses } : {} }] });
+/**
+ * The first list of a new mesh, with only its admin in it. `after` is the last version of
+ * a mesh this admin ran under the same name and deleted (lastVersion): the new mesh's
+ * lists must all be newer than that one's, or a device that still holds one of the old
+ * lists, signed by the same key for the same name, could offer it and bring its members back.
+ */
+export function firstList(mesh: string, admin: { key: PublicKey; name: string; addresses?: string[] }, now: number, after = 0): MemberList {
+  return listSchema.parse({ v: 1, mesh, admin: admin.key, version: after + 1, issuedAt: new Date(now).toISOString(), members: [{ key: admin.key, name: admin.name, ...admin.addresses?.length ? { addresses: admin.addresses } : {} }] });
 }
 
 /** The next version of a list, with `change` applied to its members. */
@@ -217,6 +222,25 @@ export function writeMesh(state: Pick<MeshState, "name" | "admin" | "allow" | "s
   const content = JSON.stringify(meshFileSchema.parse({ version: 1, admin: state.admin, allow: expandGrants(state.allow), list: state.signed }), null, 2) + "\n";
   if (meshFiles.exists(state.name)) meshFiles.rewrite(state.name, content);
   else meshFiles.create(state.name, content);
+}
+
+const endedSchema = z.strictObject({ version: z.literal(1), last: z.int().positive() });
+
+/** The last list version of a mesh named `name` that this device ran and deleted; 0 when it deleted none. */
+export function lastVersion(name: string): number {
+  const content = endedMeshFiles.read(name);
+  return content === undefined ? 0 : endedSchema.parse(JSON.parse(content)).last;
+}
+
+/**
+ * Delete a mesh this device runs: remember its last list version, then forget it. The
+ * version is kept for good, so a mesh made later under the same name starts above it.
+ */
+export function endMesh(state: Pick<MeshState, "name" | "list">): void {
+  const content = JSON.stringify(endedSchema.parse({ version: 1, last: Math.max(state.list.version, lastVersion(state.name)) })) + "\n";
+  if (endedMeshFiles.exists(state.name)) endedMeshFiles.rewrite(state.name, content);
+  else endedMeshFiles.create(state.name, content);
+  removeMesh(state.name);
 }
 
 /** Forget a mesh here. Its records go at the next applyMeshes. */

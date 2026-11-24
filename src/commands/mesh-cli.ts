@@ -2,12 +2,13 @@ import os from "node:os";
 import { errorMessage } from "../errors.js";
 import { ensureIdentity, fingerprint, loadIdentity, newKeyPair, type PublicKey } from "../identity.js";
 import { mintBotToken, startAsBot } from "../mesh-token.js";
-import { applyMeshes, firstList, listMeshes, listsFor, MAX_MESHES, nextList, openLists, readMesh, removeMesh, signList, writeMesh, type Member, type MeshState } from "../mesh.js";
+import { applyMeshes, endMesh, firstList, lastVersion, listMeshes, listsFor, MAX_MESHES, nextList, openLists, readMesh, removeMesh, signList, writeMesh, type Member, type MeshState } from "../mesh.js";
 import { meshFiles, peerNamePattern } from "../peer-files.js";
 import { DEFAULT_INVITE_MS, MAX_INVITE_MS, suggestedName } from "../pairing.js";
 import { botTokenForCode, hostCode, MAX_WRONG_CODES, PairingCodeError, parseCode } from "../pairing-code.js";
 import { builtInRelay } from "../relay-config.js";
 import { describeGrants, expandGrants, getPeer, listPeers, resolvePeer, savePairedPeer, type Permission } from "../peers.js";
+import { heldSecrets } from "../secrets.js";
 import { connectDevice } from "./connect-device.js";
 import { connectControl } from "./daemon.js";
 import { removePeer } from "./pairing-cli.js";
@@ -68,7 +69,7 @@ async function settle(options: StateOption, self: PublicKey): Promise<boolean> {
 export async function createMesh(name: string, options: StateOption): Promise<void> {
   checkRoom(name);
   const { identity } = ensureIdentity();
-  const list = firstList(name, { key: identity.publicKey, name: suggestedName(os.hostname()) }, Date.now());
+  const list = firstList(name, { key: identity.publicKey, name: suggestedName(os.hostname()) }, Date.now(), lastVersion(name));
   writeMesh({ name, admin: identity.publicKey, allow: [], signed: signList(list, identity) });
   await settle(options, identity.publicKey);
   console.log(`Created the mesh ${name}, run by this device. Add devices paired with this one: cns mesh add ${name} DEVICE.`);
@@ -215,7 +216,7 @@ export async function removeMembers(name: string, devices: string[], options: St
   const keys = devices.map((device) => {
     const member = state.list.members.find((candidate) => candidate.name === device) ?? state.list.members.find((candidate) => candidate.key === getPeer(device)?.publicKey);
     if (!member) throw new Error(`${device} is not in the mesh ${name}. cns mesh list ${name} shows its members.`);
-    if (member.key === identity.publicKey) throw new Error(`This device runs the mesh ${name}. To end the mesh, run: cns mesh leave ${name}.`);
+    if (member.key === identity.publicKey) throw new Error(`This device runs the mesh ${name}, so it stays in it. To end the mesh once the others are out, run: cns mesh delete ${name}.`);
     return member.key;
   });
   const paired = listPeers().filter((peer) => peer.mesh === undefined && keys.includes(peer.publicKey));
@@ -310,16 +311,52 @@ export async function allowMembers(name: string, words: string[], options: State
   console.log(`Members of the mesh ${name} may use here: ${describeGrants(allow)}.`);
 }
 
-/** `cns mesh leave NAME`: forget a mesh here, and its members with it; on its admin, end the mesh. */
+/** The members of a mesh other than this device, its admin, by the names cns mesh remove takes. */
+function otherMembers(state: MeshState, self: PublicKey): string[] {
+  return state.list.members.filter((member) => member.key !== self).map((member) => member.name);
+}
+
+/** How the admin ends its mesh: the members go first, then the mesh. */
+function howToDelete(name: string, others: readonly string[]): string {
+  return others.length ? `cns mesh remove ${name} ${others.join(" ")}, then cns mesh delete ${name}` : `cns mesh delete ${name}`;
+}
+
+/**
+ * `cns mesh leave NAME`: forget a mesh here, and its members with it. The device that runs
+ * the mesh cannot leave it, since nobody else could then change it: it deletes it (deleteMesh).
+ */
 export async function leaveMesh(name: string, options: StateOption): Promise<void> {
   if (!meshFiles.exists(name)) throw new Error(`This device has no mesh named ${name}. cns mesh list shows its meshes.`);
   const { identity } = ensureIdentity();
   let state: MeshState | undefined;
   try { state = readMesh(name); } catch { /* An unreadable mesh is forgotten all the same. */ }
+  if (state?.admin === identity.publicKey) {
+    throw new Error(`This device runs the mesh ${name}, so it cannot leave it. To end the mesh, run: ${howToDelete(name, otherMembers(state, identity.publicKey))}.`);
+  }
   removeMesh(name);
   await settle(options, identity.publicKey);
-  if (state?.admin === identity.publicKey) console.log(`Ended the mesh ${name}. Its members leave it when they next reach this device.`);
-  else console.log(`Left the mesh ${name}.${state ? ` ${adminName(state)} still lists this device; to have the other members drop it too, run there: cns mesh remove ${name} DEVICE.` : ""}`);
+  console.log(`Left the mesh ${name}.${state ? ` ${adminName(state)} still lists this device; to have the other members drop it too, run there: cns mesh remove ${name} DEVICE.` : ""}`);
+}
+
+/**
+ * `cns mesh delete NAME`: on the device that runs it, end a mesh with no member left but
+ * this device. The members are removed first, each by name (cns mesh remove), so that
+ * deleting a mesh never takes a device out of it that its person did not mean to. The
+ * mesh's secrets held here go with it.
+ */
+export async function deleteMesh(name: string, options: StateOption): Promise<void> {
+  const { identity } = ensureIdentity();
+  const self = identity.publicKey;
+  const state = requireMesh(name);
+  if (state.admin !== self) throw new Error(`Only the device that runs a mesh deletes it, and ${adminName(state)} runs ${name}. To take this device out of it, run: cns mesh leave ${name}.`);
+  const others = otherMembers(state, self);
+  if (others.length) {
+    throw new Error(`The mesh ${name} still has ${others.length === 1 ? "a member" : `${others.length} members`}: ${others.join(", ")}. Remove ${others.length === 1 ? "it" : "them"} first: ${howToDelete(name, others)}.`);
+  }
+  const secrets = new Set(heldSecrets(self, [state]).filter(({ record }) => record.value !== undefined).map(({ record }) => `${record.name} ${record.device ?? ""}`)).size;
+  endMesh(state);
+  await settle(options, self);
+  console.log(`Deleted the mesh ${name}.${secrets ? ` Its ${secrets === 1 ? "secret" : `${secrets} secrets`} went with it.` : ""}`);
 }
 
 /** `cns mesh list [NAME]`: the meshes this device is in, with their members. */

@@ -433,6 +433,29 @@ function ptySink(stall = false) {
   };
 }
 
+test("env adds variables to one command or terminal, on top of the device's own, and is validated", { skip: windows }, async (t) => {
+  const api = apiFor(t);
+  const show = `printf '%s|%s|%s' "\${CNS_TEST_ONE-unset}" "\${CNS_TEST_TWO-unset}" "\${PATH:+path}"`;
+  assert.equal((await api.run(show, { env: { CNS_TEST_ONE: "a b", CNS_TEST_TWO: "é=1\n2" } })).stdout, "a b|é=1\n2|path");
+  // The variables are that command's alone.
+  assert.equal((await api.run(show)).stdout, "unset|unset|path");
+  const sink = new RecordingSink();
+  await api.exec(sink, show, { env: { CNS_TEST_ONE: "x" } });
+  assert.equal(Buffer.concat(sink.chunks.map((chunk) => chunk.data)).toString(), "x|unset|path");
+  const collected = ptySink();
+  api.openPty(collected.sink, { command: `${show}; printf '|%s' "$TERM"`, term: "vt100", env: { CNS_TEST_TWO: "y", TERM: "ignored" } });
+  await collected.exited;
+  assert.equal(collected.output, "unset|y|path|vt100");
+  // A session's listing says what it runs, never what it was given.
+  const session = api.startPtySession("with-env", { command: "sleep 30", env: { CNS_TEST_ONE: "hidden-value" } });
+  assert.ok(!JSON.stringify([session.info(), api.ptySessions()]).includes("hidden-value"));
+  session.kill();
+  for (const env of [{ "1BAD": "x" }, { "A-B": "x" }, { "": "x" }, { A: "x\0y" }, { A: "x".repeat(16 * 1024 + 1) }, { A: 1 }, Object.fromEntries(Array.from({ length: 65 }, (_, index) => [`V${index}`, "x"]))]) {
+    await assert.rejects(api.run("true", { env } as never), `Expected rejection: ${JSON.stringify(env).slice(0, 60)}`);
+    assert.throws(() => api.openPty(ptySink().sink, { command: "true", env } as never));
+  }
+});
+
 test("PTY sessions run programs on a real terminal with input, size and exit status", { skip: windows }, async (t) => {
   const collected = ptySink();
   const pty = apiFor(t).openPty(collected.sink, {

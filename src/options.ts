@@ -7,7 +7,7 @@ import { MAX_KEYS } from "./keys.js";
 import { parseSwitchKey } from "./switcher.js";
 import type { CopyRequest } from "./commands/copy.js";
 
-const roles = ["run", "tty", "cp", "sessions", "keys", "screen", "kill"] as const;
+const roles = ["run", "shell", "cp", "sessions", "keys", "screen", "kill"] as const;
 /** Commands that address one named PTY session. */
 const sessionRoles = new Set<PeerRole>(["keys", "screen", "kill"]);
 type PeerRole = typeof roles[number];
@@ -37,6 +37,10 @@ const peerOptionsSchema = z.strictObject({
     .pipe(z.int().min(0).max(MAX_SCREEN_HISTORY)).optional(),
   name: sessionNameSchema.optional(),
   attach: sessionNameSchema.optional(),
+  detached: z.boolean().optional(),
+  session: sessionNameSchema.optional(),
+  command: z.string().optional(),
+  secret: z.array(z.string()).optional(),
   key: z.string().optional(),
   kittyKeys: z.boolean().optional(),
   literal: z.boolean().optional(),
@@ -74,24 +78,35 @@ export interface PeerConfig {
   role: PeerRole;
   /** The paired device the command reaches, from its saved name. */
   expect: ExpectedPeer;
-  /** The shell string for run; optional for tty, which otherwise starts a login shell. */
+  /** The shell string for run; optional for shell, which otherwise starts a login shell. */
   command?: string;
   cwd?: string;
   timeoutMs?: number;
   cols?: number;
   rows?: number;
   term?: string;
-  /** For tty: print the rendered screen when the program ends instead of streaming. For screen: its scrollback. */
+  /** For shell: print the rendered screen when the program ends instead of streaming. For screen: its scrollback. */
   screen?: { history: number };
-  /** The named PTY session to start (tty --name), attach to (tty --attach) or address. */
+  /** The named PTY session to start (shell --name), attach to (shell --attach), run a command in (shell -d --session) or address. */
   name?: string;
   attach?: boolean;
   /**
-   * For tty at a terminal: the key that detaches from a named session, or null when every
+   * For shell -d: type the command into the session `name`, a login shell that keeps running
+   * on the device, starting it first when there is none. Without a name, the next free shell-N.
+   */
+  detached?: boolean;
+  /** For shell -d: the options given that apply only when a session starts, so a running one cannot take them. */
+  startOnly?: string[];
+  /** For run and shell: the mesh secrets to set in the program's environment, each NAME or MESH:NAME. */
+  secrets?: string[];
+  /** The variables those secrets become, read on this device just before it connects. */
+  env?: Record<string, string>;
+  /**
+   * For shell at a terminal: the key that detaches from a named session, or null when every
    * key goes to the session. Ctrl-] when not set.
    */
   detachKey?: { byte: number; label: string } | null;
-  /** For tty at a terminal: pass the kitty keyboard protocol between the session's programs and this terminal. */
+  /** For shell at a terminal: pass the kitty keyboard protocol between the session's programs and this terminal. */
   kittyKeys?: boolean;
   /** For keys: tmux-style key names and literal text. */
   keys?: string[];
@@ -114,11 +129,20 @@ export function isLoopback(host: string): boolean {
 
 export const endpointUrl = (bind: string, port: number) => `ws://${isIP(bind) === 6 ? `[${bind}]` : bind}:${port}`;
 
+/** Options that are given more than once on purpose: each use adds to a list. */
+const repeatable = new Set(["secret"]);
+const collect = (value: string, earlier: string[] | undefined) => {
+  // Commander hands an option its next word whatever it is, so a forgotten name would take the delimiter.
+  if (value === "--") throw new Error("--secret needs a secret's name: --secret NAME, or --secret MESH:NAME.");
+  return [...earlier ?? [], value];
+};
+
 // Commander handles parsing/help; reject repeats rather than silently using
 // the last value for security-sensitive listener options.
 function rejectRepeatedOptions(command: Command) {
   const seen = new Set<string>();
   for (const option of command.options) {
+    if (repeatable.has(option.name())) continue;
     command.on(`option:${option.name()}`, () => {
       if (seen.has(option.name())) throw new Error(`Duplicate option: --${option.name()}`);
       seen.add(option.name());
@@ -128,24 +152,31 @@ function rejectRepeatedOptions(command: Command) {
 
 function resolveOptions(role: PeerRole, command: Command, device: string): PeerConfig {
   const expect = resolvePeer(device);
-  const { cwd, timeout, cols, rows, term, screen, history, name, attach, key, kittyKeys, literal, until, json, stdin } = peerOptionsSchema.parse({ ...command.opts() });
-  // The key cns ui switches with is the key cns tty detaches with; only cns tty can do without one.
-  const detach = role === "tty" ? key ?? process.env.CNS_KEY : undefined;
-  if (role === "tty") {
+  const { cwd, timeout, cols, rows, term, screen, history, name, attach, detached, session, secret, key, kittyKeys, literal, until, json, stdin } = peerOptionsSchema.parse({ ...command.opts() });
+  const given = (options: string[]) => options.filter((option) => command.getOptionValueSource(option) === "cli");
+  // The key cns ui switches with is the key cns shell detaches with; only cns shell can do without one.
+  const detach = role === "shell" ? key ?? process.env.CNS_KEY : undefined;
+  if (role === "shell") {
     if (history !== undefined && !screen) throw new Error("--history requires --screen.");
     if (name !== undefined && attach !== undefined) throw new Error("Use either --name to start a session or --attach to join one, not both.");
     if ((name !== undefined || attach !== undefined) && screen) throw new Error("--screen applies to unnamed sessions; use cns screen DEVICE NAME for a named one.");
     // The program and its settings were chosen when the session started.
-    const fixed = ["cwd", "timeout", "term"].filter((option) => command.getOptionValueSource(option) === "cli");
+    const fixed = given(["cwd", "timeout", "term", "secret"]);
     if (attach !== undefined && fixed.length) throw new Error(`--attach cannot change --${fixed[0]}; it was set when the session started.`);
+    if (session !== undefined && !detached) throw new Error(`--session names the session -d runs a command in: cns shell ${device} -d --session ${session} -- command. To join a session, use --attach ${session}.`);
+    // -d returns at once: nothing is shown here, so nothing that starts, joins or shows a session another way goes with it.
+    const other = detached ? given(["name", "attach", "screen", "key", "kittyKeys"])[0] : undefined;
+    if (other !== undefined) throw new Error(`-d runs a command in a session and returns; it does not go with --${other === "kittyKeys" ? "kitty-keys" : other}.${other === "name" ? " Name its session with --session." : ""}`);
   }
   if (role === "screen" && timeout !== undefined && until === undefined) throw new Error("--timeout requires --until.");
   return {
     role, expect, cwd, timeoutMs: timeout,
     cols, rows, term, screen: screen || role === "screen" ? { history: history ?? 0 } : undefined,
-    name: name ?? attach, attach: attach !== undefined, literal, until, json, ...role === "run" ? { stdin } : {},
+    name: name ?? attach ?? session, attach: attach !== undefined, literal, until, json, ...role === "run" ? { stdin } : {},
+    ...detached ? { detached: true, startOnly: given(["cwd", "timeout", "term", "cols", "rows", "secret"]) } : {},
+    ...secret?.length ? { secrets: secret } : {},
     ...detach === undefined ? {} : { detachKey: /^none$/i.test(detach.trim()) ? null : parseSwitchKey(detach) },
-    ...role === "tty" && (kittyKeys ?? /^(1|true|yes|on)$/i.test(process.env.CNS_KITTY_KEYS?.trim() ?? "")) ? { kittyKeys: true } : {},
+    ...role === "shell" && (kittyKeys ?? /^(1|true|yes|on)$/i.test(process.env.CNS_KITTY_KEYS?.trim() ?? "")) ? { kittyKeys: true } : {},
   };
 }
 
@@ -175,7 +206,7 @@ export function addPeerCommands(
   program.enablePositionalOptions();
   const descriptions: Record<PeerRole, string> = {
     run: "Execute one shell command on a paired device and exit with its status",
-    tty: "Open an interactive terminal (PTY) on a paired device, or start a named session",
+    shell: "Open an interactive terminal (PTY) on a paired device, or start a named session",
     cp: "Copy files or directories between this device and a paired device, or between two paired devices",
     sessions: "List a paired device's named PTY sessions, or without a device, every paired device's",
     keys: "Send keys to a named PTY session",
@@ -186,11 +217,14 @@ export function addPeerCommands(
   for (const role of roles) {
     const command = program.command(role).description(descriptions[role]);
     if (role === "sessions" || sessionRoles.has(role)) {
-      command.addHelpText("after", "\nNamed sessions live in the device's daemon: they survive this command and reconnects,\nand end when they are killed or the daemon stops. A session whose program has ended keeps its\nfinal screen for an hour, or until a new session needs its place. Start one with cns tty DEVICE --name NAME.");
+      command.addHelpText("after", "\nNamed sessions live in the device's daemon: they survive this command and reconnects,\nand end when they are killed or the daemon stops. A session whose program has ended keeps its\nfinal screen for an hour, or until a new session needs its place. Start one with cns shell DEVICE --name NAME.");
     }
-    if (role === "run" || role === "tty") {
+    if (role === "run" || role === "shell") {
       command.addOption(new Option("--cwd <path>", "Absolute working directory on the device").env("CNS_CWD"))
         .option("--timeout <ms>", `Command timeout, 0-${MAX_TIMEOUT_MS} ms (0 disables it)`);
+    }
+    if (role === "run" || role === "shell") {
+      command.option("--secret <names>", "Set mesh secrets this device reads as the program's environment variables: NAME or MESH:NAME, separated by commas or given again", collect);
     }
     if (role === "run") command.option("-n, --no-stdin", "Do not forward this process's stdin to the command");
     if (role === "sessions") command.option("--json", "Print the sessions as JSON");
@@ -208,7 +242,7 @@ export function addPeerCommands(
         .option("--timeout <ms>", `With --until, stop waiting after this long (default: 30000; 0 waits indefinitely)`)
         .addHelpText("after", "\n--until exits 0 once the text appears, 1 if the program ends first and 124 on timeout,\nprinting the screen in each case. It checks the screen after every chunk of output.");
     }
-    if (role === "tty") {
+    if (role === "shell") {
       command.option("--cols <n>", "Terminal width (default: this terminal's, else 80)")
         .option("--rows <n>", "Terminal height (default: this terminal's, else 24)")
         .option("--term <name>", "TERM for the remote program (default: xterm-256color)")
@@ -216,15 +250,18 @@ export function addPeerCommands(
         .option("--history <lines>", `With --screen, include up to ${MAX_SCREEN_HISTORY} scrollback lines`)
         .option("--name <name>", "Start a named session in the background and return; see cns keys, screen and kill")
         .option("--attach <name>", "Attach to a named session; Ctrl-] detaches and leaves it running")
+        .option("-d, --detached", "Type the command into a session that keeps running on the device, starting it if needed, and return")
+        .option("--session <name>", "With -d, the session to run the command in (default: the next free shell-N, whose name is printed)")
+        .option("--command <command>", "The command, in place of -- command")
         .option("--key <key>", "The key that detaches, such as C-b, or none to send every key to the session (default: CNS_KEY, else C-])")
         .option("--kitty-keys", "Let programs in the session tell keys such as Shift+Enter from Enter; CNS_KITTY_KEYS=1 does the same")
-        .addHelpText("after", "\nWithout a command, starts the remote user's login shell (PowerShell on Windows). At a terminal it\nruns in a session of its own, tty-1, tty-2 and so on, which survives disconnects and ends with the\nshell or when this terminal closes; Ctrl-] detaches and leaves it running for --attach NAME.\nIt is shown as ssh shows a shell: its lines scroll into this terminal's own scrollback, and\nevery key but the detach key goes to the session; --key none sends that one too. CNS_KEY sets\nthe key for cns tty and cns ui alike. As over ssh, clear on the device also clears this\nterminal's scrollback. If cns is killed outright (kill -9) while a full-screen program has the\nterminal, run reset to get the terminal back.\n--kitty-keys passes the kitty keyboard protocol on, for programs that ask for it, such as\nClaude Code and Neovim: they then see Shift+Enter, Ctrl+Enter and the like as their own keys.\nIt needs a terminal that speaks the protocol (kitty, Ghostty, foot, Alacritty, iTerm2, Warp,\nWindows Terminal, Rex; not Apple Terminal) and cns 1.10.0 or later on the device; without\neither it changes nothing and says so. The detach key keeps working. A terminal attached to the\nsame session without it, or cns ui, types plain keys there: Shift+Enter is Enter from that one.\nAfter kill -9 the terminal may type codes such as 9;5u: run reset.\nOtherwise everything after -- is the command, in the remote shell's syntax; several words are\njoined with spaces, as ssh does. A local terminal is switched to raw mode, so keys such as\nCtrl-C go to the remote program. Piped input is forwarded verbatim; send \\x04 yourself for Ctrl-D.\n--screen prints what the terminal shows, like tmux capture-pane; combine it with --timeout to\nsnapshot a program that keeps running.\n--name starts a session that outlives this command; --timeout then limits its lifetime.\nExamples: cns tty studio    cns tty studio --cwd /srv/app -- 'claude'    printf 'ls\\nexit\\n' | cns tty studio\n          cns tty studio --screen --timeout 5000 -- 'htop'\n          cns tty studio --name build -- 'make watch'    cns tty studio --attach build");
+        .addHelpText("after", "\nWithout a command, starts the remote user's login shell (PowerShell on Windows). At a terminal it\nruns in a session of its own, shell-1, shell-2 and so on, which survives disconnects and ends with the\nshell or when this terminal closes; Ctrl-] detaches and leaves it running for --attach NAME.\nIt is shown as ssh shows a shell: its lines scroll into this terminal's own scrollback, and\nevery key but the detach key goes to the session; --key none sends that one too. CNS_KEY sets\nthe key for cns shell and cns ui alike. As over ssh, clear on the device also clears this\nterminal's scrollback. If cns is killed outright (kill -9) while a full-screen program has the\nterminal, run reset to get the terminal back.\n--kitty-keys passes the kitty keyboard protocol on, for programs that ask for it, such as\nClaude Code and Neovim: they then see Shift+Enter, Ctrl+Enter and the like as their own keys.\nIt needs a terminal that speaks the protocol (kitty, Ghostty, foot, Alacritty, iTerm2, Warp,\nWindows Terminal, Rex; not Apple Terminal) and cns 1.10.0 or later on the device; without\neither it changes nothing and says so. The detach key keeps working. A terminal attached to the\nsame session without it, or cns ui, types plain keys there: Shift+Enter is Enter from that one.\nAfter kill -9 the terminal may type codes such as 9;5u: run reset.\nOtherwise everything after -- is the command, in the remote shell's syntax; several words are\njoined with spaces, as ssh does. A local terminal is switched to raw mode, so keys such as\nCtrl-C go to the remote program. Piped input is forwarded verbatim; send \\x04 yourself for Ctrl-D.\n--screen prints what the terminal shows, like tmux capture-pane; combine it with --timeout to\nsnapshot a program that keeps running.\n--name starts a session that outlives this command; --timeout then limits its lifetime.\n-d --session NAME types the command into the session NAME and returns. The session is a login\nshell that keeps running on the device: the first -d starts it, and each later one types another\ncommand into the same shell, so its directory and variables carry over. A program still running\nthere receives what is typed. Read the result with cns screen, join with --attach, end it with\ncns kill. --cwd, --timeout, --term and --secret apply when the session starts.\n--secret NAME sets a mesh secret this device reads as the variable NAME of the program or session\nstarted; MESH:NAME says which mesh when two hold the name. Values cross the encrypted link beside\nthe command, never in it. See cns secret --help.\nExamples: cns shell studio    cns shell studio --cwd /srv/app -- 'claude'    printf 'ls\\nexit\\n' | cns shell studio\n          cns shell studio --screen --timeout 5000 -- 'htop'\n          cns shell studio --name build -- 'make watch'    cns shell studio --attach build\n          cns shell studio -d --session work -- 'cd /srv/app && make'    cns screen studio work\n          cns shell studio --secret NPM_TOKEN -- 'npm publish'");
     }
     if (role === "run") {
-      command.addHelpText("after", "\nEverything after -- is the command, in the remote shell's syntax. Several words are joined\nwith spaces, as ssh does; quote what your local shell would otherwise expand, such as $HOME,\nglobs, pipes and ;. One quoted string reaches the remote shell unchanged.\nExamples: cns run studio -- git status    cns run studio -- ls -la /tmp\n          cns run studio -- 'cd /srv && make'    cns run studio -- 'printf \"hello\\n\"'");
+      command.addHelpText("after", "\nEverything after -- is the command, in the remote shell's syntax. Several words are joined\nwith spaces, as ssh does; quote what your local shell would otherwise expand, such as $HOME,\nglobs, pipes and ;. One quoted string reaches the remote shell unchanged.\n--secret NAME sets a mesh secret this device reads as the command's variable NAME; MESH:NAME says\nwhich mesh when two hold the name. The value crosses the encrypted link beside the command, never\nin it, and the device needs cns 2.0.0 or later. See cns secret --help.\nExamples: cns run studio -- git status    cns run studio -- ls -la /tmp\n          cns run studio -- 'cd /srv && make'    cns run studio -- 'printf \"hello\\n\"'\n          cns run studio --secret home:DEPLOY_KEY -- './deploy.sh'");
     }
     rejectRepeatedOptions(command);
-    if (role === "run" || role === "tty") {
+    if (role === "run" || role === "shell") {
       command.usage(role === "run" ? "<device> [options] -- <command...>" : "<device> [options] [-- <command...>]")
         .argument("<device>", device).argument("[command...]");
       command.action((name: string, words: string[]) => {
@@ -238,7 +275,9 @@ export function addPeerCommands(
         }
         // Everything after the first -- is the command. Several words are joined with spaces, as ssh does,
         // and the remote shell parses the result; one quoted string reaches it unchanged.
-        const shellCommand = delimiter < 0 ? undefined : words.join(" ");
+        const option = role === "shell" ? command.opts<{ command?: string }>().command : undefined;
+        if (option !== undefined && delimiter >= 0) throw new Error("Give the command once: after --command, or after --.");
+        const shellCommand = delimiter < 0 ? option : words.join(" ");
         if (shellCommand !== undefined && (!shellCommand.trim() || shellCommand.length > 8192)) throw new Error("Command must contain 1-8192 characters.");
         const config = resolveOptions(role, command, name);
         if (config.attach && shellCommand !== undefined) throw new Error("--attach joins a running session; it does not take a command.");

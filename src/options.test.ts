@@ -62,23 +62,23 @@ const expected = { name: "studio", publicKey: studio.publicKey, outgoing: expand
 
 test("every command names a paired device, which it must reach as that device", { skip: !posix }, () => {
   for (const args of [
-    ["run", "studio", "--", "pwd"], ["tty", "studio"], ["sessions", "studio"], ["keys", "studio", "build", "Enter"],
+    ["run", "studio", "--", "pwd"], ["shell", "studio"], ["sessions", "studio"], ["keys", "studio", "build", "Enter"],
     ["screen", "studio", "build"], ["kill", "studio", "build"], ["cp", "a", "studio:/b"],
   ]) assert.deepEqual(parseOptions(args).expect, expected, args.join(" "));
   for (const args of [
-    ["run", "missing", "--", "pwd"], ["tty", "ws://localhost:47381"], ["tty"], ["run", "--", "pwd"],
+    ["run", "missing", "--", "pwd"], ["shell", "ws://localhost:47381"], ["shell"], ["run", "--", "pwd"],
     ["keys", "build", "Enter"], ["screen", "build"], ["kill", "build"], ["cp", "a", ":/b"], ["cp", "a", "missing:/b"],
   ]) assert.throws(() => parseOptions(args), `Expected rejection: ${args.join(" ")}`);
   assert.throws(() => parseOptions(["run", "missing", "--", "pwd"]), /No paired device is saved as missing/);
   assert.throws(() => parseOptions(["run", "--", "pwd"]), /requires a paired device's name/);
-  assert.throws(() => parseOptions(["tty", "--", "htop"]), /requires a paired device's name/);
+  assert.throws(() => parseOptions(["shell", "--", "htop"]), /requires a paired device's name/);
 });
 
 test("the removed unauthenticated commands and options are gone", { skip: !posix }, () => {
   for (const argv of [
     ["listen"], ["connect", "ws://localhost:47381"], ["run", "studio", "--one-way", "--", "pwd"],
     ["run", "--peer", "studio", "--", "pwd"], ["run", "studio", "--bind", "::1", "--", "pwd"], ["run", "studio", "--port", "1", "--", "pwd"],
-    ["tty", "studio", "--no-repl"],
+    ["shell", "studio", "--no-repl"],
   ]) assert.throws(() => parseOptions(argv), `Expected rejection: ${argv.join(" ")}`);
 });
 
@@ -162,60 +162,60 @@ test("run requires an explicit delimiter and a nonempty command", { skip: !posix
   ]) assert.throws(() => parseOptions(args), `Expected rejection: ${args.join(" ")}`);
 });
 
-test("tty --key names the key that detaches, CNS_KEY does when it is not given, and none leaves every key to the session", { skip: !posix }, () => {
-  assert.equal(parseOptions(["tty", "studio"]).detachKey, undefined, "Ctrl-] unless something says otherwise");
-  assert.deepEqual(parseOptions(["tty", "studio", "--key", "C-b"]).detachKey, { byte: 0x02, label: "Ctrl-B" });
-  assert.deepEqual(parseOptions(["tty", "studio", "--attach", "build"], { CNS_KEY: "c-a" }).detachKey, { byte: 0x01, label: "Ctrl-A" });
-  assert.deepEqual(parseOptions(["tty", "studio", "--key", "C-b"], { CNS_KEY: "C-a" }).detachKey, { byte: 0x02, label: "Ctrl-B" });
-  assert.equal(parseOptions(["tty", "studio", "--key", "none"]).detachKey, null);
-  assert.equal(parseOptions(["tty", "studio"], { CNS_KEY: "None" }).detachKey, null);
-  assert.throws(() => parseOptions(["tty", "studio", "--key", "C-c"]), /--key cannot be Ctrl-C: the session needs it/);
-  assert.throws(() => parseOptions(["tty", "studio", "--key", "F5"]), /--key takes a control key such as C-\] or C-b/);
+test("shell --key names the key that detaches, CNS_KEY does when it is not given, and none leaves every key to the session", { skip: !posix }, () => {
+  assert.equal(parseOptions(["shell", "studio"]).detachKey, undefined, "Ctrl-] unless something says otherwise");
+  assert.deepEqual(parseOptions(["shell", "studio", "--key", "C-b"]).detachKey, { byte: 0x02, label: "Ctrl-B" });
+  assert.deepEqual(parseOptions(["shell", "studio", "--attach", "build"], { CNS_KEY: "c-a" }).detachKey, { byte: 0x01, label: "Ctrl-A" });
+  assert.deepEqual(parseOptions(["shell", "studio", "--key", "C-b"], { CNS_KEY: "C-a" }).detachKey, { byte: 0x02, label: "Ctrl-B" });
+  assert.equal(parseOptions(["shell", "studio", "--key", "none"]).detachKey, null);
+  assert.equal(parseOptions(["shell", "studio"], { CNS_KEY: "None" }).detachKey, null);
+  assert.throws(() => parseOptions(["shell", "studio", "--key", "C-c"]), /--key cannot be Ctrl-C: the session needs it/);
+  assert.throws(() => parseOptions(["shell", "studio", "--key", "F5"]), /--key takes a control key such as C-\] or C-b/);
   // The key belongs to terminals: other commands neither take it nor read CNS_KEY.
   assert.equal(parseOptions(["run", "studio", "--", "pwd"], { CNS_KEY: "bogus" }).detachKey, undefined);
   assert.throws(() => parseOptions(["run", "studio", "--key", "C-b", "--", "pwd"]));
 });
 
-test("tty --kitty-keys is off unless asked for, on the command line or with CNS_KITTY_KEYS", { skip: !posix }, () => {
-  assert.equal(parseOptions(["tty", "studio"]).kittyKeys, undefined);
-  assert.equal(parseOptions(["tty", "studio", "--kitty-keys"]).kittyKeys, true);
-  assert.equal(parseOptions(["tty", "studio", "--attach", "build", "--kitty-keys"]).kittyKeys, true);
-  for (const on of ["1", "true", "YES", " on "]) assert.equal(parseOptions(["tty", "studio"], { CNS_KITTY_KEYS: on }).kittyKeys, true, on);
-  for (const off of ["", "0", "false", "no", "off", "2"]) assert.equal(parseOptions(["tty", "studio"], { CNS_KITTY_KEYS: off }).kittyKeys, undefined, off);
+test("shell --kitty-keys is off unless asked for, on the command line or with CNS_KITTY_KEYS", { skip: !posix }, () => {
+  assert.equal(parseOptions(["shell", "studio"]).kittyKeys, undefined);
+  assert.equal(parseOptions(["shell", "studio", "--kitty-keys"]).kittyKeys, true);
+  assert.equal(parseOptions(["shell", "studio", "--attach", "build", "--kitty-keys"]).kittyKeys, true);
+  for (const on of ["1", "true", "YES", " on "]) assert.equal(parseOptions(["shell", "studio"], { CNS_KITTY_KEYS: on }).kittyKeys, true, on);
+  for (const off of ["", "0", "false", "no", "off", "2"]) assert.equal(parseOptions(["shell", "studio"], { CNS_KITTY_KEYS: off }).kittyKeys, undefined, off);
   // It belongs to terminals: other commands neither take it nor read the variable.
   assert.equal(parseOptions(["run", "studio", "--", "pwd"], { CNS_KITTY_KEYS: "1" }).kittyKeys, undefined);
   assert.throws(() => parseOptions(["run", "studio", "--kitty-keys", "--", "pwd"]));
 });
 
-test("tty opens a login shell or one quoted command with optional terminal settings", { skip: !posix }, () => {
-  const shell = parseOptions(["tty", "studio"]);
-  assert.equal(shell.role, "tty");
+test("shell opens a login shell or one quoted command with optional terminal settings", { skip: !posix }, () => {
+  const shell = parseOptions(["shell", "studio"]);
+  assert.equal(shell.role, "shell");
   assert.equal(shell.command, undefined);
   const command = "claude --resume 'a b'";
-  const config = parseOptions(["tty", "studio", "--cwd", "/srv", "--timeout", "1000",
+  const config = parseOptions(["shell", "studio", "--cwd", "/srv", "--timeout", "1000",
     "--cols", "120", "--rows", "40", "--term", "screen-256color", "--", command]);
   assert.equal(config.command, command);
   assert.deepEqual([config.cwd, config.timeoutMs, config.cols, config.rows, config.term], ["/srv", 1000, 120, 40, "screen-256color"]);
-  assert.equal(parseOptions(["tty", "studio", "--", "htop"]).command, "htop");
-  assert.equal(parseOptions(["tty", "studio", "--", "vim", "notes.md"]).command, "vim notes.md");
-  assert.equal(parseOptions(["tty", "studio", "--", "htop"]).screen, undefined);
-  assert.deepEqual(parseOptions(["tty", "studio", "--screen", "--", "htop"]).screen, { history: 0 });
-  assert.deepEqual(parseOptions(["tty", "studio", "--screen", "--history", "1000"]).screen, { history: 1000 });
+  assert.equal(parseOptions(["shell", "studio", "--", "htop"]).command, "htop");
+  assert.equal(parseOptions(["shell", "studio", "--", "vim", "notes.md"]).command, "vim notes.md");
+  assert.equal(parseOptions(["shell", "studio", "--", "htop"]).screen, undefined);
+  assert.deepEqual(parseOptions(["shell", "studio", "--screen", "--", "htop"]).screen, { history: 0 });
+  assert.deepEqual(parseOptions(["shell", "studio", "--screen", "--history", "1000"]).screen, { history: 1000 });
   for (const args of [
-    ["tty", "studio", "htop"], ["tty", "studio", "--"], ["tty", "studio", "--", " "], ["tty", "studio", "vim", "--", "x"], ["tty", "studio", "--cols", "0"], ["tty", "studio", "--rows", "1001"], ["tty", "studio", "--cols", "8x"],
-    ["tty", "studio", "--term", "xterm 256"], ["tty", "studio", "--timeout", "-1"],
-    ["tty", "studio", "--history", "5"], ["tty", "studio", "--screen", "--history", "1001"], ["tty", "studio", "--screen", "--history", "x"],
+    ["shell", "studio", "htop"], ["shell", "studio", "--"], ["shell", "studio", "--", " "], ["shell", "studio", "vim", "--", "x"], ["shell", "studio", "--cols", "0"], ["shell", "studio", "--rows", "1001"], ["shell", "studio", "--cols", "8x"],
+    ["shell", "studio", "--term", "xterm 256"], ["shell", "studio", "--timeout", "-1"],
+    ["shell", "studio", "--history", "5"], ["shell", "studio", "--screen", "--history", "1001"], ["shell", "studio", "--screen", "--history", "x"],
     ["run", "studio", "--screen", "--", "echo ok"],
   ]) assert.throws(() => parseOptions(args), `Expected rejection: ${args.join(" ")}`);
 });
 
 test("named session commands take the device, a session name and their own options", { skip: !posix }, () => {
-  const started = parseOptions(["tty", "studio", "--name", "build", "--timeout", "5000", "--", "make watch"]);
+  const started = parseOptions(["shell", "studio", "--name", "build", "--timeout", "5000", "--", "make watch"]);
   assert.deepEqual([started.name, started.attach, started.command, started.timeoutMs], ["build", false, "make watch", 5000]);
-  const attached = parseOptions(["tty", "studio", "--attach", "build"]);
+  const attached = parseOptions(["shell", "studio", "--attach", "build"]);
   assert.deepEqual([attached.name, attached.attach], ["build", true]);
   // An environment cwd default is not an explicit change to the session.
-  assert.equal(parseOptions(["tty", "studio", "--attach", "build"], { CNS_CWD: "/srv" }).attach, true);
+  assert.equal(parseOptions(["shell", "studio", "--attach", "build"], { CNS_CWD: "/srv" }).attach, true);
 
   const keys = parseOptions(["keys", "studio", "build", "make test", "Enter"]);
   assert.deepEqual([keys.role, keys.name, keys.keys, keys.literal], ["keys", "build", ["make test", "Enter"], undefined]);
@@ -233,9 +233,9 @@ test("named session commands take the device, a session name and their own optio
   assert.equal(parseOptions(["kill", "studio", "build"]).name, "build");
 
   for (const args of [
-    ["tty", "studio", "--name", "a", "--attach", "a"], ["tty", "studio", "--attach", "a", "--", "ls"], ["tty", "studio", "--attach", "a", "--cwd", "/srv"],
-    ["tty", "studio", "--attach", "a", "--timeout", "5"], ["tty", "studio", "--attach", "a", "--term", "vt100"], ["tty", "studio", "--name", "a", "--screen"],
-    ["tty", "studio", "--name", "bad name"], ["tty", "studio", "--attach", ".hidden"], ["tty", "studio", "--name", "x".repeat(65)],
+    ["shell", "studio", "--name", "a", "--attach", "a"], ["shell", "studio", "--attach", "a", "--", "ls"], ["shell", "studio", "--attach", "a", "--cwd", "/srv"],
+    ["shell", "studio", "--attach", "a", "--timeout", "5"], ["shell", "studio", "--attach", "a", "--term", "vt100"], ["shell", "studio", "--name", "a", "--screen"],
+    ["shell", "studio", "--name", "bad name"], ["shell", "studio", "--attach", ".hidden"], ["shell", "studio", "--name", "x".repeat(65)],
     ["keys", "studio"], ["keys", "studio", "build"], ["keys", "studio", "bad:name", "Enter"],
     ["keys", "studio", "build", ...Array.from({ length: 1001 }, () => "x")],
     ["screen", "studio"], ["screen", "studio", "a", "b"], ["screen", "studio", "a", "--timeout", "5"], ["screen", "studio", "a", "--until", ""],
@@ -244,11 +244,43 @@ test("named session commands take the device, a session name and their own optio
   ]) assert.throws(() => parseOptions(args), `Expected rejection: ${args.join(" ")}`);
 });
 
+test("shell -d names the session it types into, and what it was given that only a new session can take", { skip: !posix }, () => {
+  const first = parseOptions(["shell", "studio", "-d", "--session", "work", "--cwd", "/srv", "--cols", "100", "--", "make", "watch"]);
+  assert.deepEqual([first.role, first.detached, first.name, first.attach, first.command, first.startOnly], ["shell", true, "work", false, "make watch", ["cwd", "cols"]]);
+  const next = parseOptions(["shell", "studio", "--detached", "--session", "work", "--command", "echo 'a  b'"]);
+  assert.deepEqual([next.detached, next.name, next.command, next.startOnly], [true, "work", "echo 'a  b'", []]);
+  // An environment default is not something this command asked the session for.
+  assert.deepEqual(parseOptions(["shell", "studio", "-d", "--session", "work"], { CNS_CWD: "/srv" }).startOnly, []);
+  const unnamed = parseOptions(["shell", "studio", "-d"]);
+  assert.deepEqual([unnamed.detached, unnamed.name, unnamed.command], [true, undefined, undefined]);
+  assert.equal(parseOptions(["shell", "studio", "--command", "htop"]).command, "htop");
+  assert.equal(parseOptions(["shell", "studio"]).detached, undefined);
+  for (const args of [
+    ["shell", "studio", "--session", "work", "--", "ls"], ["shell", "studio", "-d", "--name", "work"], ["shell", "studio", "-d", "--attach", "work"],
+    ["shell", "studio", "-d", "--screen", "--", "ls"], ["shell", "studio", "-d", "--key", "ctrl-]"], ["shell", "studio", "-d", "--kitty-keys"],
+    ["shell", "studio", "-d", "--session", "bad name"], ["shell", "studio", "-d", "--session", "a", "--session", "b"],
+    ["shell", "studio", "-d", "--command", "ls", "--", "ls"], ["shell", "studio", "-d", "--command", " "], ["run", "studio", "-d", "--", "ls"],
+    ["run", "studio", "--command", "ls", "--", "ls"],
+  ]) assert.throws(() => parseOptions(args), `Expected rejection: ${args.join(" ")}`);
+});
+
+test("--secret names secrets, repeated or separated by commas, for a program that is being started", { skip: !posix }, () => {
+  assert.deepEqual(parseOptions(["run", "studio", "--secret", "API_KEY", "--secret", "home:TOKEN,OTHER", "--", "env"]).secrets, ["API_KEY", "home:TOKEN,OTHER"]);
+  assert.deepEqual(parseOptions(["shell", "studio", "--secret", "API_KEY"]).secrets, ["API_KEY"]);
+  assert.deepEqual(parseOptions(["shell", "studio", "--name", "app", "--secret", "API_KEY", "--", "serve"]).secrets, ["API_KEY"]);
+  assert.deepEqual(parseOptions(["shell", "studio", "-d", "--session", "app", "--secret", "API_KEY"]).startOnly, ["secret"]);
+  assert.equal(parseOptions(["run", "studio", "--", "env"]).secrets, undefined);
+  assert.equal(parseOptions(["run", "studio", "--", "env"]).env, undefined);
+  for (const args of [["shell", "studio", "--attach", "app", "--secret", "API_KEY"], ["keys", "studio", "app", "--secret", "API_KEY", "Enter"], ["run", "studio", "--secret"], ["run", "studio", "--secret", "--", "env"]]) {
+    assert.throws(() => parseOptions(args), `Expected rejection: ${args.join(" ")}`);
+  }
+});
+
 test("run forwards stdin unless --no-stdin says otherwise", { skip: !posix }, () => {
   assert.equal(parseOptions(["run", "studio", "--", "cat"]).stdin, true);
   assert.equal(parseOptions(["run", "studio", "--no-stdin", "--", "cat"]).stdin, false);
   assert.equal(parseOptions(["run", "studio", "-n", "--", "cat"]).stdin, false);
-  assert.equal(parseOptions(["tty", "studio"]).stdin, undefined);
+  assert.equal(parseOptions(["shell", "studio"]).stdin, undefined);
 });
 
 test("cp takes a local path and a DEVICE:PATH, or two DEVICE:PATHs, scp style", { skip: !posix }, () => {

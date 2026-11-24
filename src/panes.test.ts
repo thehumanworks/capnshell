@@ -62,17 +62,17 @@ test("the terminal shows each pane under its title, side by side, and repaints o
   await right.write(text("right 1"));
   const rects: Rect[] = tile(2, 21, 4);
   const frame = (focused: number) => compose([
-    { rect: rects[0]!, screen: left, title: "lf/tty-1", focused: focused === 0 },
+    { rect: rects[0]!, screen: left, title: "lf/sh-1", focused: focused === 0 },
     { rect: rects[1]!, screen: right, title: "studio/build · exited 2", focused: focused === 1 },
   ], 21, 4);
   const first = frame(0);
   assert.deepEqual(await shown(paint(first, []), 21, 4), [
-    " lf/tty-1 │ studio/b…",
+    " lf/sh-1  │ studio/b…",
     "left 1    │right 1",
     "left 2    │",
     "          │",
   ]);
-  assert.match(first[0]!, /^\x1b\[7m lf\/tty-1 \x1b\[0m\x1b\[2m│\x1b\[0m\x1b\[2m studio/, "the pane with the keys has its title in reverse");
+  assert.match(first[0]!, /^\x1b\[7m lf\/sh-1  \x1b\[0m\x1b\[2m│\x1b\[0m\x1b\[2m studio/, "the pane with the keys has its title in reverse");
   await right.write(text("\r\nright 2"));
   const second = frame(0);
   assert.equal(paint(second, first), `\x1b[3;1H${second[2]}`, "only the changed row is drawn");

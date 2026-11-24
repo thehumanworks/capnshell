@@ -65,7 +65,7 @@ const sessionSchema = z.object({
   startedAt: z.string(),
   running: z.boolean(),
   exit: exitSchema.nullable(),
-  viewers: z.int().describe("Terminals attached with cns tty --attach."),
+  viewers: z.int().describe("Terminals attached with cns shell --attach."),
 });
 const viewSchema = {
   running: z.boolean(),

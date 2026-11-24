@@ -104,6 +104,19 @@ test("a device takes only a newer list its mesh's admin signed, for a mesh it is
   assert.deepEqual(newerLists([held], [{ text: v3.text, sig: v4.sig }]), []);
 });
 
+test("a mesh made again under a deleted one's name takes none of the old one's lists", () => {
+  // A device that was offline when it was removed still holds the old mesh's list, version 4.
+  const old = signList(homeList(4), admin);
+  // Made from version 1 again, the new mesh would take that list as its newer one, members and all.
+  const fromOne = stateOf(firstList("home", { key: admin.publicKey, name: "admin" }, NOW));
+  assert.deepEqual(newerLists([fromOne], [old]).map((state) => state.list.version), [4]);
+  // Made above the old mesh's last version, it and every later list of it are newer than any old one.
+  const made = firstList("home", { key: admin.publicKey, name: "admin" }, NOW, 4);
+  assert.equal(made.version, 5);
+  assert.deepEqual(newerLists([stateOf(made)], [old]), []);
+  assert.deepEqual(newerLists([stateOf(nextList(made, (members) => members, NOW))], [old, signList(homeList(3), admin)]), []);
+});
+
 test("a device is offered only the lists of meshes it is in, and leaves a mesh its admin stops offering", () => {
   const home = stateOf(homeList(2));
   assert.deepEqual(listsFor(laptop.publicKey, [home]), [home.signed]);

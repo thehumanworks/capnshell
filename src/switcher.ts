@@ -73,7 +73,7 @@ export type Effect =
   | { kind: "none" }
   /** Show a session: the pane it is in, or in place of the current one. */
   | { kind: "attach"; ref: SessionRef }
-  /** Start the next free tty-N on `device` and show it, in a pane of its own with `pane`. */
+  /** Start the next free shell-N on `device` and show it, in a pane of its own with `pane`. */
   | { kind: "new"; device: string; pane?: true }
   | { kind: "add-pane"; ref: SessionRef }
   /** Close the current session's pane; the session keeps running. */
