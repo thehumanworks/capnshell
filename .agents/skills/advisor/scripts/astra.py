@@ -59,8 +59,8 @@ def _consult(prompt: str, context: str | None, cwd: Path) -> dict:
     }
 
 
-def ask(prompt: str, context: str | None = None, cwd: str | Path = ".") -> str:
-    return json.dumps(_consult(prompt, Path(cwd).expanduser().resolve()))
+def ask(prompt: str, context: str | None = None, cwd: str | Path = ".") -> dict:
+    return _consult(prompt, context, Path(cwd).expanduser().resolve())
 
 
 def main() -> int:
@@ -70,7 +70,7 @@ def main() -> int:
     prompts = consult.add_mutually_exclusive_group(required=True)
     prompts.add_argument("question", nargs="?", metavar="PROMPT")
     prompts.add_argument("--prompt", help="Task or question for Astra.")
-    prompts.add_argument(
+    consult.add_argument(
         "--context",
         help="Additional context on the domain/project/trigger to be taken into consideration alongside the question.",
     )
