@@ -5,7 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { connectControl } from "./commands/daemon.js";
-import { settledLink, testDevices, type TestDevice } from "./test-support.js";
+import { startRelay } from "./relay-server.js";
+import { launchCli, settledLink, testDevices, unusedPort, type TestDevice } from "./test-support.js";
+import { WORDS } from "./words.js";
 
 /** Wait until `check` holds, as lists and links take a moment to reach every daemon. */
 async function eventually(what: string, check: () => boolean | Promise<boolean>, timeoutMs = 20000): Promise<void> {
@@ -193,6 +195,78 @@ test("a mesh bot token makes a machine nobody sits at a member that others reach
   const reissued = await mesh(hub, ["token", "home", "ci", "--allow", "none"]);
   assert.equal(reissued.code, 0, reissued.stderr);
   assert.notEqual(await keyOf(), newKey);
+});
+
+test("a person at a new machine types a short code to make it a bot, and nothing is added until the right code", { skip: process.platform === "win32", timeout: 120000 }, async (t) => {
+  const relayPort = Number(await unusedPort("127.0.0.1"));
+  const relay = startRelay({ bind: "127.0.0.1", port: relayPort });
+  t.after(() => relay.stop());
+  const devices = await testDevices(t, "cns-mesh-code-");
+  // Members link directly on loopback; only the code goes through the relay.
+  const viaRelay = (device: TestDevice): TestDevice => ({ ...device, env: { ...device.env, CNS_RELAY: `ws://127.0.0.1:${relayPort}` } });
+  const typeCode = (device: TestDevice, code: string[]) => devices.cli(viaRelay(device), ["mesh", "join", "--code", ...code]);
+  const hub = await devices.device("hub");
+  const laptop = await devices.device("laptop");
+  for (const device of [hub, laptop]) await devices.up(device);
+  await devices.pair(hub, laptop);
+  const mesh = (device: TestDevice, args: string[]) => devices.cli(device, ["mesh", ...args, "--state", device.state]);
+  const has = (device: TestDevice, kind: "peers" | "meshes", name: string) => existsSync(path.join(device.dir, kind, name));
+  assert.equal((await mesh(hub, ["create", "home"])).code, 0);
+  assert.equal((await mesh(hub, ["add", "home", "laptop"])).code, 0);
+  assert.equal((await mesh(laptop, ["join", "home", "--via", "hub", "--allow", "shell"])).code, 0);
+  const showCode = async (bot: string, allow: string) => {
+    const showing = launchCli(t, ["mesh", "token", "home", bot, "--allow", allow, "--code", "--state", hub.state], { env: viaRelay(hub).env });
+    showing.child.stdin.end();
+    await showing.waitFor("Waiting for it");
+    return { showing, code: /^Code: (\d+-[a-z]+-[a-z]+-[a-z]+)\n$/.exec(showing.stdout)![1]! };
+  };
+
+  // The admin shows a code instead of the token, and saves nothing while it waits.
+  const { showing, code } = await showCode("box", "shell");
+  assert.match(showing.stderr, new RegExp(`On the bot's machine, run: cns mesh join --code ${code}`));
+  assert.ok(!has(hub, "peers", "box"));
+  // A device that is already one refuses before it uses up the code.
+  const taken = await typeCode(laptop, [code]);
+  assert.equal(taken.code, 1);
+  assert.match(taken.stderr, /already a cns device .* so the code was not used/);
+  // A new machine types it, words apart, and becomes the bot.
+  const box = await devices.device("box");
+  const joined = await typeCode(box, code.split("-"));
+  assert.equal(joined.code, 0, joined.output);
+  assert.match(joined.stdout, /^Joined the mesh home as box \(fingerprint [a-z2-7-]+\), run by [^.]+\. Other members: laptop\.\nMembers may use here: shell, as the admin chose/);
+  assert.equal(await showing.exited, 0, showing.output);
+  assert.match(showing.stderr, /Sent the token for box \(fingerprint [a-z2-7-]+\), a member of home \(version 3\)\. Members may use there: shell\./);
+  assert.ok(!showing.output.includes("cnsbot1:"));
+  assert.ok(has(hub, "peers", "box") && has(box, "meshes", "home"));
+  // The code worked once.
+  const late = await devices.device("late");
+  const reused = await typeCode(late, [code]);
+  assert.equal(reused.code, 3, reused.output);
+  assert.match(reused.stderr, /No device is showing code/);
+  assert.ok(!existsSync(path.join(late.dir, "identity.json")));
+  // The bot runs as a member that laptop reaches, as far as the admin allowed.
+  await devices.up(box);
+  await eventually("laptop saves the bot", () => has(laptop, "peers", "box"));
+  const control = await connectControl(laptop.state);
+  try { await settledLink(control, "box"); } finally { control.close(); }
+  const back = await devices.cli(laptop, ["run", "box", "--", "echo", "from laptop"]);
+  assert.equal(back.code, 0, back.output);
+  assert.equal(back.stdout, "from laptop\n");
+
+  // Three wrong codes end it, and the mesh is as it was.
+  const second = await showCode("box2", "none");
+  const [room, ...words] = second.code.split("-");
+  const other = WORDS.find((word) => !words.includes(word))!;
+  for (let tries = 1; tries <= 3; tries++) {
+    const wrong = await typeCode(late, [room!, other, words[1]!, words[2]!]);
+    assert.equal(wrong.code, 3, wrong.output);
+  }
+  assert.equal(await second.showing.exited, 3, second.showing.output);
+  assert.match(second.showing.stderr, /typed wrong 3 times, so it no longer works\. Run cns mesh token --code again .* box2 was not added\./);
+  assert.ok(!has(hub, "peers", "box2") && !existsSync(path.join(late.dir, "identity.json")));
+  const listed = JSON.parse((await devices.cli(hub, ["mesh", "list", "home", "--json"])).stdout) as Array<{ version: number; members: Array<{ name: string }> }>;
+  assert.equal(listed[0]!.version, 3);
+  assert.ok(!listed[0]!.members.some((member) => member.name === "box2"));
 });
 
 test("unpairing on mesh removal will not break another mesh's pairing", async (t) => {

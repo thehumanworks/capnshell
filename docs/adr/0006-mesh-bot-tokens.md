@@ -36,6 +36,21 @@ of its own, every device sees which bot did what, and removing one bot leaves th
   the environment. An explicit file wins over `CNS_TOKEN` even if a launcher overrides the
   variable. A bad file fails; there is no fallback to a different identity. After bootstrap
   the daemon reads the saved identity; it does not need the token in its environment.
+- **By code** (added 2026-11-24). A machine whose only way in is its own keyboard, with no
+  ssh or shared clipboard, cannot take a token of about a thousand characters. With `--code`,
+  `cns mesh token NAME BOT --allow GRANTS --code` shows a short code such as
+  `42-orbit-canyon-velvet` and waits; on the machine, `cns mesh join --code CODE` gets the
+  same token and saves it as `CNS_TOKEN` would, then `cns up` runs the bot. The code is a
+  pairing code (ADR 0004) with its own use: the same relay room, CPace exchange, three
+  tries, one delivery and expiry (5 minutes, `--expires` up to 60), with the token in place
+  of the invite. Its hello says `use: "bot"`, so a code typed into the other command (`cns
+  pair`, or `cns mesh join --code` with a pairing code) stops before it costs a try, and its
+  CPace channel and sealing key use the protocol name `cns-bot-code-1`, so an exchange for
+  one use never works for the other. The admin saves nothing until a machine proves it knows
+  the code, and checks then that the mesh did not change meanwhile; a code that expires or is
+  typed wrong three times leaves the mesh as it was. `cns mesh join --code` refuses on a
+  machine that already has an identity before it uses the code, so the admin never lists a
+  bot that nobody became. The relay is unchanged: it pipes room messages whatever they carry.
 - **Never over another device.** A machine that already has an identity of its own
   refuses the token, so a token set by mistake cannot replace a person's device.
 - **Revoking.** `cns mesh remove NAME BOT` drops the bot from the other members when
@@ -54,6 +69,11 @@ of its own, every device sees which bot did what, and removing one bot leaves th
   whose links would keep replacing each other; the docs say to use one at a time.
 - There is no expiry: a token lasts until it is removed from the mesh.
 - No handshake, relay or gateway change.
+- A code shown on screen can be typed by whoever sees it first, within its expiry. They then
+  hold the bot's token; the real machine is told the code was used, and the admin removes the
+  bot with `cns mesh remove NAME BOT --unpair`. Pairing codes have the same exposure, which
+  their fingerprint prompt covers; a bot code has no prompt, because the admin made the key
+  and there is nothing on the other machine to compare.
 
 ## Alternatives considered
 

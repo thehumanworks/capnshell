@@ -3,6 +3,7 @@ import sodium from "libsodium-wrappers-sumo";
 import { z } from "zod";
 import { closeSocket, openSocket } from "./connect.js";
 import { printable } from "./errors.js";
+import { BOT_TOKEN_PREFIX } from "./mesh-token.js";
 import { INVITE_PREFIX } from "./pairing.js";
 import { MAX_ROOM_MESSAGE_BYTES, ROOM_GUEST_MS, roomEndpoint } from "./relay-hub.js";
 import { WORDS } from "./words.js";
@@ -29,6 +30,11 @@ import { WORDS } from "./words.js";
  *   host  -> guest: { t: "hello", v: 1, sid, y }        sid: 16 random bytes, y: Ya
  *   guest -> host:  { t: "reply", y, tag }              y: Yb, tag: B's key confirmation
  *   host  -> guest: { t: "invite", tag, nonce, box }    or { t: "wrong", left }
+ *
+ * The same exchange carries a mesh bot token (mesh-token.ts) from `cns mesh token --code` to
+ * `cns mesh join --code`. Its hello says `use: "bot"`, so a code typed into the wrong command
+ * stops before it costs a try, and its CPace channel and sealing key are bound to a protocol
+ * name of its own, so an exchange for one use is never valid for the other.
  */
 
 export const CODE_WORDS = 3;
@@ -36,7 +42,13 @@ export const CODE_WORDS = 3;
 export const MAX_WRONG_CODES = 3;
 /** How often a host pings the relay, so the room's connection stays up while it waits. */
 const ROOM_PING_MS = 25_000;
-const PROTOCOL = "cns-pairing-code-1";
+
+/** What a code carries: a pairing invite, or a mesh bot token. */
+export type CodeUse = "invite" | "bot";
+const USES = {
+  invite: { protocol: "cns-pairing-code-1", prefix: INVITE_PREFIX, what: "an invite", command: "cns pair" },
+  bot: { protocol: "cns-bot-code-1", prefix: BOT_TOKEN_PREFIX, what: "a mesh bot token", command: "cns mesh token --code" },
+} as const satisfies Record<CodeUse, { protocol: string; prefix: string; what: string; command: string }>;
 
 const DSI = Buffer.from("CPaceRistretto255");
 /** SHA-512's input block size, which the generator string pads to. */
@@ -62,9 +74,11 @@ export function randomWords(): string[] { return Array.from({ length: CODE_WORDS
  * first four letters of each word are enough. A word not on the list is refused here,
  * before anything is sent, so a typo costs nothing.
  */
-export function parseCode(parts: string | readonly string[]): PairingCode {
+export function parseCode(parts: string | readonly string[], use: CodeUse = "invite"): PairingCode {
   const tokens = (typeof parts === "string" ? [parts] : parts).join(" ").trim().toLowerCase().split(/[\s\-_.,]+/).filter(Boolean);
-  const usage = "A pairing code is a number and three words, such as 42-orbit-canyon-velvet. Type the code cns pair shows on the other device.";
+  const usage = use === "bot"
+    ? "A code is a number and three words, such as 42-orbit-canyon-velvet. Type the code that cns mesh token --code shows on the mesh's admin."
+    : "A pairing code is a number and three words, such as 42-orbit-canyon-velvet. Type the code cns pair shows on the other device.";
   if (!tokens.length || !/^[1-9][0-9]{0,5}$/.test(tokens[0]!)) throw new Error(usage);
   const words = tokens.slice(1);
   if (words.length !== CODE_WORDS) throw new Error(usage);
@@ -128,26 +142,27 @@ export function intermediateKey(sid: Uint8Array, k: Uint8Array, ya: Uint8Array, 
 const EMPTY = new Uint8Array(0);
 
 /** The keys both sides derive from one exchange: tags confirming each side's message (draft section 10.4), and the key the invite is sealed with. */
-function sessionKeys(sid: Uint8Array, k: Uint8Array, ya: Uint8Array, yb: Uint8Array) {
+function sessionKeys(use: CodeUse, sid: Uint8Array, k: Uint8Array, ya: Uint8Array, yb: Uint8Array) {
   const isk = intermediateKey(sid, k, ya, EMPTY, yb, EMPTY);
   const macKey = createHash("sha512").update("CPaceMac").update(sid).update(isk).digest();
   return {
     hostTag: createHmac("sha512", macKey).update(lvCat(ya, EMPTY)).digest(),
     guestTag: createHmac("sha512", macKey).update(lvCat(yb, EMPTY)).digest(),
-    boxKey: new Uint8Array(hkdfSync("sha256", isk, sid, `${PROTOCOL} invite`, sodium.crypto_secretbox_KEYBYTES)),
+    boxKey: new Uint8Array(hkdfSync("sha256", isk, sid, `${USES[use].protocol} invite`, sodium.crypto_secretbox_KEYBYTES)),
   };
 }
 
-/** What both sides bind the exchange to: the protocol, the relay as dialed, and the room. */
-function channelId(relay: string, room: number): Buffer {
-  return lvCat(Buffer.from(PROTOCOL), Buffer.from(new URL(roomEndpoint(relay)).host.toLowerCase()), Buffer.from(String(room)));
+/** What both sides bind the exchange to: the protocol of its use, the relay as dialed, and the room. */
+function channelId(use: CodeUse, relay: string, room: number): Buffer {
+  return lvCat(Buffer.from(USES[use].protocol), Buffer.from(new URL(roomEndpoint(relay)).host.toLowerCase()), Buffer.from(String(room)));
 }
 const password = (words: readonly string[]) => Buffer.from(words.join("-"));
 
 const b64 = (bytes: Uint8Array) => Buffer.from(bytes).toString("base64url");
 const bytesOf = (length?: number) => z.string().regex(/^[A-Za-z0-9_-]+$/).max(MAX_ROOM_MESSAGE_BYTES).transform((value) => new Uint8Array(Buffer.from(value, "base64url")))
   .refine((value) => length === undefined || value.length === length);
-const helloSchema = z.strictObject({ t: z.literal("hello"), v: z.literal(1), sid: bytesOf(16), y: bytesOf(POINT_BYTES) });
+// A pairing hello has no `use`, so cns versions from before bot codes still read it.
+const helloSchema = z.strictObject({ t: z.literal("hello"), v: z.literal(1), sid: bytesOf(16), y: bytesOf(POINT_BYTES), use: z.literal("bot").optional() });
 const replySchema = z.strictObject({ t: z.literal("reply"), y: bytesOf(POINT_BYTES), tag: bytesOf(64) });
 const hostAnswerSchema = z.discriminatedUnion("t", [
   z.strictObject({ t: z.literal("invite"), tag: bytesOf(64), nonce: bytesOf(24), box: bytesOf() }),
@@ -168,7 +183,7 @@ function parseJson<T extends z.ZodType>(schema: T, text: unknown): z.infer<T> | 
 
 /** Why a code did not work. `code` is stable for exit statuses. */
 export class PairingCodeError extends Error {
-  constructor(readonly code: "wrong" | "unknown" | "busy" | "expired" | "relay", message: string) {
+  constructor(readonly code: "wrong" | "unknown" | "busy" | "expired" | "relay" | "mismatch", message: string) {
     super(message);
     this.name = "PairingCodeError";
   }
@@ -203,8 +218,9 @@ export interface HostedCode {
   /** The code to show, such as 42-orbit-canyon-velvet. */
   code: string;
   /**
-   * Resolves once a device that knew the code has the invite. Rejects with a
-   * PairingCodeError when the code stops working: too many wrong codes, or the room lost.
+   * Resolves once a device that knew the code has the invite or token. Rejects with a
+   * PairingCodeError when the code stops working: too many wrong codes, or the room lost;
+   * or with what HostEvents.deliver threw.
    */
   delivered: Promise<void>;
   /** End the room; the code stops working. */
@@ -214,12 +230,21 @@ export interface HostedCode {
 export interface HostEvents {
   /** A device sent a wrong code; `tries` wrong ones so far. */
   wrong?(tries: number): void;
+  /**
+   * A device proved it knows the code, and what the code carries goes to it next. Throwing
+   * ends the exchange without sending it, and `delivered` rejects with what was thrown.
+   */
+  deliver?(): void;
 }
 
-/** Open a room at `relay` for `inviteText` and return its code; the room serves guests until the invite is delivered or it is closed. */
-export async function hostCode(relay: string, inviteText: string, events: HostEvents = {}, signal = AbortSignal.timeout(ROOM_GUEST_MS)): Promise<HostedCode> {
+/**
+ * Open a room at `relay` for `text`, a cns1: invite or a cnsbot1: mesh bot token, and return
+ * its code; the room serves guests until `text` is delivered or the room is closed.
+ */
+export async function hostCode(relay: string, text: string, events: HostEvents = {}, signal = AbortSignal.timeout(ROOM_GUEST_MS)): Promise<HostedCode> {
   await sodium.ready;
-  if (!inviteText.startsWith(INVITE_PREFIX)) throw new Error("Only a cns1: invite can be sent with a pairing code.");
+  const use: CodeUse | undefined = text.startsWith(INVITE_PREFIX) ? "invite" : text.startsWith(BOT_TOKEN_PREFIX) ? "bot" : undefined;
+  if (!use) throw new Error("Only a cns1: invite or a cnsbot1: mesh bot token can be sent with a code.");
   const socket = await openSocket(roomEndpoint(relay), signal);
   const messages = inbox(socket);
   const first = parseJson(relayToHostSchema, await messages.next(signal).catch((error: unknown) => { closeSocket(socket); throw error; }));
@@ -229,7 +254,7 @@ export async function hostCode(relay: string, inviteText: string, events: HostEv
   }
   const room = first.room;
   const words = randomWords();
-  const ci = channelId(relay, room);
+  const ci = channelId(use, relay, room);
   const prs = password(words);
   const stop = new AbortController();
   const ping = setInterval(() => { try { socket.send(JSON.stringify({ t: "ping" })); } catch { /* Closing. */ } }, ROOM_PING_MS);
@@ -255,7 +280,7 @@ export async function hostCode(relay: string, inviteText: string, events: HostEv
           const scalar = sampleScalar();
           const share = scalarMult(scalar, calculateGenerator(prs, ci, sid));
           attempt = { scalar, share, sid };
-          send({ t: "send", m: JSON.stringify({ t: "hello", v: 1, sid: b64(sid), y: b64(share) }) });
+          send({ t: "send", m: JSON.stringify({ t: "hello", v: 1, sid: b64(sid), y: b64(share), ...use === "bot" ? { use } : {} }) });
           continue;
         }
         // A guest's message: its reply to this attempt's hello, or nothing this side reads.
@@ -264,23 +289,25 @@ export async function hostCode(relay: string, inviteText: string, events: HostEv
         attempt = undefined;
         if (!current || !reply) { endGuest("That was not a pairing code reply."); continue; }
         const k = scalarMultVfy(current.scalar, reply.y);
-        const keys = k ? sessionKeys(current.sid, k, current.share, reply.y) : undefined;
+        const keys = k ? sessionKeys(use, current.sid, k, current.share, reply.y) : undefined;
         if (!keys || !timingSafeEqual(Buffer.from(reply.tag), keys.guestTag)) {
           wrong++;
           events.wrong?.(wrong);
           send({ t: "send", m: JSON.stringify({ t: "wrong", left: MAX_WRONG_CODES - wrong }) });
           endGuest("Wrong pairing code.");
-          if (wrong >= MAX_WRONG_CODES) throw new PairingCodeError("wrong", `The code was typed wrong ${MAX_WRONG_CODES} times, so it no longer works. Run cns pair again for a new code. If nobody here mistyped it, someone else tried to use it.`);
+          if (wrong >= MAX_WRONG_CODES) throw new PairingCodeError("wrong", `The code was typed wrong ${MAX_WRONG_CODES} times, so it no longer works. Run ${USES[use].command} again for a new code. If nobody here mistyped it, someone else tried to use it.`);
           continue;
         }
+        try { events.deliver?.(); }
+        catch (error) { endGuest("The other device could not finish the exchange."); throw error; }
         const nonce = randomBytes(sodium.crypto_secretbox_NONCEBYTES);
-        const box = sodium.crypto_secretbox_easy(Buffer.from(inviteText), nonce, keys.boxKey);
+        const box = sodium.crypto_secretbox_easy(Buffer.from(text), nonce, keys.boxKey);
         send({ t: "send", m: JSON.stringify({ t: "invite", tag: b64(keys.hostTag), nonce: b64(nonce), box: b64(box) }) });
         return;
       }
     } finally {
       clearInterval(ping);
-      // The invite has gone, or the code is dead: either way the room ends.
+      // The invite or token has gone, or the code is dead: either way the room ends.
       closeSocket(socket, "Pairing code finished");
     }
   })();
@@ -297,43 +324,55 @@ export async function hostCode(relay: string, inviteText: string, events: HostEv
 }
 
 /** Join the room of `code` at `relay` and get the invite it guards. */
-export async function inviteForCode(relay: string, code: PairingCode, signal = AbortSignal.timeout(ROOM_GUEST_MS + 5_000)): Promise<string> {
+export function inviteForCode(relay: string, code: PairingCode, signal?: AbortSignal): Promise<string> { return textForCode(relay, code, "invite", signal); }
+
+/** Join the room of `code` at `relay` and get the mesh bot token it guards. */
+export function botTokenForCode(relay: string, code: PairingCode, signal?: AbortSignal): Promise<string> { return textForCode(relay, code, "bot", signal); }
+
+async function textForCode(relay: string, code: PairingCode, use: CodeUse, signal = AbortSignal.timeout(ROOM_GUEST_MS + 5_000)): Promise<string> {
   await sodium.ready;
+  const { command } = USES[use];
   let socket: WebSocket;
   try { socket = await openSocket(roomEndpoint(relay, code.room), signal); }
-  catch (error) { throw new PairingCodeError("relay", `Cannot reach the relay to exchange the pairing code: ${(error as Error).message}`); }
+  catch (error) { throw new PairingCodeError("relay", `Cannot reach the relay to exchange the code: ${(error as Error).message}`); }
   const messages = inbox(socket);
   const refused = (): never => {
     const closed = messages.closed;
     const reason = closed?.reason ? printable(closed.reason) : "the relay closed the connection.";
-    if (closed?.code === 4004) throw new PairingCodeError("unknown", `No device is showing code ${formatCode(code)}: it may have expired, been used or been mistyped. Run cns pair on the other device for a new code.`);
+    if (closed?.code === 4004) throw new PairingCodeError("unknown", `No device is showing code ${formatCode(code)}: it may have expired, been used or been mistyped. Run ${command} on the other device for a new code.`);
     if (closed?.code === 4009) throw new PairingCodeError("busy", reason);
-    if (signal.aborted) throw new PairingCodeError("expired", "The other device did not answer in time. Check that cns pair still waits there, then try again.");
-    throw new PairingCodeError("relay", `The pairing code exchange ended: ${reason}`);
+    if (signal.aborted) throw new PairingCodeError("expired", `The other device did not answer in time. Check that ${command} still waits there, then try again.`);
+    throw new PairingCodeError("relay", `The code exchange ended: ${reason}`);
   };
   try {
     const hello = parseJson(helloSchema, await messages.next(signal).catch(() => undefined));
     if (!hello) return refused();
-    const ci = channelId(relay, code.room);
+    // A code for the other command: leave before answering, so it costs no try.
+    if ((hello.use ?? "invite") !== use) {
+      throw new PairingCodeError("mismatch", use === "bot"
+        ? `Code ${formatCode(code)} is a pairing code. Type it with cns pair ${formatCode(code)} instead.`
+        : `Code ${formatCode(code)} adds a machine to a mesh as a bot. Type it on that machine with cns mesh join --code ${formatCode(code)} instead.`);
+    }
+    const ci = channelId(use, relay, code.room);
     const scalar = sampleScalar();
     const share = scalarMult(scalar, calculateGenerator(password(code.words), ci, hello.sid));
     const k = scalarMultVfy(scalar, hello.y);
-    if (!k) throw new PairingCodeError("relay", "The other device sent an invalid pairing message.");
-    const keys = sessionKeys(hello.sid, k, hello.y, share);
+    if (!k) throw new PairingCodeError("relay", "The other device sent an invalid code message.");
+    const keys = sessionKeys(use, hello.sid, k, hello.y, share);
     socket.send(JSON.stringify({ t: "reply", y: b64(share), tag: b64(keys.guestTag) }));
     const answer = parseJson(hostAnswerSchema, await messages.next(signal).catch(() => undefined));
     if (!answer) return refused();
     if (answer.t === "wrong") {
       throw new PairingCodeError("wrong", answer.left
         ? `The code is wrong. Check the words on the other device and try again (${answer.left} ${answer.left === 1 ? "try" : "tries"} left).`
-        : "The code is wrong, and that was its last try. Run cns pair on the other device for a new code.");
+        : `The code is wrong, and that was its last try. Run ${command} on the other device for a new code.`);
     }
-    if (!timingSafeEqual(Buffer.from(answer.tag), keys.hostTag)) throw new PairingCodeError("wrong", "The other device could not prove it knows the code. Run cns pair there for a new code.");
+    if (!timingSafeEqual(Buffer.from(answer.tag), keys.hostTag)) throw new PairingCodeError("wrong", `The other device could not prove it knows the code. Run ${command} there for a new code.`);
     let opened: Uint8Array;
     try { opened = sodium.crypto_secretbox_open_easy(answer.box, answer.nonce, keys.boxKey); }
-    catch { throw new PairingCodeError("wrong", "The invite did not open with this code. Run cns pair on the other device for a new code."); }
+    catch { throw new PairingCodeError("wrong", `What the other device sent did not open with this code. Run ${command} there for a new code.`); }
     const text = Buffer.from(opened).toString("utf8");
-    if (!text.startsWith(INVITE_PREFIX)) throw new PairingCodeError("relay", "The other device sent something other than an invite.");
+    if (!text.startsWith(USES[use].prefix)) throw new PairingCodeError("relay", `The other device sent something other than ${USES[use].what}.`);
     return text;
   } finally {
     closeSocket(socket, "Pairing code finished");

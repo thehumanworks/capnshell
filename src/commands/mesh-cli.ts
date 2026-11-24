@@ -1,10 +1,12 @@
 import os from "node:os";
 import { errorMessage } from "../errors.js";
-import { ensureIdentity, fingerprint, newKeyPair, type PublicKey } from "../identity.js";
-import { mintBotToken } from "../mesh-token.js";
+import { ensureIdentity, fingerprint, loadIdentity, newKeyPair, type PublicKey } from "../identity.js";
+import { mintBotToken, startAsBot } from "../mesh-token.js";
 import { applyMeshes, firstList, listMeshes, listsFor, MAX_MESHES, nextList, openLists, readMesh, removeMesh, signList, writeMesh, type Member, type MeshState } from "../mesh.js";
 import { meshFiles, peerNamePattern } from "../peer-files.js";
-import { suggestedName } from "../pairing.js";
+import { DEFAULT_INVITE_MS, MAX_INVITE_MS, suggestedName } from "../pairing.js";
+import { botTokenForCode, hostCode, MAX_WRONG_CODES, PairingCodeError, parseCode } from "../pairing-code.js";
+import { builtInRelay } from "../relay-config.js";
 import { describeGrants, expandGrants, getPeer, listPeers, resolvePeer, savePairedPeer, type Permission } from "../peers.js";
 import { connectDevice } from "./connect-device.js";
 import { connectControl } from "./daemon.js";
@@ -92,25 +94,44 @@ export async function addMembers(name: string, devices: string[], options: State
   if (!live) console.log("Start this device's daemon so members get the new list: cns up.");
 }
 
-/**
- * `cns mesh token NAME BOT --allow GRANTS`: a token that makes a machine nobody sits at a
- * member of the mesh, as BOT (mesh-token.ts). The token goes to stdout, once, so it can be
- * piped into a secret store; this device keeps only the bot's public key.
- */
-export async function botToken(name: string, bot: string, options: StateOption & { allow?: string; limit?: string }): Promise<void> {
-  const { identity } = ensureIdentity();
-  const state = adminOf(name, identity.publicKey);
-  if (options.allow === undefined) throw new Error("Say what other members may use on the bot: --allow none, shell, files, sessions, all, or permissions.");
-  const allow = grantsFrom(options.allow);
-  const limit = options.limit === undefined ? undefined : grantsFrom(options.limit);
+/** Refuse BOT as a new bot's name in `state`: a member, or a device saved here, has it. */
+function checkBotName(state: MeshState, bot: string): void {
   if (!peerNamePattern.test(bot)) throw new Error("Names contain 1-64 letters, numbers, underscores or hyphens and start with a letter or number.");
-  if (state.list.members.some((member) => member.name === bot)) throw new Error(`The mesh ${name} already lists a member named ${bot}. Choose another name, or check the existing member with cns mesh list ${name}.`);
+  if (state.list.members.some((member) => member.name === bot)) throw new Error(`The mesh ${state.name} already lists a member named ${bot}. Choose another name, or check the existing member with cns mesh list ${state.name}.`);
   const peer = getPeer(bot);
   if (peer) {
     const mesh = peer.mesh ?? listMeshes().find((state) => state.list.members.some((member) => member.key === peer.publicKey))?.name;
     if (mesh) throw new Error(`${bot} is saved here for a member of the mesh ${mesh}. Choose another name.`);
     throw new Error(`${bot} is still paired with this device (fingerprint ${peer.fingerprint}). If this is the old bot, run cns peer remove ${bot}, then retry. Otherwise choose another name.`);
   }
+}
+
+/**
+ * `cns mesh token NAME BOT --allow GRANTS`: a token that makes a machine nobody sits at a
+ * member of the mesh, as BOT (mesh-token.ts). The token goes to stdout, once, so it can be
+ * piped into a secret store; this device keeps only the bot's public key.
+ *
+ * With --code, the token goes instead to the machine that types the short code this shows,
+ * with `cns mesh join --code CODE`, through the relay as a pairing invite does
+ * (pairing-code.ts). Nothing is saved here until a machine proves it knows the code, so a
+ * code that expires or is typed wrong three times leaves the mesh as it was.
+ */
+export async function botToken(name: string, bot: string, options: StateOption & { allow?: string; limit?: string; code?: boolean; expires?: string }): Promise<void> {
+  const { identity } = ensureIdentity();
+  const state = adminOf(name, identity.publicKey);
+  if (options.allow === undefined) throw new Error("Say what other members may use on the bot: --allow none, shell, files, sessions, all, or permissions.");
+  const allow = grantsFrom(options.allow);
+  const limit = options.limit === undefined ? undefined : grantsFrom(options.limit);
+  checkBotName(state, bot);
+  // Check what can fail before a code is shown.
+  let byCode: { relay: string; minutes: number } | undefined;
+  if (options.code) {
+    const minutes = options.expires === undefined ? DEFAULT_INVITE_MS / 60_000 : Number(options.expires);
+    if (!(minutes > 0 && minutes * 60_000 <= MAX_INVITE_MS)) throw new Error(`--expires takes minutes, up to ${MAX_INVITE_MS / 60_000}.`);
+    const relay = builtInRelay();
+    if (!relay) throw new Error("Codes go through the relay, which is off here (CNS_RELAY=off). Run cns mesh token without --code to print the token instead.");
+    byCode = { relay, minutes };
+  } else if (options.expires !== undefined) throw new Error("--expires goes with --code: a printed token does not expire.");
   // Where the bot reaches this device: what the running daemon advertises, else the relay alone.
   let addresses: string[] = [];
   try {
@@ -121,15 +142,68 @@ export async function botToken(name: string, bot: string, options: StateOption &
   const list = nextList(state.list, (members) => [...members, { key: keys.publicKey, name: bot, ...limit ? { limit } : {} }], Date.now());
   const signed = signList(list, identity);
   const token = mintBotToken(keys.privateKey, signed, addresses.slice(0, 16), allow);
-  savePairedPeer(bot, { publicKey: keys.publicKey, addresses: [], pairedAt: new Date().toISOString(), grants: { incoming: [], outgoing: [] } });
-  writeMesh({ ...state, signed });
-  const live = await settle(options, identity.publicKey);
-  console.log(token);
-  console.error([
-    `Token for ${bot} (fingerprint ${fingerprint(keys.publicKey)}), a member of ${name} (version ${list.version}). Members may use there: ${describeGrants(allow)}${limit ? `; it may use at most ${describeGrants(limit)} on them` : ""}.`,
-    `Token length: ${token.length} characters, including the prefix. Anyone who has it can act as ${bot}. This device keeps no copy: store it as a secret now.`,
-    `On the bot's machine: CNS_TOKEN=<token> cns up, so members reach it; any cns command there reaches them.`,
+  const save = () => {
+    savePairedPeer(bot, { publicKey: keys.publicKey, addresses: [], pairedAt: new Date().toISOString(), grants: { incoming: [], outgoing: [] } });
+    writeMesh({ ...state, signed });
+  };
+  const about = `${bot} (fingerprint ${fingerprint(keys.publicKey)}), a member of ${name} (version ${list.version}). Members may use there: ${describeGrants(allow)}${limit ? `; it may use at most ${describeGrants(limit)} on them` : ""}.`;
+  const after = [
     `It may use nothing on this device; cns peer grant ${bot} GRANTS changes that. To revoke it and free the name: cns mesh remove ${name} ${bot} --unpair.`,
+  ];
+  if (!byCode) {
+    save();
+    const live = await settle(options, identity.publicKey);
+    console.log(token);
+    console.error([
+      `Token for ${about}`,
+      `Token length: ${token.length} characters, including the prefix. Anyone who has it can act as ${bot}. This device keeps no copy: store it as a secret now.`,
+      `On the bot's machine: CNS_TOKEN=<token> cns up, so members reach it; any cns command there reaches them.`,
+      ...after,
+      ...live ? [] : ["Start this device's daemon so members get the new list and the bot can reach this device: cns up."],
+    ].join("\n"));
+    return;
+  }
+  let saved = false;
+  let hosted: Awaited<ReturnType<typeof hostCode>>;
+  try {
+    hosted = await hostCode(byCode.relay, token, {
+      wrong: (tries) => console.error(`A machine typed a wrong code (${tries} of ${MAX_WRONG_CODES} tries).`),
+      deliver: () => {
+        // The admin may have changed the mesh in another terminal while the code waited.
+        const now = readMesh(name);
+        if (now?.admin !== state.admin || now.list.version !== state.list.version) throw new Error(`The mesh ${name} changed while the code waited, so ${bot} was not added. Run cns mesh token again for a new code.`);
+        checkBotName(now, bot);
+        save();
+        saved = true;
+      },
+    });
+  } catch (error) {
+    throw new Error(`Cannot get a code from the relay (${errorMessage(error)}). Run cns mesh token without --code to print the token instead.`, { cause: error });
+  }
+  const expiry = `${byCode.minutes} minute${byCode.minutes === 1 ? "" : "s"}`;
+  console.log(`Code: ${hosted.code}`);
+  console.error(`On the bot's machine, run: cns mesh join --code ${hosted.code}\nWaiting for it (the code works once and expires in ${expiry})...`);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new PairingCodeError("expired", `The code expired unused, so ${bot} was not added. Run cns mesh token again for a new code.`)), byCode.minutes * 60_000);
+  });
+  try { await Promise.race([hosted.delivered, expired]); }
+  catch (error) {
+    if (!saved) {
+      process.exitCode = 3;
+      throw error instanceof PairingCodeError && error.code === "wrong" ? new Error(`${error.message} ${bot} was not added.`) : error;
+    }
+    // Saved, then the exchange failed: the token may not have reached the machine.
+    console.error(`${bot} was added, but the token may not have reached the machine (${errorMessage(error)}). If that machine does not say it joined, run: cns mesh remove ${name} ${bot} --unpair.`);
+  } finally {
+    clearTimeout(timer);
+    hosted.close();
+  }
+  const live = await settle(options, identity.publicKey);
+  console.error([
+    `Sent the token for ${about}`,
+    `This device keeps no copy, and the code no longer works.`,
+    ...after,
     ...live ? [] : ["Start this device's daemon so members get the new list and the bot can reach this device: cns up."],
   ].join("\n"));
 }
@@ -163,8 +237,10 @@ export async function removeMembers(name: string, devices: string[], options: St
   if (!live) console.log("Start this device's daemon so members get the new list: cns up.");
 }
 
-/** `cns mesh join NAME --via ADMIN`: take part in a mesh that a device paired with this one runs. */
-export async function joinMesh(name: string, options: StateOption & { via: string; allow?: string }): Promise<void> {
+/** `cns mesh join NAME --via ADMIN`: take part in a mesh that a device paired with this one runs. With --code, become a bot instead (joinByCode). */
+export async function joinMesh(name: string | undefined, options: StateOption & { via?: string; allow?: string; code?: string[] }): Promise<void> {
+  if (options.code !== undefined) { await joinByCode(name, { ...options, code: options.code }); return; }
+  if (name === undefined || options.via === undefined) throw new Error("Say which mesh and its admin: cns mesh join NAME --via DEVICE. For a code from cns mesh token --code: cns mesh join --code CODE.");
   checkRoom(name);
   const expect = resolvePeer(options.via);
   if (getPeer(options.via)?.mesh !== undefined) throw new Error(`${options.via} is here as a mesh member. Join through the mesh's admin, a device paired with this one directly.`);
@@ -187,6 +263,40 @@ export async function joinMesh(name: string, options: StateOption & { via: strin
   const others = found.list.members.filter((member) => member.key !== identity.publicKey && member.key !== expect.publicKey).map((member) => here.get(member.key) ?? member.name);
   console.log(`Joined the mesh ${name}, run by ${options.via}. Other members: ${others.length ? others.join(", ") : "none yet"}.`);
   console.log(`Members may use here: ${describeGrants(allow)}.${allow.length ? "" : ` To let them, run: cns mesh allow ${name} shell (or files, sessions, all).`}`);
+}
+
+/**
+ * `cns mesh join --code CODE`: make this machine the bot whose token the admin's
+ * `cns mesh token NAME BOT --code` sends, as CNS_TOKEN would. The code brings the mesh, the
+ * bot's name and what members may use here, as the admin chose them.
+ */
+async function joinByCode(name: string | undefined, options: { via?: string; allow?: string; code: string[] }): Promise<void> {
+  if (name !== undefined || options.via !== undefined || options.allow !== undefined) {
+    throw new Error("With --code, give only the code: it brings the mesh, this machine's name in it and what members may use here, as the admin chose them. cns mesh allow changes that later.");
+  }
+  // Check what can fail before the code is used up and the admin adds the bot.
+  const code = parseCode(options.code, "bot");
+  const existing = loadIdentity();
+  if (existing) {
+    throw new Error(`This machine is already a cns device (fingerprint ${existing.fingerprint}), and a bot token would replace it, so the code was not used. To put this device in the mesh as it is, pair it with the mesh's admin (cns pair), then run cns mesh join NAME --via ADMIN. To run a bot beside it, set CNS_CONFIG_DIR to an empty directory first.`);
+  }
+  const relay = builtInRelay();
+  if (!relay) {
+    process.exitCode = 3;
+    throw new PairingCodeError("relay", "Codes go through the relay, which is off here (CNS_RELAY=off). On the admin, run cns mesh token without --code and give the token to this machine in CNS_TOKEN.");
+  }
+  let text: string;
+  try { text = await botTokenForCode(relay, code); }
+  catch (error) { if (error instanceof PairingCodeError) process.exitCode = 3; throw error; }
+  const { token } = startAsBot(text, "code");
+  const { list, keys } = token;
+  const self = list.members.find((member) => member.key === keys.publicKey)!;
+  const here = new Map(listPeers(() => {}).map((peer) => [peer.publicKey, peer.name]));
+  const admin = here.get(list.admin) ?? "the admin";
+  const others = list.members.filter((member) => member.key !== keys.publicKey && member.key !== list.admin).map((member) => here.get(member.key) ?? member.name);
+  console.log(`Joined the mesh ${list.mesh} as ${self.name} (fingerprint ${fingerprint(keys.publicKey)}), run by ${admin}. Other members: ${others.length ? others.join(", ") : "none yet"}.`);
+  console.log(`Members may use here: ${describeGrants(token.allow)}, as the admin chose; cns mesh allow ${list.mesh} GRANTS changes it.`);
+  console.log("Start it so members reach it: cns up.");
 }
 
 /** `cns mesh allow NAME GRANTS...`: what every member of the mesh may use on this device. */
