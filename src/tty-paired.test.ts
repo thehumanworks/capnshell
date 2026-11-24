@@ -47,6 +47,8 @@ function inTerminal(t: TestContext, args: string[], env: Record<string, string>,
     write: (text: string) => child.terminal!.write(text),
     /** Close the terminal, as closing its window does: cns gets SIGHUP. */
     close: () => child.terminal!.close(),
+    /** Interrupt cns itself, as Ctrl-C does before cns has taken the keys for the session. */
+    interrupt: () => child.kill("SIGINT"),
     get output() { return output; },
     exited: child.exited,
     waitFor,
@@ -63,9 +65,10 @@ function inTerminal(t: TestContext, args: string[], env: Record<string, string>,
  * what cns writes and, as Ghostty does, answers every query that reaches it and reports its
  * size in-band to a program that turns those reports on. What it draws has passed the
  * pseudo-terminal's driver, which converts line feeds as the driver of a real terminal does.
+ * Like a real terminal, it keeps the lines that scroll off the top of its normal screen.
  */
 function inEmulator(t: TestContext, args: string[], env: Record<string, string>, cols: number, rows: number) {
-  const screen = new Screen({ cols, rows, scrollback: 0, allowProposedApi: true });
+  const screen = new Screen({ cols, rows, scrollback: 1000, allowProposedApi: true });
   t.after(() => screen.dispose());
   /** Everything the emulator sent that nobody typed. */
   const sent: string[] = [];
@@ -88,11 +91,25 @@ function inEmulator(t: TestContext, args: string[], env: Record<string, string>,
   /** The rows of the emulator's screen, once it has drawn all it received. */
   const drawn = async () => {
     await new Promise<void>((resolve) => screen.write("", resolve));
-    return Array.from({ length: rows }, (_, y) => screen.buffer.active.getLine(y)!.translateToString(true));
+    const buffer = screen.buffer.active;
+    return Array.from({ length: rows }, (_, y) => buffer.getLine(buffer.baseY + y)!.translateToString(true));
+  };
+  /** Every row the emulator holds: its scrollback, then its screen. */
+  const scrollback = async () => {
+    await new Promise<void>((resolve) => screen.write("", resolve));
+    const buffer = screen.buffer.active;
+    return Array.from({ length: buffer.length }, (_, y) => buffer.getLine(y)!.translateToString(true));
   };
   return Object.assign(terminal, {
     sent,
     drawn,
+    scrollback,
+    /** The emulator's state now: which screen it shows, where its cursor is and what it reports. */
+    state: async () => {
+      await new Promise<void>((resolve) => screen.write("", resolve));
+      const buffer = screen.buffer.active;
+      return { screen: buffer.type, cursorY: buffer.cursorY, mouse: screen.modes.mouseTrackingMode, bracketedPaste: screen.modes.bracketedPasteMode };
+    },
     /** Wait until a row of the screen has `text`. */
     shows: async (text: string) => {
       for (const end = Date.now() + 15000; ; await pause(20)) {
@@ -355,6 +372,17 @@ test("a terminal's session is removed when its shell exits", { skip: !posix, tim
   await gone(name);
 });
 
+test("Ctrl-C while a terminal is still attaching stops cns and ends its session", { skip: !posix, timeout: 60000 }, async (t) => {
+  const { laptop, gone, terminal } = await pairedStudio(t);
+  const shell = terminal(laptop, ["tty", "studio"]);
+  // The session has started, and the attachment to it is being made.
+  const name = await shell.attached();
+  shell.interrupt();
+  assert.equal(await shell.exited, 130);
+  assert.doesNotMatch(shell.output, /error|PTY session cancelled/);
+  await gone(name);
+});
+
 test("closing a terminal ends the session it started, as closing an ssh window does", { skip: !posix, timeout: 60000 }, async (t) => {
   const { laptop, sessions, gone, terminal } = await pairedStudio(t);
   const shell = terminal(laptop, ["tty", "studio"]);
@@ -437,11 +465,17 @@ test("a full-screen program draws where it means to, follows the terminal attach
   // The line feed between ab and cd moves the cursor down, and not to the first column.
   assert.deepEqual((await first.shows("size 100x30.")).slice(2, 4), ["         ab", "           cd"]);
 
-  // A terminal of another size takes over: the program must learn the new size from the session.
+  // The program's switch to the alternate screen reached the terminal, and detaching undoes it.
+  assert.equal((await first.state()).screen, "alternate");
   first.write("\x1d");
   assert.equal(await first.exited, 0);
+  assert.equal((await first.state()).screen, "normal", "detaching left the terminal on the program's alternate screen");
+  assert.ok((await first.drawn()).some((row) => row.includes(`detached from ${name}`)), "the screen from before the program is back, with what cns said");
+
+  // A terminal of another size takes over: the program must learn the new size from the session.
   const second = emulator(laptop, ["tty", "studio", "--attach", name], 80, 20);
   assert.deepEqual((await second.shows("size 80x20.")).slice(2, 4), ["         ab", "           cd"]);
+  assert.equal((await second.state()).screen, "alternate", "joining a session on its alternate screen puts the terminal on its own");
 
   second.write("q");
   await second.waitFor("left-2");
@@ -453,6 +487,74 @@ test("a full-screen program draws where it means to, follows the terminal attach
   // No query reached either terminal, so neither sent a reply that could arrive after the program had gone.
   assert.deepEqual({ first: first.sent, second: second.sent }, { first: [], second: [] });
   assert.doesNotMatch((await second.drawn()).join("\n"), /\d;\d+c/, "a reply was typed into the shell");
+  assert.equal((await second.state()).screen, "normal");
+});
+
+// What changed: cns tty used to show a session on the terminal's alternate screen, as tmux
+// does. That screen keeps no scrollback, and terminals turn the wheel into arrow keys on it,
+// so scrolling up went through the shell's history instead.
+test("a terminal's session scrolls into the terminal's own scrollback, and leaves its output behind", { skip: !posix, timeout: 60000 }, async (t) => {
+  const { laptop, emulator } = await pairedStudio(t);
+  const shell = emulator(laptop, ["tty", "studio"], 100, 12);
+  const name = await shell.attached();
+  await shell.shows("$");
+  assert.equal((await shell.state()).screen, "normal");
+  // What the terminal showed before the session is kept above it, not cleared with the first redraw.
+  const before = await shell.scrollback();
+  assert.ok(before.some((row) => row.includes(`connected to studio via a direct link; session ${name}`)), before.join("\n"));
+  assert.ok((await shell.drawn()).every((row) => !row.includes("connected to studio")), "the session starts on a screen of its own");
+
+  // Five screens of output: every line is still there to scroll back to, once.
+  shell.write("for i in $(seq 1 60); do echo row-$i-; done\r");
+  await shell.shows("row-60-");
+  const rows = (await shell.scrollback()).filter((row) => /^row-\d+-$/.test(row));
+  assert.deepEqual(rows, Array.from({ length: 60 }, (_, index) => `row-${index + 1}-`));
+  assert.equal((await shell.state()).screen, "normal");
+
+  // A program that takes the mouse and the alternate screen and is cut off: detaching gives both back.
+  shell.write("printf '\\033[?1049h\\033[?1000h\\033[?1006h\\033[?2004h\\033[2;5r\\033[3;1Hfull-screen'; cat\r");
+  await shell.shows("full-screen");
+  assert.deepEqual(await shell.state().then(({ screen, mouse }) => ({ screen, mouse })), { screen: "alternate", mouse: "vt200" });
+  shell.write("\x1d");
+  assert.equal(await shell.exited, 0);
+  const after = await shell.state();
+  assert.deepEqual({ screen: after.screen, mouse: after.mouse, bracketedPaste: after.bracketedPaste }, { screen: "normal", mouse: "none", bracketedPaste: false });
+  // The session's output is still on the screen, and what cns says comes after it.
+  const left = await shell.drawn();
+  const last = left.findIndex((row) => row === "row-60-");
+  const said = left.findIndex((row) => row.includes(`detached from ${name}`));
+  assert.ok(last >= 0 && said > last, left.join("\n"));
+});
+
+test("--key names the key that detaches, and none sends every key to the session", { skip: !posix, timeout: 60000 }, async (t) => {
+  const { laptop, cli, sessions, terminal } = await pairedStudio(t);
+  const shell = terminal(laptop, ["tty", "studio", "--key", "C-b"]);
+  await shell.waitFor("Ctrl-B detaches.");
+  const name = /session (\S+)\. Ctrl-B detaches/.exec(shell.output)![1]!;
+  // Ctrl-] is the session's now: cat -v shows it as it shows any control key.
+  shell.write("cat -v\r");
+  await pause(300);
+  shell.write("\x1d\r");
+  await shell.waitFor("^]");
+  shell.write("\x02");
+  assert.equal(await shell.exited, 0);
+  assert.match(shell.output, new RegExp(`detached from ${name}; it keeps running on studio`));
+  assert.deepEqual(await sessions(), [name]);
+
+  // CNS_KEY is the same setting; with none, both keys reach the program.
+  const all = inTerminal(t, ["tty", "studio", "--attach", name], { ...laptop.env, CNS_KEY: "none" });
+  await all.waitFor(`session ${name}.`);
+  assert.doesNotMatch(all.output, /detaches/);
+  // The redraw shows what the first terminal left: cat -v is still reading.
+  await all.waitFor("cat -v");
+  const typed = all.output.length;
+  all.write("\x1d\x02\r");
+  await all.waitFor("^]^B", typed);
+  all.write("\x03");
+  await pause(300);
+  all.write("exit 5\r");
+  assert.equal(await all.exited, 5);
+  assert.match((await cli(laptop, ["tty", "studio", "--key", "C-c"])).stderr, /--key cannot be Ctrl-C: the session needs it/);
 });
 
 test("a device that may only watch sessions does not land in another terminal's session", { skip: !posix, timeout: 60000 }, async (t) => {
@@ -516,9 +618,9 @@ test("a terminal's session can be attached, captured and typed into from elsewhe
 });
 
 test("a terminal survives an outage and discards keys typed while disconnected", { skip: !posix, timeout: 60000 }, async (t) => {
-  const { root, laptop, throughProxy, terminal } = await pairedStudio(t);
+  const { root, laptop, throughProxy, emulator } = await pairedStudio(t);
   const proxy = await throughProxy();
-  const shell = terminal(laptop, ["tty", "studio"]);
+  const shell = emulator(laptop, ["tty", "studio"], 100, 30);
   const name = await shell.attached();
   shell.write("echo hi-$((40+2))\r");
   await shell.waitFor("hi-42");
@@ -535,6 +637,12 @@ test("a terminal survives an outage and discards keys typed while disconnected",
   shell.write("echo after-$((1+1))\r");
   await shell.waitFor("after-2", from);
   assert.equal(existsSync(blind), false, "the blind command never ran");
+  // The redrawn screen is the session's alone: what cns said about the outage is above it,
+  // in the scrollback, and the next output lands where the session's cursor is.
+  const screen = await shell.shows("after-2");
+  assert.ok(screen.some((row) => row === "hi-42") && screen.every((row) => !row.includes("[cns:")), screen.join("\n"));
+  const kept = (await shell.scrollback()).join("\n");
+  assert.match(kept, /the connection to studio was lost; reconnecting[\s\S]*reattached to studio[\s\S]*hi-42[\s\S]*after-2/);
 });
 
 test("a device granted only shell gets an unnamed terminal, and a watcher may not type", { skip: !posix, timeout: 60000 }, async (t) => {

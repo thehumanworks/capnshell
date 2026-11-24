@@ -4,7 +4,7 @@ import type {
 } from "./shell.js";
 import { MAX_PTY_INPUT_BYTES } from "./shell.js";
 import type { PeerController } from "./console.js";
-import { AttachedScreen } from "./redraw.js";
+import { AttachedScreen, NormalScreen } from "./redraw.js";
 import { BareLineFeeds, QueryFilter } from "./terminal-output.js";
 
 type Result<T> = Promise<T & { [Symbol.dispose]?(): void }>;
@@ -49,6 +49,11 @@ export interface AttachOptions {
   signal?: AbortSignal;
   /** Called after each chunk of output is written, with the program's output offset when the peer reports one. */
   onOutput?: (end: number | undefined) => void;
+  /**
+   * Called before the first chunk of output is written, with its offset. For a named session
+   * that chunk is the redraw, so what this prints is not drawn over the session's screen.
+   */
+  onFirstOutput?: (end: number | undefined) => void;
   /** Called once if the peer refuses input, such as a session this device may only watch. */
   onInputRefused?: (reason: string) => void;
   /** Print nothing while it runs; return the rendered screen from when it ended. */
@@ -57,6 +62,14 @@ export interface AttachOptions {
   detachKey?: number;
   /** Show the session on a local terminal's alternate screen, restoring the screen on return. */
   alternateScreen?: boolean;
+  /**
+   * Show a named session on a local terminal's normal screen, as ssh shows a shell: lines that
+   * scroll off the top go to the terminal's own scrollback, and the program's own switches to
+   * the alternate screen reach the terminal. What the terminal shows is first scrolled into
+   * its scrollback, because an attachment starts by clearing the screen. On return the
+   * session's output stays where it is, with the cursor after it.
+   */
+  normalScreen?: boolean;
   /**
    * With `alternateScreen`: the caller has already switched the terminal to its alternate
    * screen and keeps it there, as cns ui does between sessions. On return, only the modes
@@ -78,10 +91,10 @@ const RESET_MODES = "\x1b[>4m\x1b[0m\x1b[r\x1b[?25h\x1b[?1l\x1b>\x1b[?6l\x1b[?66
 export class OutputSink extends RpcTarget implements PtySink {
   #exit: (result: PtyExit) => void;
   #detached: (reason: string) => void;
-  #write: (data: Uint8Array) => Promise<void>;
+  #write: (data: Uint8Array, end: number | undefined) => Promise<void>;
   #progress?: (end: number | undefined) => void;
   // Only prototype methods are callable over RPC, so the peer sees just the sink protocol.
-  constructor(write: (data: Uint8Array) => Promise<void>, exit: (result: PtyExit) => void, detached: (reason: string) => void, progress?: (end: number | undefined) => void) {
+  constructor(write: (data: Uint8Array, end: number | undefined) => Promise<void>, exit: (result: PtyExit) => void, detached: (reason: string) => void, progress?: (end: number | undefined) => void) {
     super();
     this.#write = write;
     this.#exit = exit;
@@ -90,8 +103,9 @@ export class OutputSink extends RpcTarget implements PtySink {
   }
   async output(data: Uint8Array, end?: number): Promise<void> {
     if (!(data instanceof Uint8Array)) throw new TypeError("PTY output must be bytes.");
-    await this.#write(data);
-    this.#progress?.(typeof end === "number" && Number.isSafeInteger(end) && end >= 0 ? end : undefined);
+    const offset = typeof end === "number" && Number.isSafeInteger(end) && end >= 0 ? end : undefined;
+    await this.#write(data, offset);
+    this.#progress?.(offset);
   }
   exit(result: PtyExit): void { this.#exit(result); }
   detached(reason: string): void { this.#detached(String(reason)); }
@@ -103,7 +117,7 @@ export class OutputSink extends RpcTarget implements PtySink {
  * input is forwarded verbatim; its end is not translated into a keystroke, because
  * Ctrl-D would also quit TUIs started with stdin closed.
  */
-export async function attachTerminal(open: OpenPty, options: PtyOptions, { signal, screen, detachKey, alternateScreen, keepAlternateScreen, onOutput, onInputRefused }: AttachOptions = {}): Promise<AttachResult> {
+export async function attachTerminal(open: OpenPty, options: PtyOptions, { signal, screen, detachKey, alternateScreen, keepAlternateScreen, normalScreen, onOutput, onFirstOutput, onInputRefused }: AttachOptions = {}): Promise<AttachResult> {
   const input = process.stdin;
   const interactive = !!(input.isTTY && process.stdout.isTTY);
   // The remote screen answers the program's terminal queries, such as cursor-position
@@ -118,26 +132,46 @@ export async function attachTerminal(open: OpenPty, options: PtyOptions, { signa
   let finish!: (result: PtyExit | { detached: string | null }) => void;
   let failed!: (error: Error) => void;
   const result = new Promise<PtyExit | { detached: string | null }>((resolve, reject) => { finish = resolve; failed = reject; });
+  // A signal can cancel the session before anything waits for its result: that is not an unhandled error.
+  result.catch(() => {});
   const abort = () => failed(new Error("PTY session cancelled."));
   if (signal?.aborted) throw new Error("PTY session cancelled.");
   signal?.addEventListener("abort", abort, { once: true });
   const local = interactive && alternateScreen ? new AttachedScreen(size().cols, size().rows) : undefined;
+  const inline = interactive && normalScreen && !local ? new NormalScreen() : undefined;
   // Only a terminal answers queries and converts line feeds; a file or a pipe gets every byte.
   const terminal = process.stdout.isTTY ? { queries: new QueryFilter(), lineFeeds: new BareLineFeeds() } : undefined;
+  const print = (data: Uint8Array | string) => new Promise((resolve) => process.stdout.write(data, resolve));
   let closed = false;
-  const write = async (data: Uint8Array) => {
+  let drawn = false;
+  const write = async (data: Uint8Array, end: number | undefined) => {
     const shown = terminal ? terminal.queries.filter(data) : data;
     const translated = local ? await local.translate(shown) : shown;
     // Output still in flight after detaching must not reach the restored screen.
-    if (!closed) await new Promise((resolve) => process.stdout.write(terminal ? terminal.lineFeeds.keep(translated) : translated, resolve));
+    if (closed) return;
+    if (!drawn) {
+      drawn = true;
+      onFirstOutput?.(end);
+      // The terminal's own height: --rows sets the session's, not what this terminal shows.
+      if (inline) await print(NormalScreen.scrollAway(process.stdout.rows || size().rows));
+      if (closed) return;
+    }
+    inline?.follow(translated);
+    await print(terminal ? terminal.lineFeeds.keep(translated) : translated);
   };
   const sink = new OutputSink(write, finish, (reason) => finish({ detached: reason }), onOutput);
   // Switch before any output arrives; leaving the alternate screen restores the user's.
-  if (local && !keepAlternateScreen) await new Promise((resolve) => process.stdout.write("\x1b[?1049h", resolve));
+  if (local && !keepAlternateScreen) await print("\x1b[?1049h");
   const leave = async () => {
-    if (!local) return;
-    closed = true;
-    await new Promise((resolve) => process.stdout.write(RESET_MODES + (keepAlternateScreen ? "" : "\x1b[?1049l"), resolve));
+    if (local) {
+      closed = true;
+      await print(RESET_MODES + (keepAlternateScreen ? "" : "\x1b[?1049l"));
+    } else if (inline) {
+      closed = true;
+      // Resetting the scroll region and origin mode homes the cursor, so the reset runs between
+      // a save and a restore: what follows the session is then printed after its output.
+      if (drawn) await print(`${inline.leave()}\x1b7${RESET_MODES}\x1b8\x1b[0m`);
+    }
   };
   let pty: RemotePty;
   try {

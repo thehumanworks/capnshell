@@ -114,7 +114,7 @@ the pending check, expiry or the cap fails them. No gateway code changed, so no 
 
 **States**: connecting (the first try); attached; reconnecting, after the connection
 dropped, waiting 0.5 s between tries and doubling up to 15 s until ten minutes have
-passed; and the endings: stopped (Ctrl-C, a signal, or Ctrl-] while reconnecting), a plain
+passed; and the endings: stopped (Ctrl-C, a signal, or the detach key while reconnecting), a plain
 terminal instead (the first try of `cns tty DEVICE` on a device that does not let this one
 start sessions), refused (not accepted, exit 3; access revoked, exit 4; the session missing,
 ended, replaced or over the cap, exit 1), given up (exit 1), and the program's exit or a

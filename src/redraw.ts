@@ -71,3 +71,35 @@ export class AttachedScreen {
     return new Promise<void>((resolve) => this.#screen.write(Buffer.from(text, "latin1"), resolve));
   }
 }
+
+/**
+ * Follows a session shown on a local terminal's normal screen, as ssh shows a shell: lines
+ * that scroll off the top go to the terminal's own scrollback, and the program's switches to
+ * the alternate screen reach the terminal as they are. This only remembers which screen the
+ * program has the terminal on, so that leaving the session can return it to the normal one.
+ *
+ * It reads output that QueryFilter has passed, in which no escape sequence is split.
+ */
+export class NormalScreen {
+  /** The mode that switched the terminal to its alternate screen, while it is on it. */
+  #alternate: string | undefined;
+
+  /**
+   * What scrolls everything a terminal of `rows` rows shows, down to the cursor's row, into
+   * its scrollback. An attachment starts by clearing the screen, which would erase it.
+   */
+  static scrollAway(rows: number): string { return "\r\n".repeat(rows); }
+
+  /** Note the screen switches in a chunk of output written to the terminal. */
+  follow(data: Uint8Array): void {
+    if (!data.includes(0x1b)) return;
+    for (const match of Buffer.from(data).toString("latin1").matchAll(PRIVATE_MODES)) {
+      for (const mode of match[1]!.split(";")) {
+        if (SWITCHES.has(mode)) this.#alternate = match[2] === "h" ? mode : undefined;
+      }
+    }
+  }
+
+  /** What returns the terminal to its normal screen: nothing when it is on it. */
+  leave(): string { return this.#alternate ? `\x1b[?${this.#alternate}l` : ""; }
+}

@@ -39,7 +39,7 @@ after(() => {
 // Exercise Commander's real environment handling without inheriting user defaults
 // or leaking an individual test's environment to other tests.
 function withEnvironment<T>(env: NodeJS.ProcessEnv, parse: () => T): T {
-  const names = ["CNS_BIND", "CNS_PORT", "CNS_CWD"];
+  const names = ["CNS_BIND", "CNS_PORT", "CNS_CWD", "CNS_KEY"];
   const saved = names.map((name) => process.env[name]);
   try {
     for (const name of names) {
@@ -160,6 +160,20 @@ test("run requires an explicit delimiter and a nonempty command", { skip: !posix
     ["run", "studio", "--timeout", "2147483648", "--", "echo ok"],
     ["run", "studio", "--timeout", "1.5", "--", "echo ok"],
   ]) assert.throws(() => parseOptions(args), `Expected rejection: ${args.join(" ")}`);
+});
+
+test("tty --key names the key that detaches, CNS_KEY does when it is not given, and none leaves every key to the session", { skip: !posix }, () => {
+  assert.equal(parseOptions(["tty", "studio"]).detachKey, undefined, "Ctrl-] unless something says otherwise");
+  assert.deepEqual(parseOptions(["tty", "studio", "--key", "C-b"]).detachKey, { byte: 0x02, label: "Ctrl-B" });
+  assert.deepEqual(parseOptions(["tty", "studio", "--attach", "build"], { CNS_KEY: "c-a" }).detachKey, { byte: 0x01, label: "Ctrl-A" });
+  assert.deepEqual(parseOptions(["tty", "studio", "--key", "C-b"], { CNS_KEY: "C-a" }).detachKey, { byte: 0x02, label: "Ctrl-B" });
+  assert.equal(parseOptions(["tty", "studio", "--key", "none"]).detachKey, null);
+  assert.equal(parseOptions(["tty", "studio"], { CNS_KEY: "None" }).detachKey, null);
+  assert.throws(() => parseOptions(["tty", "studio", "--key", "C-c"]), /--key cannot be Ctrl-C: the session needs it/);
+  assert.throws(() => parseOptions(["tty", "studio", "--key", "F5"]), /--key takes a control key such as C-\] or C-b/);
+  // The key belongs to terminals: other commands neither take it nor read CNS_KEY.
+  assert.equal(parseOptions(["run", "studio", "--", "pwd"], { CNS_KEY: "bogus" }).detachKey, undefined);
+  assert.throws(() => parseOptions(["run", "studio", "--key", "C-b", "--", "pwd"]));
 });
 
 test("tty opens a login shell or one quoted command with optional terminal settings", { skip: !posix }, () => {

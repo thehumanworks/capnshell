@@ -4,6 +4,7 @@ import { Command, Option } from "commander";
 import { z } from "zod";
 import { MAX_SCREEN_HISTORY, MAX_TIMEOUT_MS, sessionNameSchema } from "./shell.js";
 import { MAX_KEYS } from "./keys.js";
+import { parseSwitchKey } from "./switcher.js";
 import type { CopyRequest } from "./commands/copy.js";
 
 const roles = ["run", "tty", "cp", "sessions", "keys", "screen", "kill"] as const;
@@ -36,6 +37,7 @@ const peerOptionsSchema = z.strictObject({
     .pipe(z.int().min(0).max(MAX_SCREEN_HISTORY)).optional(),
   name: sessionNameSchema.optional(),
   attach: sessionNameSchema.optional(),
+  key: z.string().optional(),
   literal: z.boolean().optional(),
   until: z.string().min(1, "--until requires text.").max(4096).optional(),
   json: z.boolean().optional(),
@@ -83,6 +85,11 @@ export interface PeerConfig {
   /** The named PTY session to start (tty --name), attach to (tty --attach) or address. */
   name?: string;
   attach?: boolean;
+  /**
+   * For tty at a terminal: the key that detaches from a named session, or null when every
+   * key goes to the session. Ctrl-] when not set.
+   */
+  detachKey?: { byte: number; label: string } | null;
   /** For keys: tmux-style key names and literal text. */
   keys?: string[];
   literal?: boolean;
@@ -118,7 +125,9 @@ function rejectRepeatedOptions(command: Command) {
 
 function resolveOptions(role: PeerRole, command: Command, device: string): PeerConfig {
   const expect = resolvePeer(device);
-  const { cwd, timeout, cols, rows, term, screen, history, name, attach, literal, until, json, stdin } = peerOptionsSchema.parse({ ...command.opts() });
+  const { cwd, timeout, cols, rows, term, screen, history, name, attach, key, literal, until, json, stdin } = peerOptionsSchema.parse({ ...command.opts() });
+  // The key cns ui switches with is the key cns tty detaches with; only cns tty can do without one.
+  const detach = role === "tty" ? key ?? process.env.CNS_KEY : undefined;
   if (role === "tty") {
     if (history !== undefined && !screen) throw new Error("--history requires --screen.");
     if (name !== undefined && attach !== undefined) throw new Error("Use either --name to start a session or --attach to join one, not both.");
@@ -132,6 +141,7 @@ function resolveOptions(role: PeerRole, command: Command, device: string): PeerC
     role, expect, cwd, timeoutMs: timeout,
     cols, rows, term, screen: screen || role === "screen" ? { history: history ?? 0 } : undefined,
     name: name ?? attach, attach: attach !== undefined, literal, until, json, ...role === "run" ? { stdin } : {},
+    ...detach === undefined ? {} : { detachKey: /^none$/i.test(detach.trim()) ? null : parseSwitchKey(detach) },
   };
 }
 
@@ -202,7 +212,8 @@ export function addPeerCommands(
         .option("--history <lines>", `With --screen, include up to ${MAX_SCREEN_HISTORY} scrollback lines`)
         .option("--name <name>", "Start a named session in the background and return; see cns keys, screen and kill")
         .option("--attach <name>", "Attach to a named session; Ctrl-] detaches and leaves it running")
-        .addHelpText("after", "\nWithout a command, starts the remote user's login shell (PowerShell on Windows). At a terminal it\nruns in a session of its own, tty-1, tty-2 and so on, which survives disconnects and ends with the\nshell or when this terminal closes; Ctrl-] detaches and leaves it running for --attach NAME.\nOtherwise everything after -- is the command, in the remote shell's syntax; several words are\njoined with spaces, as ssh does. A local terminal is switched to raw mode, so keys such as\nCtrl-C go to the remote program. Piped input is forwarded verbatim; send \\x04 yourself for Ctrl-D.\n--screen prints what the terminal shows, like tmux capture-pane; combine it with --timeout to\nsnapshot a program that keeps running.\n--name starts a session that outlives this command; --timeout then limits its lifetime.\nExamples: cns tty studio    cns tty studio --cwd /srv/app -- 'claude'    printf 'ls\\nexit\\n' | cns tty studio\n          cns tty studio --screen --timeout 5000 -- 'htop'\n          cns tty studio --name build -- 'make watch'    cns tty studio --attach build");
+        .option("--key <key>", "The key that detaches, such as C-b, or none to send every key to the session (default: CNS_KEY, else C-])")
+        .addHelpText("after", "\nWithout a command, starts the remote user's login shell (PowerShell on Windows). At a terminal it\nruns in a session of its own, tty-1, tty-2 and so on, which survives disconnects and ends with the\nshell or when this terminal closes; Ctrl-] detaches and leaves it running for --attach NAME.\nIt is shown as ssh shows a shell: its lines scroll into this terminal's own scrollback, and\nevery key but the detach key goes to the session; --key none sends that one too.\nOtherwise everything after -- is the command, in the remote shell's syntax; several words are\njoined with spaces, as ssh does. A local terminal is switched to raw mode, so keys such as\nCtrl-C go to the remote program. Piped input is forwarded verbatim; send \\x04 yourself for Ctrl-D.\n--screen prints what the terminal shows, like tmux capture-pane; combine it with --timeout to\nsnapshot a program that keeps running.\n--name starts a session that outlives this command; --timeout then limits its lifetime.\nExamples: cns tty studio    cns tty studio --cwd /srv/app -- 'claude'    printf 'ls\\nexit\\n' | cns tty studio\n          cns tty studio --screen --timeout 5000 -- 'htop'\n          cns tty studio --name build -- 'make watch'    cns tty studio --attach build");
     }
     if (role === "run") {
       command.addHelpText("after", "\nEverything after -- is the command, in the remote shell's syntax. Several words are joined\nwith spaces, as ssh does; quote what your local shell would otherwise expand, such as $HOME,\nglobs, pipes and ;. One quoted string reaches the remote shell unchanged.\nExamples: cns run studio -- git status    cns run studio -- ls -la /tmp\n          cns run studio -- 'cd /srv && make'    cns run studio -- 'printf \"hello\\n\"'");

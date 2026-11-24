@@ -19,6 +19,8 @@ const END_MS = 3000;
 /** How long an attach keeps trying to get back to its session after the connection drops. */
 export const RECONNECT_MS = Number(process.env.CNS_RECONNECT_MS) > 0 ? Number(process.env.CNS_RECONNECT_MS) : 10 * 60 * 1000;
 const CTRL_C = 0x03;
+/** The key that detaches unless --key or CNS_KEY names another, or none. */
+const DEFAULT_DETACH = { byte: DETACH_KEY, label: "Ctrl-]" };
 
 const say = (message: string) => process.stderr.write(`${process.stderr.isTTY ? "\r\n" : ""}[cns: ${message}]\n`);
 
@@ -65,11 +67,15 @@ export async function startTerminal(remote: RpcStub<ShellApi>, options: PtySessi
  * detaches and leaves it running, to rejoin with --attach NAME. --attach joins a session
  * that may be shared and never ends it.
  *
+ * The session is shown on the terminal's normal screen, as ssh shows a shell: its lines
+ * scroll into the terminal's own scrollback, where the wheel and the terminal's keys reach
+ * them. cns takes one key from the session, the detach key (--key, CNS_KEY), or none.
+ *
  * Either way, when the connection drops, keep trying to reach the device again for
  * RECONNECT_MS, then reattach to the same session, reporting how much output was written
  * meanwhile and whether input may have been lost. Input in flight is never sent twice;
  * at a terminal, keys typed while disconnected are read and discarded, except Ctrl-C
- * (stop) and Ctrl-] (give up and leave the session running).
+ * (stop) and the detach key (give up and leave the session running).
  *
  * Returns NO_SESSIONS when a new session was asked for and the device does not let this
  * one start sessions, so the caller can open an unnamed terminal instead.
@@ -77,6 +83,7 @@ export async function startTerminal(remote: RpcStub<ShellApi>, options: PtySessi
 export async function attachPaired(config: PeerConfig): Promise<number | typeof NO_SESSIONS> {
   const expect = config.expect!;
   const own = !config.attach;
+  const detach = config.detachKey === undefined ? DEFAULT_DETACH : config.detachKey;
   /** The session, once this terminal has started it or from --attach. */
   let name: string | undefined = own ? undefined : config.name;
   const { identity } = ensureIdentity();
@@ -110,7 +117,7 @@ export async function attachPaired(config: PeerConfig): Promise<number | typeof 
   const discard = (chunk: Buffer | string) => {
     const data = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
     if (data.includes(CTRL_C)) { exitOnSignal = 130; interrupted.abort(); return; }
-    if (data.includes(DETACH_KEY)) { gaveUp = true; interrupted.abort(); return; }
+    if (detach && data.includes(detach.byte)) { gaveUp = true; interrupted.abort(); return; }
     dropped += data.length;
   };
   const disconnectedInput = (on: boolean) => {
@@ -171,25 +178,23 @@ export async function attachPaired(config: PeerConfig): Promise<number | typeof 
       }
       const session = name!;
       const reattaching = !first;
-      let reported = false;
-      // The first chunk of an attachment is the redraw, at the offset it shows.
-      const report = (end: number | undefined) => {
-        if (!reported) {
-          reported = true;
-          if (reattaching && seen !== undefined && end !== undefined && end > seen) {
-            say(`reattached to ${expect.name}/${session} via ${connected.via}; ${end - seen} bytes of output were written while disconnected and are shown as the current screen`);
-          } else if (reattaching) say(`reattached to ${expect.name}/${session} via ${connected.via}`);
-        }
-        if (end !== undefined) seen = end;
+      // The first chunk of an attachment is the redraw, at the offset it shows. This is said
+      // before it is drawn: said after, it would be written over the session's screen.
+      const reattached = (end: number | undefined) => {
+        if (!reattaching) return;
+        if (seen !== undefined && end !== undefined && end > seen) {
+          say(`reattached to ${expect.name}/${session} via ${connected.via}; ${end - seen} bytes of output were written while disconnected and are shown as the current screen`);
+        } else say(`reattached to ${expect.name}/${session} via ${connected.via}`);
       };
-      if (first && process.stderr.isTTY) say(`connected to ${expect.name} via ${connected.via}; session ${session}. Ctrl-] detaches.`);
+      if (first && process.stderr.isTTY) say(`connected to ${expect.name} via ${connected.via}; session ${session}.${detach ? ` ${detach.label} detaches.` : ""}`);
       first = false;
       try {
         const sized = !!process.stdout.isTTY || config.cols !== undefined || config.rows !== undefined;
         const result = await attachTerminal((sink, options) => connected.session.attach(sink, {
           ...(sized ? { cols: options.cols, rows: options.rows } : {}),
         }), { cols: config.cols, rows: config.rows }, {
-          signal: interrupted.signal, detachKey: DETACH_KEY, alternateScreen: true, onOutput: report,
+          signal: interrupted.signal, detachKey: detach?.byte, normalScreen: true,
+          onFirstOutput: reattached, onOutput: (end) => { if (end !== undefined) seen = end; },
           onInputRefused: (reason) => say(`${expect.name} lets this device watch ${session} but not type into it (${explainDenial(printable(reason), expect.name)})`),
         });
         if (result.exit) {
@@ -207,7 +212,7 @@ export async function attachPaired(config: PeerConfig): Promise<number | typeof 
         const lost = error instanceof ConnectionLost ? error : connected.lost() ? new ConnectionLost(errorMessage(error), 0) : undefined;
         if (!lost) throw error;
         disconnectedInput(true);
-        say(`the connection to ${expect.name} was lost; reconnecting${terminal ? " (Ctrl-C stops, Ctrl-] gives up and leaves the session running)" : ""}`);
+        say(`the connection to ${expect.name} was lost; reconnecting${terminal ? ` (Ctrl-C stops${detach ? `, ${detach.label} gives up and leaves the session running` : ""})` : ""}`);
         if (lost.inFlight) say(`${lost.inFlight} byte${lost.inFlight === 1 ? "" : "s"} of input may not have arrived; check the screen before typing again`);
       } finally {
         connected.close();
