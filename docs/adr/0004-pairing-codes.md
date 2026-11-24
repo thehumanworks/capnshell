@@ -60,6 +60,8 @@ both fingerprint prompts, grants) is unchanged.
   waiting for it. Typing a code with the relay off says to use `--long`.
 - **The gateway.** `cns gateway pair CODE` on an owner device swaps the code for the invite
   locally, then sends the invite to the gateway as before. The gateway Worker is unchanged.
+- **Bot tokens** (added 2026-11-24). `cns mesh token --code` sends a mesh bot token through
+  the same exchange, under a protocol name of its own (ADR 0006).
 - **Cryptography.** CPace needs ristretto255, which the standard `libsodium-wrappers` build
   lacks, so cns now uses `libsodium-wrappers-sumo` at the same pinned version (about 0.4 MB
   more). The CPace pieces are tested against the draft's appendix B.3 vectors.

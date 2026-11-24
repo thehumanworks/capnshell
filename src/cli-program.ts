@@ -94,16 +94,19 @@ export function createCli(): Command {
   mesh.command("token <name> <bot>").description("Print a token that makes a machine nobody sits at, such as a CI runner, a member of the mesh as BOT")
     .option("--allow <grants>", "Required: what other members may use on the bot: none, shell, files, sessions, all, or permissions")
     .option("--limit <grants>", "The most the bot may use on other members, whatever they allow")
+    .option("--code", "Show a short code to type on the bot's machine, with cns mesh join --code, instead of printing the token")
+    .option("--expires <minutes>", "With --code: how long the code stays valid (default: 5)")
     .option("--state <path>", "Local daemon state file")
-    .addHelpText("after", "\nThe token goes to stdout, once; store it as a secret. On the bot's machine, set CNS_TOKEN to it:\nany cns command there first makes the machine the bot, and CNS_TOKEN=... cns up runs it as a member\nthe others reach. For a mounted secret, use cns up --token-file PATH instead of CNS_TOKEN.\nThe token works again on a new machine, one machine at a time. To revoke it\nand free its name on this device: cns mesh remove NAME BOT --unpair.")
+    .addHelpText("after", "\nThe token goes to stdout, once; store it as a secret. On the bot's machine, set CNS_TOKEN to it:\nany cns command there first makes the machine the bot, and CNS_TOKEN=... cns up runs it as a member\nthe others reach. For a mounted secret, use cns up --token-file PATH instead of CNS_TOKEN.\nThe token works again on a new machine, one machine at a time. To revoke it\nand free its name on this device: cns mesh remove NAME BOT --unpair.\n\nTo type it by hand instead, on a machine with no other way in:\nOn this device:       cns mesh token home box --allow shell --code   (shows a code and waits)\nOn the bot's machine: cns mesh join --code 42-orbit-canyon-velvet, then cns up\nThe code works once, through the relay, like a pairing code. Three wrong tries end it, and\nnothing is added to the mesh until the right code is typed.")
     .action(async (name: string, bot: string, options) => { await (await meshCommands()).botToken(name, bot, options); });
   mesh.command("remove <name> <devices...>").description("Take devices out of the mesh; the other members drop them")
     .option("--unpair", "Also remove their direct pairings on this admin, end their links and free their names")
     .option("--state <path>", "Local daemon state file")
     .action(async (name: string, devices: string[], options) => { await (await meshCommands()).removeMembers(name, devices, options); });
-  mesh.command("join <name>").description("Take part in a mesh run by a paired device that added this one")
-    .requiredOption("--via <device>", "The device that runs the mesh, by its name here")
+  mesh.command("join [name]").description("Take part in a mesh run by a paired device that added this one, or join as a bot with a code")
+    .option("--via <device>", "The device that runs the mesh, by its name here")
     .option("--allow <grants>", "What members may use on this device: none, shell, files, sessions, all, or permissions (default: none)")
+    .option("--code <code...>", "The code cns mesh token --code shows on the admin: this machine, new to cns, becomes that bot")
     .option("--state <path>", "Local daemon state file")
     .action(async (name: string, options) => { await (await meshCommands()).joinMesh(name, options); });
   mesh.command("allow <name> <grants...>").description("Set what every member of the mesh may use on this device; none takes it all away")

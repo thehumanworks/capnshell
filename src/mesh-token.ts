@@ -98,14 +98,16 @@ export function readBotTokenFile(path: string): string {
   } finally { closeSync(fd); }
 }
 
-type TokenSource = "CNS_TOKEN" | "token file";
+/** Where a token came from: the environment, --token-file, or a code from `cns mesh token --code` (cns mesh join --code). */
+type TokenSource = "CNS_TOKEN" | "token file" | "code";
+const sourceLabel = (source: TokenSource) => source === "code" ? "token from the code" : source;
 
 /** Read a whole token, allowing only transport formatting (outer quotes, whitespace and line wrapping). */
 export function decodeBotToken(value: string, source: TokenSource = "CNS_TOKEN"): BotToken {
   let text = value.trim();
   if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'"))) text = text.slice(1, -1).trim();
   if (!text) throw new Error(source === "token file" ? "The token file is empty." : "CNS_TOKEN is set but empty. Set it to the token, or unset it to run as a regular device.");
-  const invalid = (why: string) => new Error(`Invalid ${source} (${text.length} characters): ${why}`);
+  const invalid = (why: string) => new Error(`Invalid ${sourceLabel(source)} (${text.length} characters): ${why}`);
   if (!text.startsWith(BOT_TOKEN_PREFIX)) throw invalid(`the value must start with ${BOT_TOKEN_PREFIX} and contain only the token printed by cns mesh token.`);
   const encoded = text.slice(BOT_TOKEN_PREFIX.length).replace(/[ \t\r\n]+/g, "");
   if (BOT_TOKEN_PREFIX.length + encoded.length > MAX_TOKEN_CHARS) throw invalid("the value is too long to be a cns mesh bot token.");
@@ -125,11 +127,11 @@ export function decodeBotToken(value: string, source: TokenSource = "CNS_TOKEN")
  * member list. A machine that is already another device is refused: it has an identity of
  * its own, which the token must not replace.
  */
-export function startAsBot(text: string, source: TokenSource = "CNS_TOKEN"): { created: boolean } {
+export function startAsBot(text: string, source: TokenSource = "CNS_TOKEN"): { created: boolean; token: BotToken } {
   const token = decodeBotToken(text, source);
   const { identity, created } = ensureIdentity(token.keys);
   if (identity.publicKey !== token.keys.publicKey) {
-    throw new Error(`${source === "token file" ? "The token file" : source} makes this machine a mesh bot, but it is already another device (${identity.fingerprint}). Run the bot with a configuration directory of its own: CNS_CONFIG_DIR=DIRECTORY.`);
+    throw new Error(`${source === "token file" ? "The token file" : source === "code" ? "The token from the code" : source} makes this machine a mesh bot, but it is already another device (${identity.fingerprint}). Run the bot with a configuration directory of its own: CNS_CONFIG_DIR=DIRECTORY.`);
   }
   const { list } = token;
   if (!findPairedPeer(list.admin)) {
@@ -142,5 +144,5 @@ export function startAsBot(text: string, source: TokenSource = "CNS_TOKEN"): { c
     writeMesh({ name: list.mesh, admin: list.admin, allow: token.allow, signed: token.signed });
     applyMeshes(identity.publicKey);
   }
-  return { created };
+  return { created, token };
 }

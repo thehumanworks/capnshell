@@ -4,9 +4,10 @@ import os from "node:os";
 import test from "node:test";
 import sodium from "libsodium-wrappers-sumo";
 import {
-  calculateGenerator, CODE_WORDS, formatCode, generatorString, hostCode, intermediateKey, inviteForCode, isPairingCode, lvCat, MAX_WRONG_CODES,
+  botTokenForCode, calculateGenerator, CODE_WORDS, formatCode, generatorString, hostCode, intermediateKey, inviteForCode, isPairingCode, lvCat, MAX_WRONG_CODES,
   parseCode, PairingCodeError, prependLen, randomWords, sampleScalar, scalarMult, scalarMultVfy,
 } from "./pairing-code.js";
+import { BOT_TOKEN_PREFIX } from "./mesh-token.js";
 import { createInvite } from "./pairing.js";
 import { startRelay } from "./relay-server.js";
 import { unusedPort } from "./test-support.js";
@@ -153,4 +154,39 @@ test("rooms get the lowest free number, one guest at a time, and closing a room 
   await assert.rejects(inviteForCode(relay, parseCode(second.code)), (error: unknown) => error instanceof PairingCodeError && error.code === "unknown");
   first.close();
   third.close();
+});
+
+test("a bot code carries a mesh bot token, and is saved for only after the right code", async (t) => {
+  const relay = await withRelay(t);
+  const token = `${BOT_TOKEN_PREFIX}eyJ2IjoxfQ`;
+  let delivered = 0;
+  const hosted = await hostCode(relay, token, { deliver: () => { delivered++; } });
+  const right = parseCode(hosted.code, "bot");
+  const other = WORDS.find((word) => !right.words.includes(word))!;
+  await assert.rejects(botTokenForCode(relay, { room: right.room, words: [other, right.words[1]!, right.words[2]!] }), (error: unknown) => error instanceof PairingCodeError && error.code === "wrong");
+  assert.equal(delivered, 0);
+  assert.equal(await botTokenForCode(relay, right), token);
+  await hosted.delivered;
+  assert.equal(delivered, 1);
+});
+
+test("a code typed into the other command stops before it costs a try", async (t) => {
+  const relay = await withRelay(t);
+  const wrongs: number[] = [];
+  const bot = await hostCode(relay, `${BOT_TOKEN_PREFIX}eyJ2IjoxfQ`, { wrong: (tries) => wrongs.push(tries) });
+  await assert.rejects(inviteForCode(relay, parseCode(bot.code)), (error: unknown) => error instanceof PairingCodeError && error.code === "mismatch" && /cns mesh join --code/.test(error.message));
+  const pairing = await hostCode(relay, invite(), { wrong: (tries) => wrongs.push(tries) });
+  await assert.rejects(botTokenForCode(relay, parseCode(pairing.code, "bot")), (error: unknown) => error instanceof PairingCodeError && error.code === "mismatch" && /cns pair/.test(error.message));
+  assert.deepEqual(wrongs, []);
+  // Both codes still work in the right command.
+  assert.match(await botTokenForCode(relay, parseCode(bot.code, "bot")), /^cnsbot1:/);
+  assert.match(await inviteForCode(relay, parseCode(pairing.code)), /^cns1:/);
+  await Promise.all([bot.delivered, pairing.delivered]);
+});
+
+test("a host that cannot save the bot sends nothing, and the code ends", async (t) => {
+  const relay = await withRelay(t);
+  const hosted = await hostCode(relay, `${BOT_TOKEN_PREFIX}eyJ2IjoxfQ`, { deliver: () => { throw new Error("The mesh changed."); } });
+  await assert.rejects(botTokenForCode(relay, parseCode(hosted.code, "bot")), (error: unknown) => error instanceof PairingCodeError && !/cnsbot1/.test(error.message));
+  await assert.rejects(hosted.delivered, /The mesh changed/);
 });
