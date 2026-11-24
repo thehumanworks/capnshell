@@ -1,3 +1,4 @@
+import { writeSync } from "node:fs";
 import { RpcTarget } from "capnweb";
 import type {
   AttachOptions as SessionAttachOptions, CaptureOptions, KeysOptions, PtyExit, PtyOptions, PtyScreen, PtySessionInfo, PtySink, PtyWait, WaitOptions,
@@ -162,16 +163,19 @@ export async function attachTerminal(open: OpenPty, options: PtyOptions, { signa
   const sink = new OutputSink(write, finish, (reason) => finish({ detached: reason }), onOutput);
   // Switch before any output arrives; leaving the alternate screen restores the user's.
   if (local && !keepAlternateScreen) await print("\x1b[?1049h");
+  /** What gives the terminal back: nothing when the session never took it. `last` when nothing runs after this. */
+  const release = (last = false) => {
+    if (local) return RESET_MODES + (keepAlternateScreen && !last ? "" : "\x1b[?1049l");
+    // Resetting the scroll region and origin mode homes the cursor, so the reset runs between
+    // a save and a restore: what follows the session is then printed after its output.
+    if (inline && drawn) return `${inline.leave()}\x1b7${RESET_MODES}\x1b8\x1b[0m`;
+    return "";
+  };
   const leave = async () => {
-    if (local) {
-      closed = true;
-      await print(RESET_MODES + (keepAlternateScreen ? "" : "\x1b[?1049l"));
-    } else if (inline) {
-      closed = true;
-      // Resetting the scroll region and origin mode homes the cursor, so the reset runs between
-      // a save and a restore: what follows the session is then printed after its output.
-      if (drawn) await print(`${inline.leave()}\x1b7${RESET_MODES}\x1b8\x1b[0m`);
-    }
+    if (!local && !inline) return;
+    closed = true;
+    const sequence = release();
+    if (sequence) await print(sequence);
   };
   let pty: RemotePty;
   try {
@@ -189,8 +193,17 @@ export async function attachTerminal(open: OpenPty, options: PtyOptions, { signa
   const wasRaw = input.isTTY ? input.isRaw : false;
   // A terminal that has closed (EIO) has no mode left to restore.
   const restore = () => { try { if (interactive) input.setRawMode(wasRaw); } catch {} };
-  // Never leave the user's terminal raw, even if the process exits abruptly.
-  process.once("exit", restore);
+  // Never leave the user's terminal raw, on the program's alternate screen or reporting the
+  // mouse, even if the process exits abruptly, as on an error nothing caught. Nothing
+  // asynchronous runs from here, so the reset is written at once.
+  const onExit = () => {
+    if (!closed) {
+      closed = true;
+      try { const sequence = release(true); if (sequence) writeSync(process.stdout.fd, sequence); } catch {}
+    }
+    restore();
+  };
+  process.once("exit", onExit);
   let writing = Promise.resolve();
   const send = (data: Uint8Array) => {
     writing = writing.then(async () => {
@@ -243,7 +256,7 @@ export async function attachTerminal(open: OpenPty, options: PtyOptions, { signa
     process.stdout.off("resize", onResize);
     input.pause();
     restore();
-    process.off("exit", restore);
+    process.off("exit", onExit);
     pty[Symbol.dispose]();
   }
 }

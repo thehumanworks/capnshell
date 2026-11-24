@@ -49,6 +49,8 @@ function inTerminal(t: TestContext, args: string[], env: Record<string, string>,
     close: () => child.terminal!.close(),
     /** Interrupt cns itself, as Ctrl-C does before cns has taken the keys for the session. */
     interrupt: () => child.kill("SIGINT"),
+    /** Stop cns, as kill does. */
+    terminate: () => child.kill("SIGTERM"),
     get output() { return output; },
     exited: child.exited,
     waitFor,
@@ -524,6 +526,37 @@ test("a terminal's session scrolls into the terminal's own scrollback, and leave
   const last = left.findIndex((row) => row === "row-60-");
   const said = left.findIndex((row) => row.includes(`detached from ${name}`));
   assert.ok(last >= 0 && said > last, left.join("\n"));
+});
+
+test("stopping cns while a full-screen program has the terminal gives the terminal back", { skip: !posix, timeout: 60000 }, async (t) => {
+  const { laptop, gone, emulator } = await pairedStudio(t);
+  const shell = emulator(laptop, ["tty", "studio"], 100, 12);
+  const name = await shell.attached();
+  await shell.shows("$");
+  shell.write("printf '\\033[?1049h\\033[?1003h\\033[?1006h\\033[?2004h\\033[3;1Hfull-screen'; cat\r");
+  await shell.shows("full-screen");
+  assert.deepEqual(await shell.state().then(({ screen, mouse }) => ({ screen, mouse })), { screen: "alternate", mouse: "any" });
+  shell.terminate();
+  assert.equal(await shell.exited, 143);
+  const after = await shell.state();
+  assert.deepEqual({ screen: after.screen, mouse: after.mouse, bracketedPaste: after.bracketedPaste }, { screen: "normal", mouse: "none", bracketedPaste: false });
+  await gone(name);
+});
+
+test("CNS_KEY=none, which is for cns tty, leaves cns ui its Ctrl-]", { skip: !posix, timeout: 60000 }, async (t) => {
+  const { cli, laptop } = await pairedStudio(t);
+  assert.equal((await cli(laptop, ["tty", "studio", "--name", "build", "--", "exec bash --noprofile --norc"])).code, 0);
+  const ui = inTerminal(t, ["ui", "studio/build"], { ...laptop.env, CNS_KEY: "none" });
+  await pause(500);
+  ui.write("echo here-$((2+2))\r");
+  await ui.waitFor("here-4");
+  const mark = ui.output.length;
+  ui.write("\x1d");
+  await ui.waitFor("cns ui · 1 device", mark);
+  ui.write("q");
+  assert.equal(await ui.exited, 0);
+  // Asked for by name, a switcher without a key is still refused.
+  assert.match((await cli(laptop, ["ui", "--key", "none"])).stderr, /--key takes a control key such as C-\] or C-b/);
 });
 
 test("--key names the key that detaches, and none sends every key to the session", { skip: !posix, timeout: 60000 }, async (t) => {

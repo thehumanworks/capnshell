@@ -73,7 +73,9 @@ class Links {
  */
 export async function ui(options: UiOptions = {}): Promise<number> {
   const input = process.stdin;
-  const { byte: switchKey, label: switchLabel } = parseSwitchKey(options.key ?? process.env.CNS_KEY ?? "C-]");
+  // CNS_KEY=none is how cns tty keeps every key for its session. The switcher cannot do without a key.
+  const shared = process.env.CNS_KEY !== undefined && /^none$/i.test(process.env.CNS_KEY.trim()) ? undefined : process.env.CNS_KEY;
+  const { byte: switchKey, label: switchLabel } = parseSwitchKey(options.key ?? shared ?? "C-]");
   const target = options.target === undefined ? undefined : parseTarget(options.target);
   if (target) resolvePeer(target.device);
   if (!input.isTTY || !process.stdout.isTTY) {
