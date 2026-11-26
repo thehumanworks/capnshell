@@ -74,6 +74,12 @@ export class GrantedShell extends RpcTarget {
   readFile(...args: Parameters<ShellApi["readFile"]>) { this.#require("files"); return this.#shell.readFile(...args); }
   writeFile(...args: Parameters<ShellApi["writeFile"]>) { this.#require("files"); return this.#shell.writeFile(...args); }
   writeFileAt(...args: Parameters<ShellApi["writeFileAt"]>) { this.#require("files"); return this.#shell.writeFileAt(...args); }
+  setModified(...args: Parameters<ShellApi["setModified"]>) { this.#require("files"); return this.#shell.setModified(...args); }
+  /** Reading skills needs `skills`, or `files`, which can read the same files anyway. */
+  #requireSkills() { if (!this.#grants.current.includes("files")) this.#require("skills"); }
+  skills() { this.#requireSkills(); return this.#shell.skills(); }
+  skillFiles(...args: Parameters<ShellApi["skillFiles"]>) { this.#requireSkills(); return this.#shell.skillFiles(...args); }
+  readSkillFile(...args: Parameters<ShellApi["readSkillFile"]>) { this.#requireSkills(); return this.#shell.readSkillFile(...args); }
   ptySessions() { this.#require("sessions:list"); return this.#shell.ptySessions(); }
   /** Starting a session needs `sessions:create`; the peer then owns it and may view, type into and kill it. */
   startPtySession(...args: Parameters<ShellApi["startPtySession"]>) {

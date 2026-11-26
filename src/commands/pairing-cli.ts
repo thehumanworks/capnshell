@@ -66,9 +66,9 @@ function parseGrants(value: string | undefined, fallback: readonly string[]): Pe
 /** Ask what a newly paired device may use here, until the answer is one `--grant` would take. */
 async function chooseGrants(prompt: Prompt, name: string): Promise<Permission[]> {
   for (;;) {
-    const answer = await prompt.ask(`What may ${name} use on this device? none, shell, files, sessions, all, or a comma-separated list`, "none");
+    const answer = await prompt.ask(`What may ${name} use on this device? none, shell, files, skills, sessions, all, or a comma-separated list`, "none");
     try { return parseGrants(answer, []); }
-    catch { console.error(`Answer none, shell, files, sessions, all, or a comma-separated list of those or of ${PERMISSIONS.join(", ")}.`); }
+    catch { console.error(`Answer none, shell, files, skills, sessions, all, or a comma-separated list of those or of ${PERMISSIONS.join(", ")}.`); }
   }
 }
 
