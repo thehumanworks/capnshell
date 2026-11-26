@@ -4,9 +4,10 @@ import { RpcTarget } from "capnweb";
 import treeKill from "tree-kill";
 import { CNS_VERSION } from "./version.js";
 import {
-  accessPath, globFiles, makeDirectory, readDirectory, readFileChunk, statPath, writeFileAt, writeWholeFile,
+  accessPath, globFiles, makeDirectory, readDirectory, readFileChunk, setModified, statPath, writeFileAt, writeWholeFile,
   type AccessOptions, type GlobOptions, type ReadFileOptions, type WriteAtOptions,
 } from "./files.js";
+import { listSkillFiles, listSkills, readSkillFile } from "./skills.js";
 import { bash, commandSchema, optionsSchema, powershell, powershellArgs, type RunOptions } from "./platform.js";
 import {
   HandleScope, MAX_PTYS, NamedPty, openUnnamedPty, ptyOptionsSchema, PtyRegistry,
@@ -326,6 +327,30 @@ export class ShellApi extends RpcTarget {
   async writeFileAt(path: string, data: Uint8Array, options: WriteAtOptions = {}) {
     if (this.#closed) throw new Error("This shell session is closed.");
     return writeFileAt(path, data, options);
+  }
+
+  /** Set a file's modification time, so that a copy keeps its source's. */
+  async setModified(path: string, mtimeMs: number) {
+    if (this.#closed) throw new Error("This shell session is closed.");
+    return setModified(path, mtimeMs);
+  }
+
+  /** This device's agent skills: the directories in ~/.agents/skills that hold a SKILL.md (skills.ts). */
+  async skills() {
+    if (this.#closed) throw new Error("This shell session is closed.");
+    return listSkills();
+  }
+
+  /** The files of one skill, by path relative to its directory. */
+  async skillFiles(name: string) {
+    if (this.#closed) throw new Error("This shell session is closed.");
+    return listSkillFiles(name);
+  }
+
+  /** Up to MAX_FILE_CHUNK_BYTES of one of a skill's files from `offset`. */
+  async readSkillFile(name: string, file: string, options: ReadFileOptions = {}) {
+    if (this.#closed) throw new Error("This shell session is closed.");
+    return readSkillFile(name, file, options);
   }
 
   /**

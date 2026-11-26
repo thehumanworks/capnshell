@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { access, lstat, mkdir, open, readdir, stat, writeFile } from "node:fs/promises";
+import { access, lstat, mkdir, open, readdir, stat, utimes, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 
@@ -192,4 +192,11 @@ export async function writeFileAt(file: string, data: Uint8Array, options: Write
   } finally {
     await handle.close();
   }
+}
+
+/** Set a file's modification time, following links, so that a copy can keep its source's. */
+export async function setModified(file: string, mtimeMs: number): Promise<void> {
+  const target = pathSchema.parse(file);
+  const time = z.number().min(0).max(8.64e15).parse(mtimeMs);
+  await utimes(target, new Date(), new Date(time));
 }

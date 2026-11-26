@@ -37,6 +37,22 @@ test("a granted shell allows exactly what was granted and refuses the rest witho
   }
 });
 
+test("skills are read with the skills grant, or with files, which reads them anyway, and refused otherwise", async (t) => {
+  const views = (["skills", "files", "shell"] as const).map((grant) => new GrantedShell(new ShellApi(), expandGrants([grant]), "laptop"));
+  t.after(() => { for (const view of views) view[Symbol.dispose](); });
+  const [skills, files, shell] = views;
+  for (const view of [skills!, files!]) {
+    assert.ok(Array.isArray(await view.skills()));
+    await assert.rejects(async () => { await view.skillFiles("../escape"); }, /A skill's name/);
+  }
+  assert.throws(() => shell!.skills(), /Permission denied: skills not granted to laptop/);
+  assert.throws(() => shell!.readSkillFile("pdf", "SKILL.md"), /Permission denied: skills not granted/);
+  // skills reads skills alone: no other file, and nothing it may change.
+  assert.throws(() => skills!.readFile("/etc/hostname"), /Permission denied: files not granted/);
+  assert.throws(() => skills!.setModified("/tmp/x", 0), /Permission denied: files not granted/);
+  assert.equal(skills!.grants, "skills");
+});
+
 test("grants are enforced over RPC, and closing the view closes the shell behind it", { skip: windows }, async (t) => {
   const shell = new ShellApi();
   const { port1, port2 } = new MessageChannel();

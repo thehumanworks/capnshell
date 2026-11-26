@@ -12,13 +12,18 @@ import { isRelayAddress } from "./relay-hub.js";
  * kept for display and enforced there.
  */
 
-export const PERMISSIONS = ["shell", "files", "sessions:list", "sessions:create", "sessions:view", "sessions:control", "sessions:kill"] as const;
+/**
+ * `skills` reads this device's agent skills and nothing else; `files` can read them too, so
+ * `all` leaves it out. It also keeps `all`, the default request when pairing, readable by a
+ * cns from before skills.
+ */
+export const PERMISSIONS = ["shell", "files", "skills", "sessions:list", "sessions:create", "sessions:view", "sessions:control", "sessions:kill"] as const;
 export type Permission = typeof PERMISSIONS[number];
 export const PRESETS: Record<"shell" | "files" | "sessions" | "all", readonly Permission[]> = {
   shell: ["shell"],
   files: ["files"],
   sessions: ["sessions:list", "sessions:create", "sessions:view", "sessions:control", "sessions:kill"],
-  all: PERMISSIONS,
+  all: PERMISSIONS.filter((permission) => permission !== "skills"),
 };
 const permissionSchema = z.enum(PERMISSIONS);
 export const grantsSchema = z.array(permissionSchema).max(PERMISSIONS.length);

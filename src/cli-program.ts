@@ -77,7 +77,7 @@ export function createCli(): Command {
       once("peer remove", "NAME", after);
       const { removePeer } = await import("./commands/pairing-cli.js"); await removePeer(device, options);
     });
-  alias.command("grant").usage("[options] <name> <grants...>").argument("[name]", pairedDevice).argument("[grants...]").description("Let a paired device use more of this device: shell, files, sessions, all or permissions")
+  alias.command("grant").usage("[options] <name> <grants...>").argument("[name]", pairedDevice).argument("[grants...]").description("Let a paired device use more of this device: shell, files, skills, sessions, all or permissions")
     .addOption(deviceOption("The paired device, in place of the NAME argument"))
     .option("-S, --state <path>", "Local daemon state file")
     .action(async (name: string | undefined, grants: string[], given: { device?: string; state?: string }) => {
@@ -232,6 +232,51 @@ export function createCli(): Command {
     .option("-D, --device <name>", "The one set for this member alone")
     .option("-S, --state <path>", "Local daemon state file")
     .action(async (first: string, second: string | undefined, options) => { await (await secretCommands()).removeSecret(first, second, options); });
+  const skills = program.command("skills").description("Agent skills from ~/.agents/skills on this device and every paired device, as one set")
+    .addHelpText("after", [
+      "",
+      "laptop $ cns skills list                          (every skill, the newest copy of each)",
+      "laptop $ cns skills load pdf                      (prints the newest pdf skill's SKILL.md)",
+      "laptop $ cns skills load studio:pdf               (studio's own copy)",
+      "laptop $ cns skills ls pdf; cns skills cat pdf scripts/fill.py",
+      "laptop $ cns skills rg -i 'invoice'",
+      "laptop $ cns skills sync pdf                      (copies it into this device's ~/.agents/skills)",
+      "laptop $ cns skills sync --to studio: pdf         (into studio's ~/.agents/skills)",
+      "",
+      "A skill is a directory in ~/.agents/skills that holds a SKILL.md; its name is the directory's.",
+      "Each device keeps its own. Where several hold a skill of the same name, the one modified last",
+      "wins: the copy whose newest file is newest, compared in UTC to the second, with this device first",
+      "on a tie. NAME is that copy; DEVICE:NAME is the paired device's own. Hidden files, such as .git",
+      "or .env, are not part of a skill, and a link is followed only to a file inside its skill.",
+      "",
+      "A paired device is read when it grants this one skills (read-only, its skills alone) or files:",
+      "on it, run cns peer grant NAME skills. Devices that do not, or do not answer within 10 seconds,",
+      "are named on stderr. sync keeps each file's modification time, so a copy ties with its source",
+      "rather than looking newer, and needs the files grant on a paired device it copies to.",
+    ].join("\n"));
+  const skillCommands = () => import("./commands/skills-cli.js");
+  const skillTarget = ["<skill>", "NAME, the newest copy, or DEVICE:NAME for that paired device's"] as const;
+  skills.command("list").description("List every skill once, from the device with its newest copy")
+    .option("-j, --json", "Print { skills: [{ name, device, modified, description, copies: [{ device, modified }] }], devices: [{ device, state, reason }] }; device is null for this device")
+    .action(async (options) => { process.exitCode = await (await skillCommands()).listCommand(options); });
+  skills.command("load").usage("[DEVICE:]NAME").argument(...skillTarget)
+    .description("Print a skill's SKILL.md; stderr says where it came from and names its other files")
+    .action(async (target: string) => { await (await skillCommands()).loadCommand(target); });
+  skills.command("ls").usage("[DEVICE:]NAME").argument(...skillTarget)
+    .description("List a skill's files, with their sizes and modification times")
+    .action(async (target: string) => { await (await skillCommands()).lsCommand(target); });
+  skills.command("cat").usage("[DEVICE:]NAME FILE...").argument(...skillTarget).argument("<files...>", "Paths inside the skill, such as references/api.md")
+    .description("Print files of a skill")
+    .action(async (target: string, files: string[]) => { await (await skillCommands()).catCommand(target, files); });
+  skills.command("rg").usage("[options] PATTERN [[DEVICE:]NAME...]").argument("<pattern>", "A JavaScript regular expression").argument("[skills...]", "The skills to search; without any, the newest copy of every skill")
+    .description("Print the lines of skills' files that match a pattern, as NAME/FILE:LINE:TEXT; exit 1 when none match")
+    .option("-i, --ignore-case", "Match letters in either case")
+    .action(async (pattern: string, targets: string[], options) => { process.exitCode = await (await skillCommands()).rgCommand(pattern, targets, options); });
+  skills.command("sync").usage("[options] [DEVICE:]NAME...").argument("<skills...>", "NAME, the newest copy, or DEVICE:NAME for that paired device's")
+    .description("Copy skills into this device's ~/.agents/skills, or to --to, keeping their files' times")
+    .option("-t, --to <[device:]path>", "Copy into this directory instead: on a paired device as DEVICE:PATH, or DEVICE: for its ~/.agents/skills")
+    .addHelpText("after", "\nEach skill goes to PATH/NAME. Its files replace files of the same name there, and other files\nthere are kept. A PATH/NAME that is not a skill (it has no SKILL.md) is never copied over.")
+    .action(async (targets: string[], options) => { await (await skillCommands()).syncCommand(targets, options); });
   const gateway = program.command("gateway").description("Administer the gateway that lets Claude's connectors reach devices paired with it")
     .addHelpText("after", "\nThe gateway is a Cloudflare Worker you deploy (gateway/README.md). Commands are signed with this\ndevice's identity, which the gateway accepts when its public key is in the gateway's OWNER_KEYS.\nThe gateway's address is CNS_GATEWAY, or --url, or https://gateway.cns.nothuman.work.");
   const gatewayCommand = (name: string, description: string) => gateway.command(name).description(description)
