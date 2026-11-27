@@ -141,7 +141,7 @@ function olderDaemon(error: unknown, statePath: string | undefined): unknown {
   if (!(error instanceof TypeError) || !/^'\w+' is not a function\.$/.test(error.message)) return error;
   const state = statePath === undefined ? "" : ` --state ${statePath}`;
   return new Error(
-    `The local daemon runs an older cns than this one and does not offer file access. Restart it with cns stop${state}, then cns up${state}; ` +
+    `The local daemon runs an older cns than this one and does not offer file access. Restart it with cns daemon restart${state}; ` +
     "if it runs as a service and cns has moved, as an upgrade can do, run cns up --install instead.",
     { cause: error },
   );

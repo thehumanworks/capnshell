@@ -50,6 +50,13 @@ cns shell studio -d -s work --secret NPM_TOKEN -- 'npm publish'
 - Without `--only`, `cns secret run` refuses variables such as `PATH`, `NODE_OPTIONS` or
   `HTTPS_PROXY` that another device set. Use `--only` and this never comes up.
 
+## Through cns MCP tools
+
+`list_secrets` shows the names a peer holds, never values. Pass names to `run_command` or
+`start_session` as `secrets: ["OPENAI_API_KEY"]`. Here the device that runs the program opens
+its own copies, so the values never pass through MCP. That device must be a member that reads
+the secret, and run cns 2.3.0 or later. The MCP tools cannot print, set or remove a secret.
+
 ## Set or remove a secret (only when the user asks)
 
 The value comes from a hidden prompt or from stdin, never from an argument:

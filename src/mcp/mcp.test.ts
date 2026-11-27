@@ -575,7 +575,7 @@ test("file tools tell a daemon that is older than cns to restart instead of fail
     assert.equal(result.isError, true, name);
     assert.doesNotMatch(text(result), /is not a function/, name);
     assert.match(text(result), /runs an older cns than this one and does not offer file access/, name);
-    assert.ok(text(result).includes(`cns stop --state ${statePath}, then cns up --state ${statePath}`), name);
+    assert.ok(text(result).includes(`cns daemon restart --state ${statePath};`), name);
   }
 });
 

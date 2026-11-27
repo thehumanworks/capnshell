@@ -27,6 +27,9 @@ cns skills rg -i 'invoice' pdf        # NAME/FILE:LINE:TEXT; no name searches ev
    (`cns run DEVICE -n -- 'python3 ~/.agents/skills/NAME/scripts/x.py'`, which needs `shell`)
    or copy the skill here first with `cns skills sync NAME`.
 
+With cns MCP tools, `list_skills`, `read_skill` (a skill's `SKILL.md`, or `file`, and its
+file list) and `search_skills` do steps 1 to 3. They need `skills` or `files` on the device.
+
 When two devices hold a skill of the same name, `NAME` is the copy whose newest file is
 newest; a tie goes to this device. Use `DEVICE:NAME` for a specific copy.
 

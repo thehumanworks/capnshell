@@ -442,7 +442,7 @@ async function older(error: unknown, link: Link, peerId: string, what: string, r
   const version = reportedVersion(summary?.info.version);
   // A peer new enough that lacks the call was reached through a daemon that is not.
   if (missing && ["same", "newer"].includes(versionOrder(version, release))) {
-    return new Error("The local daemon runs an older cns than this one, which does not pass this call on. Restart it: cns stop, then cns up.", { cause: error });
+    return new Error("The local daemon runs an older cns than this one, which does not pass this call on. Restart it: cns daemon restart.", { cause: error });
   }
   return new Error(`${label} runs ${describeVersion(version)}, from before ${what}, so nothing was done there. Update cns on ${label} to ${release} or later.`, { cause: error });
 }
