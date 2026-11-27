@@ -417,13 +417,14 @@ On Windows peers, programs run on a ConPTY in Windows PowerShell, with the same 
 ## Background operation
 
 ```sh
-cns up
+cns daemon start        # or cns up
 cns attach
 # :peers, :use p1, then commands; :quit detaches
-cns stop
+cns daemon restart      # stop it and start it again as it runs now
+cns daemon stop         # or cns stop
 ```
 
-`cns up` starts the daemon as a detached process; `cns up --install` makes it a service that starts at login and restarts if it fails. Its private local state defaults to `~/.cns/daemon.json`. To run separate daemons, use different ports and pass the same custom `--state PATH` to `up`, `attach` and `stop`. Startup prints the log location. The state file allows one daemon per path: `cns up` reports the daemon already running. If a daemon crashed, the next `cns up` removes its state once the control endpoint does not answer and its process no longer exists.
+`cns daemon start` and `cns daemon stop` are `cns up` and `cns stop` under the `daemon` command; both names work. `cns up` starts the daemon as a detached process; `cns up --install` makes it a service that starts at login and restarts if it fails. Its private local state defaults to `~/.cns/daemon.json`. To run separate daemons, use different ports and pass the same custom `--state PATH` to `up`, `attach` and `stop`. Startup prints the log location. The state file allows one daemon per path: `cns up` reports the daemon already running. If a daemon crashed, the next `cns up` removes its state once the control endpoint does not answer and its process no longer exists.
 
 The private control endpoint uses IPv6 loopback (`::1`) when available, falling back to `127.0.0.1` when IPv6 cannot be bound. Its address and random port are recorded in version-2 daemon state; clients also read older version-1 state, which always means IPv4. `--bind` and `--port` configure the paired-device listener, not this control endpoint. Upgrade local clients (including the Pi extension) and restart the daemon together: older clients cannot read version-2 state. Pairings and the device identity are unchanged.
 
@@ -433,13 +434,15 @@ A device in WSL usually cannot be dialed from other machines: in mirrored networ
 
 Detaching with `:quit` or Ctrl+C leaves the daemon, its links and pending commands running. `stop` shuts down the daemon and cleans up its sessions.
 
+`cns daemon restart` stops the daemon and starts it again the way it runs now. systemd restarts a daemon that runs as its user service, with whatever command the unit and its drop-ins give it; a launchd agent's daemon is stopped and started again by launchd; a daemon `cns up` started is started again detached, with the same `--bind` and `--port`, running the cns you typed. A daemon that was not running is started. A paired device can restart it too, which is how a device you are not at picks up a new cns: `cns run studio -- cns daemon restart` returns at once, the daemon restarts a second later in a process of its own that outlives the command and the daemon, and the link comes back within seconds. Its log is `~/.cns/restart.log` on that device; check with `cns run studio -- cns status`. The device runs the `cns` its daemon's `PATH` finds, which can still be the old one after an upgrade (mise keeps each version in a directory of its own, and cns 2.2.0 and older have no `daemon restart`); name the new executable by its path then, as in `cns run studio -- /path/to/new/cns daemon restart`. A daemon run by a service manager cns did not install, such as the NixOS module's system service, is refused before anything stops, since only that manager can start it again (`sudo systemctl restart cns`). Restarting ends the named sessions the daemon holds.
+
 ### Upgrading
 
 A running daemon keeps the executable it started with, so after you install a new cns, paired devices, and the commands that use the daemon's links, still get the old one until the daemon restarts. `cns up`, `cns status` and `cns doctor` say when the daemon runs another version than the command you typed, and what to run:
 
-- a daemon `cns up` started: `cns stop`, then `cns up`;
+- a daemon `cns up` started: `cns daemon restart`;
 - a service `cns up --install` made that runs this cns: the same; one that runs another executable, as after mise installed a new version under its own directory: `cns up --install` again, which points the service at this cns and restarts it;
-- a Home Manager service: `home-manager switch` to a configuration with the new cns, or `cns stop` then `cns up` when the service already names it; if it still runs the old one, `systemctl --user cat cns` shows what overrides it;
+- a Home Manager service: `home-manager switch` to a configuration with the new cns, or `cns daemon restart` when the service already names it; if it still runs the old one, `systemctl --user cat cns` shows what overrides it;
 - another service manager, such as the NixOS module: update cns there and restart it (`sudo systemctl restart cns`).
 
 Restarting ends the daemon's named sessions. A daemon that runs a newer cns than the command means an older cns comes first on `PATH`: `command -v cns` (`Get-Command cns` in PowerShell) shows which one a shell runs. Devices report their version to each other when they connect, so `cns peers`, `cns doctor NAME` and the MCP `list_peers` tool show which devices need upgrading; a release from before this reports none and shows as older. The relay and the gateway print the version they were built from at their root (`curl https://cns.nothuman.work/relay`), so one that was not redeployed after a change shows it.
@@ -565,7 +568,7 @@ imports = [ inputs.capnshell.nixosModules.default ];
 services.cns = { enable = true; user = "alice"; };
 ```
 
-Both modules install `cns` and take `bind`, `port`, `stateFile` and `environment` like `cns up --install`; the NixOS one also takes `openFirewall` and `path`. They create the device's identity on first start; pair as usual with `cns pair`. Commands paired devices run get the service's `PATH`, which lists the user's Nix profiles and the system's packages, not a login shell's. The built-in relay requires no configuration. Do not put secrets in `environment`, which ends up readable in the Nix store. The Home Manager service has the name and state file `cns up --install` uses, so `cns up` starts it after `cns stop`, and Home Manager keeps it at the current package's path across upgrades; don't also run `cns up --install`. The NixOS service is managed with `systemctl` (`systemctl restart cns`, `journalctl -u cns`): `cns stop` stops it until it restarts, and `cns up` would then start a second daemon outside it.
+Both modules install `cns` and take `bind`, `port`, `stateFile` and `environment` like `cns up --install`; the NixOS one also takes `openFirewall` and `path`. They create the device's identity on first start; pair as usual with `cns pair`. Commands paired devices run get the service's `PATH`, which lists the user's Nix profiles and the system's packages, not a login shell's. The built-in relay requires no configuration. Do not put secrets in `environment`, which ends up readable in the Nix store. The Home Manager service has the name and state file `cns up --install` uses, so `cns up` starts it after `cns stop`, and Home Manager keeps it at the current package's path across upgrades; don't also run `cns up --install`. `cns daemon restart` restarts the Home Manager service through systemd. The NixOS service is managed with `systemctl` (`systemctl restart cns`, `journalctl -u cns`): `cns stop` stops it until it restarts, `cns up` would then start a second daemon outside it, and `cns daemon restart` refuses it.
 
 The default package/app is also available as `cns` (and the legacy flake attribute `capnweb-shell`). The package contains the executable with an absolute Nix-provided Bash path; it does not require or install a source checkout. Distribute Nix builds through Nix because their runtime libraries may reference the Nix store.
 

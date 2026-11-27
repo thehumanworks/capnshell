@@ -1,4 +1,4 @@
-import { Command } from "commander";
+import { Command, Option } from "commander";
 import { addDaemonCommand, addMcpCommand, addPeerCommands, deviceAndRest, deviceOption, oneDevice } from "./options.js";
 import { CNS_VERSION } from "./version.js";
 
@@ -59,7 +59,7 @@ export function createCli(): Command {
     const { sessionsEverywhere } = await import("./commands/sessions-everywhere.js");
     process.exitCode = await sessionsEverywhere(config);
   });
-  addDaemonCommand(program, async (config) => {
+  const daemon = addDaemonCommand(program, async (config) => {
     const { startPeer } = await import("./commands/peer.js");
     await startPeer(config);
   });
@@ -311,8 +311,8 @@ export function createCli(): Command {
   gatewayCommand("log", "Show the newest tool calls connectors made: when, which device, which tool, the command or path")
     .option("-l, --limit <n>", "How many entries (default: 50, at most 1000)")
     .action(async (options) => { await (await gatewayCommands()).log(options); });
-  program.command("up")
-    .description("Run this device as a paired peer: start its daemon, or report the running one")
+  // cns up and cns stop are cns daemon start and cns daemon stop under their older, shorter names.
+  const startCommand = (command: Command) => command
     .option(...tokenFileOption)
     .option("-b, --bind <address>", "Interface to listen on (default: every interface; CNS_BIND)")
     .option("-p, --port <port>", "TCP port (default: 47381; CNS_PORT)")
@@ -321,6 +321,22 @@ export function createCli(): Command {
     .option("-u, --uninstall", "Stop the service's daemon and remove the service")
     .addHelpText("after", "\nOnly paired devices can connect, after authenticating; each gets what cns pair granted it.\nThe daemon also registers at the relay built into cns, so paired devices on other networks reach it\nwith nothing to set up. Links are encrypted end to end, directly or through the relay. Pair with cns pair.\n--install keeps the running daemon's --bind and --port unless given; run it again to change them.")
     .action(async (options) => { const { up } = await import("./commands/pairing-cli.js"); await up(options); });
+  const stopCommand = (command: Command) => command
+    .option("-S, --state <path>", "Local daemon state file")
+    .action(async (options: { state?: string }) => {
+      const { stopDaemon } = await import("./commands/daemon.js");
+      await stopDaemon(options.state);
+      console.log("Daemon stopped.");
+    });
+  startCommand(daemon.command("start").description("Run this device as a paired peer: start its daemon, or report the running one (also cns up)"));
+  stopCommand(daemon.command("stop").description("Stop the daemon and its peer connections; a service starts it again at the next login or cns daemon start (also cns stop)"));
+  daemon.command("restart")
+    .description("Stop the daemon and start it again as it runs now, also when a paired device runs this, which drops its link")
+    .option("-S, --state <path>", "Local daemon state file")
+    .addOption(new Option("--worker <ms>").hideHelp())
+    .addHelpText("after", "\nThe daemon comes back through its service when one runs it (systemd restarts it, launchd starts it\nagain), else detached with the same --bind and --port, running this cns. A paired device can run it:\n  cns run studio -- cns daemon restart\nIt then returns at once, the daemon restarts a second later, and the link comes back within seconds.\nRestarting ends the named sessions the daemon holds. A daemon that was not running is started.")
+    .action(async (options: { state?: string; worker?: string }) => { const { restart } = await import("./commands/pairing-cli.js"); await restart(options); });
+  startCommand(program.command("up").description("Run this device as a paired peer: start its daemon, or report the running one (also cns daemon start)"));
   program.command("pair")
     .description("Pair this device with another: show a pairing code, or type the code the other device shows")
     .argument("[code...]", "The code the other device shows, such as 42-orbit-canyon-velvet, or a cns1:... invite")
@@ -397,14 +413,7 @@ export function createCli(): Command {
       const { attachDaemon } = await import("./commands/daemon.js");
       await attachDaemon(options.state);
     });
-  program.command("stop")
-    .description("Stop a local daemon and its peer connections")
-    .option("-S, --state <path>", "Local daemon state file")
-    .action(async (options: { state?: string }) => {
-      const { stopDaemon } = await import("./commands/daemon.js");
-      await stopDaemon(options.state);
-      console.log("Daemon stopped.");
-    });
+  stopCommand(program.command("stop").description("Stop the local daemon and its peer connections (also cns daemon stop)"));
   return program;
 }
 

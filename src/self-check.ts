@@ -86,7 +86,7 @@ export function selfCheck(facts: SelfFacts): { report: SelfReport; lines: string
     if (daemon.drift) warnings.push(daemon.drift);
     if (matches === false) {
       lines.push(`           runs as ${daemon.identity!.fingerprint}, not this device's identity`);
-      problems.push("The daemon runs with a different identity than the file on disk, so paired devices see another device. Restart it with cns stop, then cns up.");
+      problems.push("The daemon runs with a different identity than the file on disk, so paired devices see another device. Restart it with cns daemon restart.");
       exitCode = 3;
     }
 
@@ -96,7 +96,7 @@ export function selfCheck(facts: SelfFacts): { report: SelfReport; lines: string
       if (!relay.registered) warnings.push("The daemon is not registered at the relay right now, so devices on other networks cannot reach this one. It retries on its own; the daemon log says why it failed.");
     } else lines.push("Relay:     off (CNS_RELAY=off)");
     if ((facts.relay ?? undefined) !== daemon.relay) {
-      warnings.push(`The running daemon ${daemon.relay ? `uses the relay ${daemon.relay}` : "uses no relay"}, but a daemon started now would ${facts.relay ? `use ${facts.relay}` : "use none"}, because CNS_RELAY differs. Run cns stop, then cns up, to change it.`);
+      warnings.push(`The running daemon ${daemon.relay ? `uses the relay ${daemon.relay}` : "uses no relay"}, but a daemon started now would ${facts.relay ? `use ${facts.relay}` : "use none"}, because CNS_RELAY differs. Run cns daemon restart to change it.`);
     }
 
     addresses = daemon.addresses.map((address) => {
@@ -117,7 +117,7 @@ export function selfCheck(facts: SelfFacts): { report: SelfReport; lines: string
   if (daemon.running && addresses.length && !reachableBeyondNetwork) {
     warnings.push(relay
       ? "Every address here is private and the relay is not usable from other networks right now, so only devices on this network can reach this one."
-      : "Every address here is private and the relay is off, so only devices on this network can reach this one. Unset CNS_RELAY and restart with cns stop, then cns up.");
+      : "Every address here is private and the relay is off, so only devices on this network can reach this one. Unset CNS_RELAY and run cns daemon restart.");
   }
   lines.push(`Paired:    ${facts.paired} device${facts.paired === 1 ? "" : "s"}`);
 

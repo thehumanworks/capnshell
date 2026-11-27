@@ -53,7 +53,7 @@ test("no identity, no daemon, a daemon with another identity and no address are 
 });
 
 test("a daemon on another version is a warning that says what to run, not a problem", () => {
-  const drift = "The daemon runs cns 1.2.0 (/old/cns), but this cns is 1.4.0 (/opt/cns), so paired devices and commands that use the daemon get the older one. Restart it: cns stop, then cns up.";
+  const drift = "The daemon runs cns 1.2.0 (/old/cns), but this cns is 1.4.0 (/opt/cns), so paired devices and commands that use the daemon get the older one. Restart it: cns daemon restart.";
   const stale = selfCheck({ ...base, daemon: daemon({ version: "1.2.0", drift }) });
   assert.equal(stale.exitCode, 0);
   assert.deepEqual(stale.report.problems, []);

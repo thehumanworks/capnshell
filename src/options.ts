@@ -207,21 +207,27 @@ function resolveOptions(role: PeerRole, command: Command, device: string): PeerC
 }
 
 /**
- * The hidden `cns daemon` command that `cns up` and the service run. It is not for people:
- * `cns up` chooses its options and supervises it.
+ * `cns daemon`, whose start, stop and restart subcommands cli-program adds. Given --bind, --port
+ * and --state instead, it runs the daemon itself, as `cns up` and the services start it; those
+ * options are hidden because `cns up` chooses them and supervises the daemon.
  */
-export function addDaemonCommand(program: Command, run: (config: DaemonConfig) => void | Promise<void>): void {
-  const command = program.command("daemon", { hidden: true })
-    .description("Run the paired daemon (started by cns up)")
-    .requiredOption("--bind <address>", "Numeric interface address")
-    .requiredOption("--port <port>", "TCP port")
-    .requiredOption("--state <path>", "Daemon state file")
-    .option("--service", "Run in the foreground for launchd or systemd (used by cns up --install)");
+export function addDaemonCommand(program: Command, run: (config: DaemonConfig) => void | Promise<void>): Command {
+  const command = program.command("daemon")
+    .description("Start, stop or restart this device's peer daemon")
+    .addOption(new Option("--bind <address>", "Numeric interface address").hideHelp())
+    .addOption(new Option("--port <port>", "TCP port").hideHelp())
+    .addOption(new Option("--state <path>", "Daemon state file").hideHelp())
+    .addOption(new Option("--service", "Run in the foreground for launchd or systemd (used by cns up --install)").hideHelp());
   rejectRepeatedOptions(command);
   command.action(() => {
-    const { bind, port, service, state } = daemonOptionsSchema.parse({ ...command.opts() });
+    const given = command.opts();
+    const missing = ["bind", "port", "state"].filter((name) => given[name] === undefined);
+    if (missing.length === 3 && !given.service) command.help({ error: true });
+    if (missing.length) throw new Error(`Running the daemon needs --${missing.join(", --")}. To manage it, use cns daemon start, stop or restart.`);
+    const { bind, port, service, state } = daemonOptionsSchema.parse({ ...given });
     return run({ role: "daemon", bind, port, url: endpointUrl(bind, port), remote: !isLoopback(bind), service, state });
   });
+  return command;
 }
 
 export function addPeerCommands(

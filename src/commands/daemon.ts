@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { constants } from "node:fs";
@@ -94,6 +94,41 @@ function processExists(pid: number): boolean {
     // EPERM: it exists but belongs to someone else.
     return !(error instanceof Error && "code" in error && error.code === "ESRCH");
   }
+}
+
+/** Wait until process `pid` has exited, for at most `timeoutMs`. Returns whether it did. */
+export async function processExited(pid: number, timeoutMs = 5000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (processExists(pid)) {
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return true;
+}
+
+/**
+ * Whether process `pid` is this one's parent, its parent's parent and so on, as the daemon is for a
+ * command that a paired device runs through it. Undefined when ps cannot tell, as on Windows.
+ */
+export function runsUnder(pid: number, listing = processListing()): boolean | undefined {
+  if (listing === undefined) return undefined;
+  const parents = new Map<number, number>();
+  for (const line of listing.split("\n")) {
+    const [child, parent] = line.trim().split(/\s+/).map(Number);
+    if (Number.isInteger(child) && Number.isInteger(parent)) parents.set(child!, parent!);
+  }
+  if (!parents.has(process.pid)) return undefined;
+  for (let at = parents.get(process.pid), steps = 0; at !== undefined && at > 1 && steps < 1000; at = parents.get(at), steps++) {
+    if (at === pid) return true;
+  }
+  return false;
+}
+
+/** Each process's pid and its parent's, a pair to a line, as ps lists them; undefined without ps. */
+function processListing(): string | undefined {
+  if (process.platform === "win32") return undefined;
+  const listed = spawnSync("ps", ["-A", "-o", "pid=", "-o", "ppid="], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 10_000 });
+  return listed.status === 0 ? listed.stdout : undefined;
 }
 
 /**

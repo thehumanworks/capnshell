@@ -104,23 +104,23 @@ export function restartAdvice(facts: RestartFacts): string {
     // Checked first: neither a restart nor a new unit file gets past a drop-in that replaces the command.
     const [these, replace, theirs] = overrides.length === 1 ? ["The drop-in", "replaces", "the file or its"] : ["The drop-ins", "replace", "the files or their"];
     return `${these} ${overrides.join(", ")} ${replace} the service's command with another cns, so every restart brings that one back. ` +
-      `Delete ${theirs} ExecStart lines, run systemctl --user daemon-reload, then cns stop, then cns up. ${SESSIONS_END}`;
+      `Delete ${theirs} ExecStart lines, run systemctl --user daemon-reload, then cns daemon restart. ${SESSIONS_END}`;
   }
   if (installed?.managedByNix) {
     const check = installed.kind === "systemd" ? " If it still runs the old one afterwards, systemctl --user cat cns shows what overrides it." : "";
     return installed.runsThis
-      ? `Home Manager's service already names this cns; restart it: cns stop, then cns up. ${SESSIONS_END}${check}`
+      ? `Home Manager's service already names this cns; restart it: cns daemon restart. ${SESSIONS_END}${check}`
       : `Home Manager owns its service: switch to a configuration with this cns (home-manager switch), which restarts it. ${SESSIONS_END}${check}`;
   }
   if (installed) {
     return installed.runsThis
-      ? `Restart it: cns stop, then cns up. ${SESSIONS_END}`
+      ? `Restart it: cns daemon restart. ${SESSIONS_END}`
       : `Its service runs another executable: run cns up --install with this cns, which points the service here and restarts it. ${SESSIONS_END}`;
   }
   if (facts.service) {
     const example = facts.platform === "linux" ? ", such as sudo systemctl restart cns for the NixOS module" : "";
     return `A service manager cns did not install runs it: update cns there and restart it${example}. ${SESSIONS_END}`;
   }
-  if (facts.service === undefined) return `Restart it: cns stop, then cns up, or restart the service that runs it. ${SESSIONS_END}`;
-  return `Restart it: cns stop, then cns up. ${SESSIONS_END}`;
+  if (facts.service === undefined) return `Restart it: cns daemon restart, or restart the service that runs it. ${SESSIONS_END}`;
+  return `Restart it: cns daemon restart. ${SESSIONS_END}`;
 }

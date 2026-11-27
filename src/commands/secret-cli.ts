@@ -205,10 +205,10 @@ async function share(options: StateOption): Promise<string | undefined> {
   try {
     const { version } = await control.remote.status();
     await control.remote.meshChanged();
-    if (versionOrder(version) === "older") return `The running daemon is cns ${version}, which does not pass secrets on. Restart it: cns stop, then cns up.`;
+    if (versionOrder(version) === "older") return `The running daemon is cns ${version}, which does not pass secrets on. Restart it: cns daemon restart.`;
     return undefined;
   } catch (error) {
-    return `The running daemon did not take the change (${errorMessage(error)}). Restart it: cns stop, then cns up.`;
+    return `The running daemon did not take the change (${errorMessage(error)}). Restart it: cns daemon restart.`;
   } finally { control.close(); }
 }
 
