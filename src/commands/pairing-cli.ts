@@ -238,6 +238,7 @@ export async function restart(options: RestartOptions): Promise<void> {
   if (overrides.length) console.error(`Warning: ${restartAdvice({ service: status.service, installed: { kind: installed!.kind, ...installedServiceRuns(installed!, selfPath()), overrides }, platform: process.platform })}`);
   const inside = runsUnder(status.pid);
   const log = path.join(path.dirname(state), "restart.log");
+  await keepStandardHandles();
   const handle = await open(log, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | (constants.O_NOFOLLOW ?? 0), 0o600);
   const invocation = selfInvocation(["daemon", "restart", "--state", state, "--worker", String(inside === false ? 0 : RESTART_DELAY_MS)]);
   const worker = spawn(invocation.file, invocation.args, { detached: true, windowsHide: true, stdio: ["ignore", handle.fd, handle.fd] });
@@ -254,6 +255,32 @@ export async function restart(options: RestartOptions): Promise<void> {
   await report(await connectControl(state), "Restarted", state);
 }
 
+/**
+ * On Windows a new process inherits every inheritable handle of the one that starts it. Started
+ * from PowerShell, as a paired device's command is, this process's standard handles are the
+ * command's pipes, so the restart would hold them open, and the command would not end until the
+ * daemon cut it off. Keep them out of the processes this one starts.
+ */
+async function keepStandardHandles(): Promise<void> {
+  if (process.platform !== "win32") return;
+  try {
+    const { dlopen, FFIType } = await import("bun:ffi");
+    const kernel32 = dlopen("kernel32.dll", {
+      GetStdHandle: { args: [FFIType.u32], returns: FFIType.ptr },
+      SetHandleInformation: { args: [FFIType.ptr, FFIType.u32, FFIType.u32], returns: FFIType.bool },
+    });
+    try {
+      // STD_INPUT_HANDLE, STD_OUTPUT_HANDLE and STD_ERROR_HANDLE; HANDLE_FLAG_INHERIT is 1.
+      for (const id of [-10, -11, -12]) {
+        const handle = kernel32.symbols.GetStdHandle(id >>> 0);
+        if (handle) kernel32.symbols.SetHandleInformation(handle, 1, 0);
+      }
+    } finally { kernel32.close(); }
+  } catch (error) {
+    console.error(`Cannot keep this command's handles from the restart (${errorMessage(error)}); the command may end only when the daemon restarts.`);
+  }
+}
+
 /** The restart itself, in its own process: wait `delayMs`, stop the daemon, then start it again as restartPlan says. */
 async function restartNow(statePath: string | undefined, delayMs: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -263,6 +290,8 @@ async function restartNow(statePath: string | undefined, delayMs: number): Promi
   try { status = await control.remote.status(); } finally { control.close(); }
   const plan = restartPlan(status.service, installedService(state)?.kind);
   console.error(`Restarting the daemon (pid ${status.pid}).`);
+  // The daemon started below would otherwise hold this log open.
+  await keepStandardHandles();
   if (plan.stop) {
     // Once stopped, always try to start it again: nobody may be left to run cns up on this device.
     // Wait for the old process to be gone too, or a service manager can take it for still running.
