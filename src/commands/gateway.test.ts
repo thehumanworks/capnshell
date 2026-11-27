@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { afterEach, beforeEach } from "node:test";
 import { ensureIdentity } from "../identity.js";
 import { TOOL_NAMES } from "../mcp/server.js";
 import { CNS_VERSION } from "../version.js";
@@ -56,11 +56,17 @@ async function capture(run: () => Promise<void>): Promise<{ out: string; err: st
   return { out, err };
 }
 
-test.before(async () => {
-  const dir = await mkdtemp(path.join(os.tmpdir(), "cns-gateway-cli-"));
+// Each test signs with an identity of its own, never this machine's.
+let dir = "";
+const previous = process.env.CNS_CONFIG_DIR;
+beforeEach(async () => {
+  dir = await mkdtemp(path.join(os.tmpdir(), "cns-gateway-cli-"));
   process.env.CNS_CONFIG_DIR = dir;
   ensureIdentity();
-  test.after(async () => { delete process.env.CNS_CONFIG_DIR; await rm(dir, { recursive: true, force: true }); });
+});
+afterEach(async () => {
+  if (previous === undefined) delete process.env.CNS_CONFIG_DIR; else process.env.CNS_CONFIG_DIR = previous;
+  await rm(dir, { recursive: true, force: true });
 });
 
 test("approving all tools at a gateway deployed before the skill tools grants what it has, and says to redeploy it", async (t) => {
