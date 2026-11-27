@@ -37,9 +37,12 @@ are end to end, and access can be withdrawn at once.
    host, method, path, time, nonce and body hash (`src/owner-proof.ts`). The gateway
    accepts keys in its `OWNER_KEYS` secret, within five minutes of its clock, each nonce
    once.
-6. **Approvals are scoped and revocable.** Each grant carries device keys and tool names
-   in its token props; the MCP server registers only those tools and resolves only those
-   devices. Revoking a grant removes it from the OAuth store and marks it revoked in the
+6. **Approvals are scoped and revocable.** Each grant carries device keys, or `all`, and
+   tool names in its token props; the MCP server registers only those tools and resolves
+   only those devices. `all` (the default) is every device paired with the gateway when a
+   call runs, so pairing a device needs no new approval; it was the devices paired at
+   approval until 2.4.0. Each of them accepted the gateway itself; a device's own peers and
+   mesh members are not reached through it. Revoking a grant removes it from the OAuth store and marks it revoked in the
    Durable Object, which refuses its requests immediately.
 7. **libsodium is replaced in the Worker** by a pure-JavaScript implementation of the same
    primitives on `@noble` (`gateway/nacl.ts`), since Workers forbid compiling WebAssembly

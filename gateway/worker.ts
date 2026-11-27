@@ -104,8 +104,8 @@ async function wait(request: Request, env: ProviderEnv, cancel: boolean): Promis
       return json({ status: "denied", redirectTo: denied.redirectTo }, 200, denied.headers);
     }
     const approved = await oauth.approveConsent(request, handle, { scope: [SCOPE] });
-    const status = await stub.status();
-    const names = status.devices.filter((device) => answer.props.devices.includes(device.publicKey)).map((device) => device.name);
+    const { devices } = answer.props;
+    const names = devices === "all" ? ["all"] : (await stub.status()).devices.filter((device) => devices.includes(device.publicKey)).map((device) => device.name);
     const { redirectTo } = await oauth.completeAuthorization({
       request: approved.request, userId: OWNER, scope: [SCOPE], props: answer.props,
       metadata: { grant: answer.props.grant, client: answer.props.client, devices: names, tools: answer.props.tools },
@@ -136,7 +136,11 @@ async function admin(request: Request, env: ProviderEnv, action: string): Promis
     switch (action) {
       // The version and tools tell cns gateway what this deployment offers, so a cns on another version approves what is here.
       case "status": return json({ ...await stub.status(), grants: await grants(env), owner: checked.fingerprint, version: CNS_VERSION, tools: TOOL_NAMES });
-      case "pair": return json(await stub.pair(text("invite") ?? "", { name: text("name"), requests: list<Permission>("requests") }));
+      case "pair": {
+        const paired = await stub.pair(text("invite") ?? "", { name: text("name"), requests: list<Permission>("requests") });
+        // Connectors approved for all devices reach a new one at once, so say which.
+        return json(paired.paired ? { ...paired, reachedBy: (await grants(env)).filter((grant) => grant.devices.includes("all")).map((grant) => grant.client) } : paired);
+      }
       case "remove": return json({ removed: await stub.removeDevice(text("name") ?? "") });
       case "consent": return json({ consent: await stub.consent(text("code") ?? "") });
       case "approve": return json({ consent: await stub.decide(text("code") ?? "", { approve: true, devices: input.devices === "all" ? "all" : list<string>("devices"), tools: list<ToolName>("tools"), owner: checked.fingerprint }) });

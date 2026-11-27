@@ -36,7 +36,8 @@ export interface GrantProps {
   /** This approval's ID, which `cns gateway revoke` takes. */
   grant: string;
   client: string;
-  devices: PublicKey[];
+  /** The device keys it was approved for, or all: every device paired with the gateway when each call runs. */
+  devices: PublicKey[] | "all";
   tools: ToolName[];
 }
 
@@ -56,7 +57,7 @@ export interface ConsentRecord {
   createdAt: number;
   expiresAt: number;
   status: "pending" | "approved" | "denied" | "done";
-  devices: PublicKey[];
+  devices: PublicKey[] | "all";
   tools: ToolName[];
   approvedBy: string | null;
 }
@@ -74,6 +75,15 @@ export const DEFAULT_REQUESTS: readonly Permission[] = ["shell", "files", "sessi
 const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 
 const base64url = (bytes: Uint8Array) => Buffer.from(bytes).toString("base64url");
+
+/**
+ * The devices a connector reaches now, of those `paired` with the gateway: every one for an
+ * approval for all devices, so a device paired later needs no new approval; otherwise those
+ * whose keys it was approved for, so a device re-paired under the same name is not one of them.
+ */
+export function reachable(approved: GrantProps["devices"], paired: readonly DeviceRecord[]): DeviceRecord[] {
+  return approved === "all" ? [...paired] : paired.filter((device) => approved.includes(device.publicKey));
+}
 
 /** A short code a person can read off the consent page and type: two groups of four. */
 function newCode(): string {
@@ -157,6 +167,8 @@ export class Gateway extends DurableObject<Env> {
     if (this.#devices().some((device) => device.publicKey === decoded.key)) throw new Error("The gateway is already paired with this device. Remove it first with cns gateway remove NAME.");
     const name = options.name ?? this.#freeName(decoded.name ?? "device");
     if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(name)) throw new Error("Names contain 1-64 letters, numbers, underscores or hyphens and start with a letter or number.");
+    // all names every device in approvals, so no single device may be called that.
+    if (name === "all") throw new Error("The gateway cannot call a device all; pass another name with --name.");
     if (this.#devices().some((device) => device.name === name)) throw new Error(`The gateway already has a device named ${name}; pass another name with --name.`);
     const { channel } = await connectFirst(gatewayAddresses({ publicKey: decoded.key, addresses: decoded.addresses }, this.#relay), this.#identity, {
       expect: decoded.key, invite: { id: decoded.id, secret: decoded.secret },
@@ -220,7 +232,7 @@ export class Gateway extends DurableObject<Env> {
     return record ? this.#public(record) : null;
   }
 
-  /** An owner's answer to a waiting approval. `devices` are names, or all for every device paired now. */
+  /** An owner's answer to a waiting approval. `devices` are names, fixed by key, or all for every device paired now and later. */
   decide(code: string, decision: { approve: boolean; devices?: string[] | "all"; tools?: ToolName[]; owner: string }): ConsentRecord {
     this.#pruneConsents();
     const record = this.#consent(code);
@@ -230,7 +242,8 @@ export class Gateway extends DurableObject<Env> {
       return this.#public(this.#consent(record.code)!);
     }
     const devices = this.#devices();
-    const chosen = decision.devices === undefined || decision.devices === "all" ? devices : decision.devices.map((name) => {
+    const named = decision.devices === "all" ? undefined : decision.devices;
+    const chosen = named === undefined ? devices : named.map((name) => {
       const device = devices.find((candidate) => candidate.name === name);
       if (!device) throw new Error(`The gateway has no device named ${name}. It has: ${devices.map((candidate) => candidate.name).join(", ") || "none"}.`);
       return device;
@@ -239,7 +252,7 @@ export class Gateway extends DurableObject<Env> {
     const tools = decision.tools ?? [...TOOL_NAMES];
     for (const tool of tools) if (!TOOL_NAMES.includes(tool)) throw new Error(`Unknown tool ${tool}.`);
     this.#sql.exec("UPDATE consents SET status = 'approved', devices = ?, tools = ?, approved_by = ? WHERE code = ?",
-      JSON.stringify(chosen.map((device) => device.publicKey)), JSON.stringify(tools), decision.owner, record.code);
+      JSON.stringify(named === undefined ? "all" : chosen.map((device) => device.publicKey)), JSON.stringify(tools), decision.owner, record.code);
     return this.#public(this.#consent(record.code)!);
   }
 
@@ -288,8 +301,8 @@ export class Gateway extends DurableObject<Env> {
     }
     let server = this.#servers.get(props.grant);
     if (!server) {
-      // Devices are looked up for each call, so a device removed from the gateway is gone at once.
-      const devices = () => this.#devices().filter((device) => props.devices.includes(device.publicKey));
+      // Devices are looked up for each call, so a device removed from the gateway is gone at once, and one paired later is there.
+      const devices = () => reachable(props.devices, this.#devices());
       const build = (): McpServer => createMcpServer(gatewayTarget(devices, this.#identity, this.#relay), {
         tools: props.tools, onCall: (call) => this.#record(props, devices, call),
       });

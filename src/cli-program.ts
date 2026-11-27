@@ -298,7 +298,7 @@ export function createCli(): Command {
       await (await gatewayCommands()).remove(device, options);
     });
   gatewayCommand("approve <code>", "Approve a connector that is waiting with this code on its sign-in page")
-    .option("-d, --devices <names>", "The devices it may reach, comma-separated, or all (default: all paired now)")
+    .option("-d, --devices <names>", "The devices it may reach, comma-separated, or all: every one paired with the gateway, now and later (default: all)")
     .option("-t, --tools <tools>", "The tools it may use, comma-separated, read (look only) or all (default: all)")
     .option("-y, --yes", "Approve without asking, after checking the details it prints")
     .action(async (code: string, options) => { await (await gatewayCommands()).approve(code, options); });

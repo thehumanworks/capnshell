@@ -57,7 +57,7 @@ function print(options: GatewayOptions, value: unknown, text: () => string) {
 }
 
 interface Device { name: string; fingerprint: string; granted: string[]; pairedAt: string }
-interface Consent { code: string; clientName: string; clientDomain: string | null; redirectHost: string; loopback: boolean; expiresAt: number; status: string; devices: string[]; tools: string[] }
+interface Consent { code: string; clientName: string; clientDomain: string | null; redirectHost: string; loopback: boolean; expiresAt: number; status: string; devices: string[] | "all"; tools: string[] }
 interface Grant { id: string; client: string; devices: string[]; tools: string[]; createdAt: number; expiresAt?: number }
 
 interface GatewayStatus { fingerprint: string; name: string; relay: string; devices: Device[]; pending: Consent[]; grants: Grant[]; owner: string; version?: unknown; tools?: unknown }
@@ -128,9 +128,11 @@ export async function pair(typed: string | readonly string[], options: GatewayOp
     catch (error) { process.exitCode = 3; throw error; }
   }
   if (!options.json) console.error("The gateway is pairing; confirm on the device that showed the code, after checking the gateway's fingerprint (cns gateway status).");
-  const answer = await call<{ paired: boolean; reason?: string; name?: string; fingerprint?: string; granted?: string[] }>(options, "pair", { invite, ...options.name ? { name: options.name } : {}, ...requests ? { requests } : {} });
+  const answer = await call<{ paired: boolean; reason?: string; name?: string; fingerprint?: string; granted?: string[]; reachedBy?: string[] }>(options, "pair", { invite, ...options.name ? { name: options.name } : {}, ...requests ? { requests } : {} });
   if (!answer.paired) { process.exitCode = 3; print(options, answer, () => `Not paired: ${answer.reason}`); return; }
-  print(options, answer, () => `The gateway paired with ${answer.name} (${answer.fingerprint}). It may use there: ${describeGrants(expandGrants(answer.granted ?? []))}.`);
+  // A gateway from before 2.4.0 sends no reachedBy: its connectors reach only the devices they were approved for.
+  const reached = answer.reachedBy?.length ? `\nConnectors approved for all devices reach it now: ${answer.reachedBy.join(", ")}. Revoke one with cns gateway revoke ID.` : "";
+  print(options, answer, () => `The gateway paired with ${answer.name} (${answer.fingerprint}). It may use there: ${describeGrants(expandGrants(answer.granted ?? []))}.${reached}`);
 }
 
 export async function remove(name: string, options: GatewayOptions): Promise<void> {
@@ -179,7 +181,7 @@ export async function approve(code: string, options: GatewayOptions & { devices?
     `${consent.clientName} wants to use devices through the gateway.`,
     consent.clientDomain ? `  Published by:    ${consent.clientDomain}` : "  Its name is not verified: it registered itself.",
     `  Access goes to:  ${consent.redirectHost}${consent.loopback ? "  (an app on that computer: approve only if you just connected from it)" : ""}`,
-    `  Devices:         ${chosen.join(", ") || "none"}`,
+    `  Devices:         ${devices === "all" ? `all, including devices paired with the gateway later (now: ${chosen.join(", ") || "none"})` : chosen.join(", ")}`,
     `  Tools:           ${tools ? toolsText(tools) : build.tools ? `all ${build.tools.length} the gateway has` : "all the gateway has"}${dropped.length ? ` (not ${dropped.join(", ")}: the gateway lacks them)` : ""}`,
     ...drift ? [`  ${drift}`] : [],
     "Check that the code and the app match the page you opened; approve only connections you started.",
@@ -198,7 +200,9 @@ export async function approve(code: string, options: GatewayOptions & { devices?
     if (unknown) throw new Error(`The gateway has no tool ${unknown[1]}. ${gatewayDrift(build) ?? ""} Or approve with --tools naming tools it has.`.replace(/ +/g, " "), { cause: error });
     throw error;
   }
-  print(options, answer, () => `Approved ${consent.clientName} for ${chosen.join(", ")}. The page you opened returns to it now.`);
+  // A gateway from before 2.4.0 approves the devices paired now, whatever it was asked.
+  const reach = answer.consent.devices === "all" ? `every device paired with the gateway (now ${chosen.join(", ")}) and any paired later` : chosen.join(", ");
+  print(options, answer, () => `Approved ${consent.clientName} for ${reach}. The page you opened returns to it now.`);
 }
 
 export async function deny(code: string, options: GatewayOptions): Promise<void> {
