@@ -52,27 +52,27 @@ test("the advice fits how the daemon runs", () => {
   const advice = (facts: Omit<RestartFacts, "platform">, platform: NodeJS.Platform = "linux") => restartAdvice({ ...facts, platform });
   const ends = "Restarting ends the named sessions it holds.";
   const table: Array<[string, Omit<RestartFacts, "platform">, string]> = [
-    ["started by cns up", { service: false }, `Restart it: cns stop, then cns up. ${ends}`],
-    ["too old to say how it runs", {}, `Restart it: cns stop, then cns up, or restart the service that runs it. ${ends}`],
+    ["started by cns up", { service: false }, `Restart it: cns daemon restart. ${ends}`],
+    ["too old to say how it runs", {}, `Restart it: cns daemon restart, or restart the service that runs it. ${ends}`],
     ["cns up --install's service, this executable", { service: true, installed: { kind: "systemd", managedByNix: false, runsThis: true } },
-      `Restart it: cns stop, then cns up. ${ends}`],
+      `Restart it: cns daemon restart. ${ends}`],
     // mise installs each version under its own path, so a service installed by an older one keeps running it.
     ["cns up --install's service, another executable", { service: true, installed: { kind: "launchd", managedByNix: false, runsThis: false } },
       `Its service runs another executable: run cns up --install with this cns, which points the service here and restarts it. ${ends}`],
     // Home Manager names the new cns, but a running daemon, or a drop-in, can still be the old one.
     ["Home Manager's service, this executable", { installed: { kind: "systemd", managedByNix: true, runsThis: true } },
-      `Home Manager's service already names this cns; restart it: cns stop, then cns up. ${ends} If it still runs the old one afterwards, systemctl --user cat cns shows what overrides it.`],
+      `Home Manager's service already names this cns; restart it: cns daemon restart. ${ends} If it still runs the old one afterwards, systemctl --user cat cns shows what overrides it.`],
     ["Home Manager's service, another executable", { service: true, installed: { kind: "launchd", managedByNix: true, runsThis: false } },
       `Home Manager owns its service: switch to a configuration with this cns (home-manager switch), which restarts it. ${ends}`],
     // A drop-in that replaces ExecStart wins over the unit file, so it comes first whoever owns the unit.
     ["a drop-in runs another cns", { installed: { kind: "systemd", managedByNix: true, runsThis: true, overrides: ["/run/user/1000/systemd/user/cns.service.d/90-recover-daemon.conf"] } },
       "The drop-in /run/user/1000/systemd/user/cns.service.d/90-recover-daemon.conf replaces the service's command with another cns, so every restart brings that one back. " +
-      `Delete the file or its ExecStart lines, run systemctl --user daemon-reload, then cns stop, then cns up. ${ends}`],
+      `Delete the file or its ExecStart lines, run systemctl --user daemon-reload, then cns daemon restart. ${ends}`],
     ["two drop-ins run another cns", { service: true, installed: { kind: "systemd", managedByNix: false, runsThis: false, overrides: ["/a.conf", "/b.conf"] } },
       "The drop-ins /a.conf, /b.conf replace the service's command with another cns, so every restart brings that one back. " +
-      `Delete the files or their ExecStart lines, run systemctl --user daemon-reload, then cns stop, then cns up. ${ends}`],
+      `Delete the files or their ExecStart lines, run systemctl --user daemon-reload, then cns daemon restart. ${ends}`],
     ["no drop-in runs another cns", { installed: { kind: "systemd", managedByNix: false, runsThis: true, overrides: [] } },
-      `Restart it: cns stop, then cns up. ${ends}`],
+      `Restart it: cns daemon restart. ${ends}`],
     ["a service cns did not install", { service: true },
       `A service manager cns did not install runs it: update cns there and restart it, such as sudo systemctl restart cns for the NixOS module. ${ends}`],
   ];

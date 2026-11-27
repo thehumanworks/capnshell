@@ -52,7 +52,7 @@ test("commands say when the daemon runs an older cns, and what to run, which fix
   assert.match(status.stdout, /^Daemon: +cns 0\.9\.0, pid \d+ at /m);
   assert.ok(status.stdout.includes(warning), status.stdout);
   // cns up started it, outside any service, so cns stop and cns up replace it.
-  assert.match(status.stdout, /so paired devices and commands that use the daemon get the older one\. Restart it: cns stop, then cns up\. Restarting ends the named sessions it holds\./);
+  assert.match(status.stdout, /so paired devices and commands that use the daemon get the older one\. Restart it: cns daemon restart\. Restarting ends the named sessions it holds\./);
   const json = JSON.parse((await cli(["status", "--json", "--state", state])).stdout);
   assert.deepEqual([json.version, json.daemon.version, json.daemon.executable], [CNS_VERSION, "0.9.0", olderCli]);
   assert.ok(json.daemon.warning.startsWith(warning.slice("Warning: ".length)));
@@ -69,11 +69,11 @@ test("commands say when the daemon runs an older cns, and what to run, which fix
   assert.deepEqual(report.problems, []);
   assert.ok(report.warnings.some((line: string) => line.startsWith(warning.slice("Warning: ".length))), doctor.stdout);
 
-  // Following the advice puts this cns in the daemon's place.
-  assert.equal((await cli(["stop", "--state", state])).code, 0);
-  const restarted = await cli(upArgs);
+  // Following the advice puts this cns in the daemon's place, where the older one listened.
+  const restarted = await cli(["daemon", "restart", "--state", state]);
   assert.equal(restarted.code, 0, restarted.stderr);
-  assert.match(restarted.stdout, new RegExp(`^Started as \\S+ \\(cns ${CNS_VERSION.replaceAll(".", "\\.")}, pid \\d+\\)`));
+  assert.ok(restarted.stdout.includes(`listening at ws://127.0.0.1:${port}.`), restarted.stdout);
+  assert.match(restarted.stdout, new RegExp(`^Restarted as \\S+ \\(cns ${CNS_VERSION.replaceAll(".", "\\.")}, pid \\d+\\)`));
   assert.doesNotMatch(restarted.stderr, /The daemon runs/);
   assert.doesNotMatch((await cli(["status", "--state", state])).stdout, /Warning/);
 });

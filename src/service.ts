@@ -233,6 +233,11 @@ export function startService(kind: ServiceKind, runner: Runner = runCommand): vo
   else must(runner, "systemctl", ["--user", "start", SERVICE_UNIT]);
 }
 
+/** Restart the systemd service's daemon, or start it if it is not running, with the command the unit and its drop-ins give it now. */
+export function restartService(runner: Runner = runCommand): void {
+  must(runner, "systemctl", ["--user", "restart", SERVICE_UNIT]);
+}
+
 /**
  * Whether the installed daemon has already failed since it was started: systemd shows it failed, or
  * waiting to restart after a failure. Undefined where the service manager cannot tell.

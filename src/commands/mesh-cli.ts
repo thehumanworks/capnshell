@@ -60,7 +60,7 @@ async function settle(options: StateOption, self: PublicKey): Promise<boolean> {
     return true;
   } catch (error) {
     applyMeshes(self);
-    console.error(`The running daemon did not take the change (${errorMessage(error)}). Restart it so it does: cns stop, then cns up.`);
+    console.error(`The running daemon did not take the change (${errorMessage(error)}). Restart it so it does: cns daemon restart.`);
     return false;
   } finally { control.close(); }
 }

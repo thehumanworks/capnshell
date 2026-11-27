@@ -157,6 +157,15 @@ test("cns up --install runs the daemon from the unit; cns up starts it again aft
   assert.match(again.stdout, /^Started as \S+ \(cns [\d.]+, pid \d+, a systemd user service\)/);
   assert.match(await readFile(log, "utf8"), /^--user start cns\.service$/m);
 
+  // cns daemon restart leaves the restart to systemd, which runs what the unit and its drop-ins say.
+  const restarts = async () => (await readFile(log, "utf8")).split("\n").filter((line) => line === "--user restart cns.service").length;
+  const restartsBefore = await restarts();
+  const restarted = await cli(["daemon", "restart", "--state", state]);
+  assert.equal(restarted.code, 0, restarted.stderr);
+  assert.match(restarted.stdout, /^Restarted as \S+ \(cns [\d.]+, pid \d+, a systemd user service\)/);
+  assert.notEqual(/pid (\d+)/.exec(restarted.stdout)![1], /pid (\d+)/.exec(again.stdout)![1]);
+  assert.equal(await restarts(), restartsBefore + 1);
+
   const removed = await cli(["up", "--uninstall", "--state", state]);
   assert.equal(removed.code, 0, removed.stderr);
   assert.match(removed.stdout, /^Removed the systemd user service; the daemon is stopped\./);

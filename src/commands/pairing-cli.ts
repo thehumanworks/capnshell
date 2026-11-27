@@ -1,3 +1,6 @@
+import { spawn } from "node:child_process";
+import { constants } from "node:fs";
+import { open, readFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import readline from "node:readline";
@@ -17,11 +20,12 @@ import { plain } from "../terminal.js";
 import { selfCheck, type SelfFacts } from "../self-check.js";
 import type { ShellApi } from "../shell.js";
 import type { RpcStub } from "capnweb";
+import type { Pointer } from "bun:ffi";
 import { RefusingShell } from "../refusing-shell.js";
-import { connectControl, daemonStatePath, removeStaleState, startDaemon, stopDaemon, type ControlConnection, type DaemonStatus } from "./daemon.js";
+import { connectControl, daemonStatePath, processExited, removeStaleState, runsUnder, startDaemon, stopDaemon, type ControlConnection, type DaemonStatus } from "./daemon.js";
 import { selfInvocation, selfPath } from "../runtime.js";
 import { CNS_VERSION, daemonDrift, describeVersion, reportedVersion, restartAdvice, versionOrder } from "../version.js";
-import { describeService, installService, installedService, installedServiceRuns, lingering, serviceEnvironment, serviceFailed, serviceFile, serviceKind, serviceLog, serviceName, serviceOverrides, startService, uninstallService, type ServiceKind } from "../service.js";
+import { describeService, installService, installedService, installedServiceRuns, lingering, restartService, serviceEnvironment, serviceFailed, serviceFile, serviceKind, serviceLog, serviceName, serviceOverrides, startService, uninstallService, type ServiceKind } from "../service.js";
 
 /** How long the invited device waits for the inviting person to decide. */
 const PROPOSAL_WAIT_MS = 10 * 60 * 1000;
@@ -163,27 +167,158 @@ async function pairedDaemon(options: { bind?: string; port?: string; state?: str
   return { control: await connectControl(options.state), started: true };
 }
 
-/** `cns up`: run this device as a paired peer. */
+/** `cns up`, or `cns daemon start`: run this device as a paired peer. */
 export async function up(options: UpOptions): Promise<void> {
   if (options.install && options.uninstall) throw new Error("Use either --install or --uninstall, not both.");
   if (options.uninstall) { await uninstall(options); return; }
   if (options.install) await install(options);
   const { control, started } = await pairedDaemon(options, true);
+  await report(control, started ? "Started" : "Running", options.state);
+}
+
+/** Print what the daemon behind `control` runs as, where it listens and which devices it reaches, then close it. */
+async function report(control: ControlConnection, verb: string, state?: string): Promise<void> {
   try {
     const status = await control.remote.status();
     const peers = await control.controller.peers();
-    const service = installedService(daemonStatePath(options.state));
+    const service = installedService(daemonStatePath(state));
     const version = reportedVersion(status.version);
-    console.log(`${started ? "Started" : "Running"} as ${status.identity?.fingerprint} (${version ? `cns ${version}, ` : ""}pid ${status.pid}${service ? `, ${describeService(service.kind)}` : ""}), listening at ${status.url}.`);
+    console.log(`${verb} as ${status.identity?.fingerprint} (${version ? `cns ${version}, ` : ""}pid ${status.pid}${service ? `, ${describeService(service.kind)}` : ""}), listening at ${status.url}.`);
     if (status.addresses?.length) console.log(`Reachable at ${status.addresses.join(", ")}.`);
     if (status.relay) console.log(`Relay: ${status.relay}${status.relayRegistered ? ", registered" : ", registering"}.`);
     const paired = listPeers();
     console.log(paired.length
       ? `Paired devices: ${paired.map((peer) => `${peer.name}${peers.some((connected) => connected.peer?.daemon && connected.peer.fingerprint === peer.fingerprint) ? " (online)" : ""}`).join(", ")}.`
       : "No paired devices yet. Run cns pair here and type the code it shows on the other device.");
-    const drift = driftWarning(status, options.state);
+    const drift = driftWarning(status, state);
     if (drift) console.error(`Warning: ${drift}`);
   } finally { control.close(); }
+}
+
+export interface RestartOptions { state?: string; worker?: string }
+
+/** How long a restart that runs inside the daemon waits, so that this command's output reaches whoever ran it first. */
+const RESTART_DELAY_MS = 1000;
+
+/**
+ * How `cns daemon restart` brings the daemon back. systemd restarts a daemon that runs as its
+ * service, with whatever command the unit and its drop-ins give it. Any other daemon is stopped,
+ * then started again: through the installed service if there is one, else detached with its
+ * --bind and --port. A daemon that a service manager cns did not install runs, such as the NixOS
+ * module's system service, is left to that manager, which alone can start it again.
+ */
+export function restartPlan(service: boolean | undefined, installed: ServiceKind | undefined): { stop: boolean; start: ServiceKind | "detached" } {
+  if (service && !installed) {
+    throw new Error(`A service manager cns did not install runs this daemon, so cns cannot start it again. Restart it there${process.platform === "linux" ? ", such as sudo systemctl restart cns for the NixOS module" : ""}.`);
+  }
+  return { stop: !(service && installed === "systemd"), start: installed ?? "detached" };
+}
+
+/**
+ * `cns daemon restart`: stop the daemon and start it again as it runs now. A process of its own,
+ * in a session of its own, does the work, so the restart completes when this command ends with
+ * the daemon, as it does for `cns run DEVICE -- cns daemon restart` from another device: this
+ * command then returns at once and the restart follows. Run anywhere else, it waits and reports
+ * the daemon that answers.
+ */
+export async function restart(options: RestartOptions): Promise<void> {
+  if (options.worker !== undefined) { await restartNow(options.state, Number(options.worker)); return; }
+  const state = daemonStatePath(options.state);
+  const { control, started } = await pairedDaemon({ state }, true);
+  if (started) {
+    console.error("The daemon was not running, so it was started.");
+    await report(control, "Started", state);
+    return;
+  }
+  let status: DaemonStatus;
+  try { status = await control.remote.status(); } finally { control.close(); }
+  const installed = installedService(state);
+  const plan = restartPlan(status.service, installed?.kind);
+  // A drop-in that pins another cns comes back with every restart; say so before the device is cut off.
+  const overrides = installed ? serviceOverrides(installed.kind, selfPath()).map(printable) : [];
+  if (overrides.length) console.error(`Warning: ${restartAdvice({ service: status.service, installed: { kind: installed!.kind, ...installedServiceRuns(installed!, selfPath()), overrides }, platform: process.platform })}`);
+  const inside = runsUnder(status.pid);
+  const log = path.join(path.dirname(state), "restart.log");
+  await keepHandlesHere();
+  const handle = await open(log, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | (constants.O_NOFOLLOW ?? 0), 0o600);
+  const invocation = selfInvocation(["daemon", "restart", "--state", state, "--worker", String(inside === false ? 0 : RESTART_DELAY_MS)]);
+  const worker = spawn(invocation.file, invocation.args, { detached: true, windowsHide: true, stdio: ["ignore", handle.fd, handle.fd] });
+  await handle.close();
+  const through = plan.start === "detached" ? "" : ` through its ${serviceName(plan.start)}`;
+  if (inside !== false) {
+    // Inside the daemon, or where that cannot be told: the daemon may end this command any moment now.
+    worker.unref();
+    console.log(`Restarting the daemon${through} in a moment. Links to this device drop and come back within seconds, and the named sessions it holds end. Check with cns status; the restart's log is ${log}.`);
+    return;
+  }
+  const code = await new Promise<number | null>((resolve, reject) => { worker.once("error", reject); worker.once("exit", resolve); });
+  if (code !== 0) throw new Error(`The daemon did not restart${through}:\n${(await readFile(log, "utf8")).trim()}`);
+  await report(await connectControl(state), "Restarted", state);
+}
+
+/**
+ * On Windows a new process inherits every inheritable handle of the one that starts it, not only
+ * the standard handles it is given. Started from PowerShell, as a paired device's command is, this
+ * process holds handles to that command's pipes, so the restart would hold them open, and the
+ * command would not end until the daemon cut it off. Mark every handle here as not inherited:
+ * handles are multiples of 4, and a process like this one has far fewer than 2^18 of them.
+ */
+async function keepHandlesHere(): Promise<void> {
+  if (process.platform !== "win32") return;
+  try {
+    const { dlopen, FFIType, ptr } = await import("bun:ffi");
+    const kernel32 = dlopen("kernel32.dll", {
+      GetHandleInformation: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.bool },
+      SetHandleInformation: { args: [FFIType.ptr, FFIType.u32, FFIType.u32], returns: FFIType.bool },
+    });
+    const flags = new Uint32Array(1);
+    const flagsAt = ptr(flags);
+    try {
+      // HANDLE_FLAG_INHERIT is 1.
+      for (let value = 4; value < 1 << 20; value += 4) {
+        const handle = value as Pointer;
+        if (kernel32.symbols.GetHandleInformation(handle, flagsAt) && (flags[0]! & 1)) kernel32.symbols.SetHandleInformation(handle, 1, 0);
+      }
+    } finally { kernel32.close(); }
+  } catch (error) {
+    console.error(`Cannot keep this command's handles from the restart (${errorMessage(error)}); the command may end only when the daemon restarts.`);
+  }
+}
+
+/** The restart itself, in its own process: wait `delayMs`, stop the daemon, then start it again as restartPlan says. */
+async function restartNow(statePath: string | undefined, delayMs: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, delayMs));
+  const state = daemonStatePath(statePath);
+  const control = await connectControl(state);
+  let status: DaemonStatus;
+  try { status = await control.remote.status(); } finally { control.close(); }
+  const plan = restartPlan(status.service, installedService(state)?.kind);
+  console.error(`Restarting the daemon (pid ${status.pid}).`);
+  // The daemon started below would otherwise hold this log open.
+  await keepHandlesHere();
+  if (plan.stop) {
+    // Once stopped, always try to start it again: nobody may be left to run cns up on this device.
+    try {
+      const pid = await stopDaemon(state);
+      // A service manager can take a process that is still exiting for one still running.
+      if (plan.start !== "detached" && !(await processExited(pid, 10_000))) console.error(`The old daemon (pid ${pid}) has not exited yet.`);
+    } catch (error) { console.error(`Stopping the daemon: ${errorMessage(error)}`); }
+  }
+  if (plan.start === "systemd") restartService();
+  else if (plan.start === "launchd") startService("launchd");
+  else {
+    // Nothing else starts it again, so try more than once: its port can take a moment to come free.
+    for (let attempt = 1; ; attempt++) {
+      try { await startDaemon({ bind: status.bind, port: status.port, url: endpointUrl(status.bind, status.port), state }); break; }
+      catch (error) {
+        if (attempt === 3) throw error;
+        console.error(`${errorMessage(error)} Trying again.`);
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+      }
+    }
+  }
+  const started = await awaitControl(state, undefined, plan.start === "detached" ? undefined : serviceFailure(plan.start, state));
+  try { console.error(`Restarted the daemon (pid ${(await started.remote.status()).pid}).`); } finally { started.close(); }
 }
 
 /**
