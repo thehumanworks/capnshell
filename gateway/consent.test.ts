@@ -16,9 +16,9 @@ import { TOOL_NAMES } from "../src/mcp/server.js";
 mock.module("cloudflare:workers", () => ({
   DurableObject: class { ctx: unknown; env: unknown; constructor(ctx: unknown, env: unknown) { this.ctx = ctx; this.env = env; } },
 }));
-const { Gateway, CONSENT_MS } = await import("./object.js");
+const { Gateway, CONSENT_MS, reachable } = await import("./object.js");
 
-const KEYS = { studio: "A".repeat(43), laptop: "B".repeat(43) };
+const KEYS = { studio: "A".repeat(43), laptop: "B".repeat(43), nas: "C".repeat(43) };
 const PAGE = "the-consent-page-handle";
 const CLIENT = { handle: PAGE, clientId: "client", clientName: "Claude", redirectHost: "claude.ai", loopback: false };
 
@@ -39,10 +39,14 @@ async function gateway(devices: Array<keyof typeof KEYS> = ["studio", "laptop"])
   };
   const object = new Gateway(ctx as never, {} as never);
   await ready;
-  for (const name of devices) {
-    sql.exec("INSERT INTO devices (name, public_key, addresses, granted, paired_at) VALUES (?, ?, '[]', '[\"shell\"]', ?)", name, KEYS[name], new Date().toISOString());
-  }
+  for (const name of devices) pairDevice(object, name);
   return object;
+}
+
+/** Pair `object` with a device, as Gateway.pair saves one once the device accepts. */
+function pairDevice(object: Object, name: keyof typeof KEYS, key = KEYS[name]) {
+  (object as unknown as { ctx: { storage: { sql: { exec(query: string, ...bindings: unknown[]): unknown } } } }).ctx.storage.sql
+    .exec("INSERT INTO devices (name, public_key, addresses, granted, paired_at) VALUES (?, ?, '[]', '[\"shell\"]', ?)", name, key, new Date().toISOString());
 }
 
 type Object = Awaited<ReturnType<typeof gateway>>;
@@ -117,7 +121,7 @@ test("every consent state answers every event as the table says", async () => {
         else result = events[event]!(object, code);
         if (expected.poll === "approved") {
           assert.equal((result as { status: string }).status, "approved", label);
-          assert.deepEqual((result as { props: { devices: string[] } }).props.devices, [KEYS.laptop, KEYS.studio], label);
+          assert.equal((result as { props: { devices: unknown } }).props.devices, "all", label);
         } else if (expected.poll) assert.deepEqual(result, expected.poll, label);
         assert.equal(stateOf(object, code), expected.then, label);
         setSystemTime();
@@ -138,13 +142,34 @@ test("an approval names the devices and tools it allows, and refusing a bad one 
   assert.ok(handedOut.status === "approved");
   assert.deepEqual({ ...handedOut.props, grant: undefined }, { grant: undefined, client: "Claude", devices: [KEYS.studio], tools: ["list_peers", "read_file"] });
 
-  // Without devices or tools named, an approval allows every device paired now and every tool.
+  // Without devices or tools named, an approval allows every device, now and later, and every tool.
   const all = object.startConsent(CLIENT);
   const everything = object.decide(all, { approve: true, owner: "studio" });
-  assert.deepEqual([everything.devices, everything.tools], [[KEYS.laptop, KEYS.studio], [...TOOL_NAMES]]);
+  assert.deepEqual([everything.devices, everything.tools], ["all", [...TOOL_NAMES]]);
   // Each approval is its own grant, which cns gateway revoke takes.
   const second = object.pollConsent(all, PAGE);
   assert.ok(second.status === "approved" && second.props.grant !== handedOut.props.grant);
+});
+
+test("an approval for all devices reaches a device paired later; one for named devices reaches only their keys", async () => {
+  const object = await gateway(["studio"]);
+  const approve = (devices?: string[]) => {
+    const code = object.startConsent(CLIENT);
+    object.decide(code, { approve: true, ...devices ? { devices } : {}, owner: "studio" });
+    const answer = object.pollConsent(code, PAGE);
+    assert.ok(answer.status === "approved");
+    return answer.props.devices;
+  };
+  const [all, named] = [approve(), approve(["studio"])];
+  const reached = (approved: typeof all) => reachable(approved, object.status().devices).map((device) => device.name);
+  assert.deepEqual([reached(all), reached(named)], [["studio"], ["studio"]]);
+
+  pairDevice(object, "nas");
+  assert.deepEqual([reached(all), reached(named)], [["nas", "studio"], ["studio"]]);
+  // A device removed from the gateway is gone from both, and another key under its name is not the one approved.
+  object.removeDevice("studio");
+  pairDevice(object, "studio", KEYS.laptop);
+  assert.deepEqual([reached(all), reached(named)], [["nas", "studio"], []]);
 });
 
 test("a gateway with no device cannot approve, and the consent stays pending", async () => {

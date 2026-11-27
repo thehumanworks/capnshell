@@ -25,8 +25,10 @@ Claude ──HTTPS + OAuth──▶ gateway (Worker + Durable Object) ──encr
   granted until you run `cns gateway approve CODE` on one of your devices, which shows the
   app, where its access goes, and the devices and tools it will get. That request is signed
   by your device's key, which the gateway accepts only when it is listed in `OWNER_KEYS`.
-- **Each approval is scoped.** It names the devices (by key, so a re-paired device under the
-  same name is not included) and the tools (`--tools read` for tools that change nothing).
+- **Each approval is scoped.** It covers all devices paired with the gateway, including ones
+  you pair later, or only the ones you name with `--devices` (by key, so a re-paired device
+  under the same name is not included). It also names the tools (`--tools read` for tools
+  that change nothing).
   Access tokens last an hour, refresh tokens 30 days. `cns gateway revoke ID` stops a
   connector's tokens and in-flight sessions immediately.
 - **Every call is logged.** `cns gateway log` shows when, which connector, which device,
@@ -98,12 +100,17 @@ Add the connector in Claude: Settings, Connectors, Add custom connector, with th
 gateway's sign-in page, which shows a code. On an owner device:
 
 ```sh
-cns gateway approve ABCD-EFGH                      # all paired devices, all tools
+cns gateway approve ABCD-EFGH                      # all devices, now and later; all tools
 cns gateway approve ABCD-EFGH --devices studio --tools read
 ```
 
 The page then returns to Claude, and its tools reach the approved devices by name
-(`list_peers` lists them). A connector keeps the tools it was approved for: when a cns release
+(`list_peers` lists them). A connector approved for all devices reaches a device you pair
+with the gateway later as soon as the pairing is done, with no reconnect, and `cns gateway
+pair` names the connectors that reach it. Before 2.4.0 an approval kept only the devices
+paired at the time, so remove and add again a connector approved before you redeployed
+from 2.4.0. A device paired with one of yours, or in a mesh with one, is not reached until
+it is paired with the gateway itself. A connector keeps the tools it was approved for: when a cns release
 adds tools, such as the skill tools and `list_secrets` in 2.3.0, remove the connector and add it
 again to approve them. `--tools read` includes the skill tools. Other commands:
 

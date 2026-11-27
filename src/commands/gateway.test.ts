@@ -36,7 +36,9 @@ async function fakeGateway(t: test.TestContext, fake: Fake) {
           const tools = Array.isArray(input.tools) ? input.tools as string[] : known;
           for (const tool of tools) if (!known.includes(tool)) return Response.json({ error: `Unknown tool ${tool}.` }, { status: 400 });
           approvals.push(input);
-          return Response.json({ consent: { code: input.code, clientName: "Claude", status: "approved", devices: ["key"], tools } });
+          // From 2.4.0 the gateway keeps all for an approval for all devices; before, it kept the keys paired then.
+          const devices = input.devices === "all" && fake.build?.version === CNS_VERSION ? "all" : ["key"];
+          return Response.json({ consent: { code: input.code, clientName: "Claude", status: "approved", devices, tools } });
         }
         default: return Response.json({ error: "Unknown action." }, { status: 404 });
       }
@@ -99,7 +101,9 @@ test("a gateway that lists its tools gets only those it has for --tools read, an
 
 test("a gateway on this cns approves everything without a warning, and status shows its version", async (t) => {
   const gateway = await fakeGateway(t, { root: `cns gateway ${CNS_VERSION}`, build: { version: CNS_VERSION, tools: [...TOOL_NAMES] } });
-  const { err } = await capture(() => approve("ABCD-EFGH", { url: gateway.url, yes: true }));
+  const { out, err } = await capture(() => approve("ABCD-EFGH", { url: gateway.url, yes: true }));
+  assert.match(err, /Devices: {9}all, including devices paired with the gateway later \(now: studio\)\n/);
+  assert.match(out, /Approved Claude for every device paired with the gateway \(now studio\) and any paired later\./);
   assert.match(err, new RegExp(`Tools: {11}all ${TOOL_NAMES.length} the gateway has\\n`));
   assert.doesNotMatch(err, /Redeploy/);
   const shown = await capture(() => status({ url: gateway.url }));
