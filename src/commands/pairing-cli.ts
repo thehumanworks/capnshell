@@ -298,9 +298,11 @@ async function restartNow(statePath: string | undefined, delayMs: number): Promi
   await keepHandlesHere();
   if (plan.stop) {
     // Once stopped, always try to start it again: nobody may be left to run cns up on this device.
-    // Wait for the old process to be gone too, or a service manager can take it for still running.
-    try { if (!(await processExited(await stopDaemon(state), 10_000))) console.error(`The old daemon (pid ${status.pid}) has not exited yet.`); }
-    catch (error) { console.error(`Stopping the daemon: ${errorMessage(error)}`); }
+    try {
+      const pid = await stopDaemon(state);
+      // A service manager can take a process that is still exiting for one still running.
+      if (plan.start !== "detached" && !(await processExited(pid, 10_000))) console.error(`The old daemon (pid ${pid}) has not exited yet.`);
+    } catch (error) { console.error(`Stopping the daemon: ${errorMessage(error)}`); }
   }
   if (plan.start === "systemd") restartService();
   else if (plan.start === "launchd") startService("launchd");
