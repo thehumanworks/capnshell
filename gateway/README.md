@@ -61,9 +61,15 @@ From this directory, in your Cloudflare account (the zone for the hostname must 
    npx wrangler deploy
    ```
 
-5. On an owner device, check it: `cns gateway status` prints the gateway's fingerprint, and
-   `curl https://gateway.cns.nothuman.work/` prints the cns version it was deployed from.
-   Set `CNS_GATEWAY=https://your-host` first if you changed the hostname.
+5. On an owner device, check it: `cns gateway status` prints the gateway's fingerprint and
+   the cns version it was deployed from (`curl https://gateway.cns.nothuman.work/` prints
+   the version too). Set `CNS_GATEWAY=https://your-host` first if you changed the hostname.
+
+Deploy again after upgrading cns. A connector can only be approved for tools the gateway
+has, so a gateway left on an older cns cannot grant the tools a release adds. `cns gateway
+status` and `cns gateway approve` say when the gateway runs another cns than the one you run,
+and which tools it lacks; `approve` then grants the tools the gateway has. Before 2.3.1, an
+approval at a gateway older than cns failed with `Unknown tool list_skills`.
 
 ## Use
 

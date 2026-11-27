@@ -16,7 +16,7 @@ import { errorMessage } from "../src/errors.js";
 import { CNS_VERSION } from "../src/version.js";
 import { ownerKeys, OWNER_HEADER, verifyOwner } from "../src/owner-proof.js";
 import type { Permission } from "../src/peers.js";
-import type { ToolName } from "../src/mcp/server.js";
+import { TOOL_NAMES, type ToolName } from "../src/mcp/server.js";
 import { CONSENT_MS, GRANT_HEADER, type Env, type Gateway, type GrantProps } from "./object.js";
 import { consentPage, consentPolicy, errorPage } from "./pages.js";
 
@@ -134,7 +134,8 @@ async function admin(request: Request, env: ProviderEnv, action: string): Promis
   const list = <T extends string>(key: string) => Array.isArray(input[key]) ? input[key] as T[] : undefined;
   try {
     switch (action) {
-      case "status": return json({ ...await stub.status(), grants: await grants(env), owner: checked.fingerprint });
+      // The version and tools tell cns gateway what this deployment offers, so a cns on another version approves what is here.
+      case "status": return json({ ...await stub.status(), grants: await grants(env), owner: checked.fingerprint, version: CNS_VERSION, tools: TOOL_NAMES });
       case "pair": return json(await stub.pair(text("invite") ?? "", { name: text("name"), requests: list<Permission>("requests") }));
       case "remove": return json({ removed: await stub.removeDevice(text("name") ?? "") });
       case "consent": return json({ consent: await stub.consent(text("code") ?? "") });

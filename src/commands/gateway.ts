@@ -4,6 +4,7 @@ import { loadIdentity } from "../identity.js";
 import { INVITE_PREFIX } from "../pairing.js";
 import { OWNER_HEADER, ownerProof } from "../owner-proof.js";
 import { TOOL_NAMES, type ToolName } from "../mcp/server.js";
+import { CNS_VERSION, describeVersion, reportedVersion, versionOrder } from "../version.js";
 
 /**
  * `cns gateway`: administer the gateway (gateway/), the MCP server Claude's connectors use to
@@ -59,13 +60,51 @@ interface Device { name: string; fingerprint: string; granted: string[]; pairedA
 interface Consent { code: string; clientName: string; clientDomain: string | null; redirectHost: string; loopback: boolean; expiresAt: number; status: string; devices: string[]; tools: string[] }
 interface Grant { id: string; client: string; devices: string[]; tools: string[]; createdAt: number; expiresAt?: number }
 
+interface GatewayStatus { fingerprint: string; name: string; relay: string; devices: Device[]; pending: Consent[]; grants: Grant[]; owner: string; version?: unknown; tools?: unknown }
+
+/**
+ * What the gateway was deployed from: its cns version and the tools it can grant. A gateway
+ * deployed from before cns 2.3.1 gives neither in its status; from 1.4.0 on, its root page
+ * shows the version.
+ */
+export interface GatewayBuild { version?: string; tools?: readonly string[] }
+
+async function gatewayBuild(options: GatewayOptions, status: GatewayStatus): Promise<GatewayBuild> {
+  const tools = Array.isArray(status.tools) && status.tools.every((tool) => typeof tool === "string") ? status.tools as string[] : undefined;
+  let version = reportedVersion(status.version);
+  if (version === undefined) {
+    try {
+      const root = await fetch(`${gatewayUrl(options)}/`, { signal: AbortSignal.timeout(5000) });
+      version = reportedVersion(/^cns gateway (\S+)/.exec(await root.text())?.[1]);
+    } catch { /* Unknown, as for a gateway too old to say. */ }
+  }
+  return { ...version === undefined ? {} : { version }, ...tools ? { tools } : {} };
+}
+
+/** The tools of this cns that the gateway lacks; none known for a gateway that does not list its tools. */
+const lacking = (build: GatewayBuild) => build.tools ? TOOL_NAMES.filter((tool) => !build.tools!.includes(tool)) : [];
+
+/** What to tell an owner when the gateway runs another cns than this one, or nothing when it runs this one. */
+export function gatewayDrift(build: GatewayBuild): string | undefined {
+  const order = versionOrder(build.version);
+  if (order === "same" && !lacking(build).length) return undefined;
+  if (order === "newer") return `The gateway runs cns ${build.version}, newer than this cns (${CNS_VERSION}); upgrade cns here to approve its newer tools by name.`;
+  const missing = lacking(build);
+  const runs = order === "same" ? `The gateway runs cns ${CNS_VERSION}` : `The gateway runs ${describeVersion(build.version)}, not this cns's ${CNS_VERSION}`;
+  const what = missing.length ? `, so it cannot grant ${missing.join(", ")}` : ", so it may lack tools this cns has";
+  return `${runs}${what}. Redeploy it from this release: cd gateway && npx wrangler deploy (gateway/README.md).`;
+}
+
 const when = (seconds: number) => new Date(seconds * 1000).toISOString().slice(0, 16).replace("T", " ");
 const toolsText = (tools: readonly string[]) => tools.length === TOOL_NAMES.length ? "all tools" : tools.join(", ");
 
 export async function status(options: GatewayOptions): Promise<void> {
-  const answer = await call<{ fingerprint: string; name: string; relay: string; devices: Device[]; pending: Consent[]; grants: Grant[]; owner: string }>(options, "status");
-  print(options, answer, () => [
+  const answer = await call<GatewayStatus>(options, "status");
+  const build = await gatewayBuild(options, answer);
+  const drift = gatewayDrift(build);
+  print(options, { ...answer, ...build }, () => [
     `Gateway:    ${gatewayUrl(options)} (${answer.name}, fingerprint ${answer.fingerprint})`,
+    `Version:    ${describeVersion(build.version)}${drift ? `\n  ${drift}` : ""}`,
     `Owner:      this device, ${answer.owner}`,
     `Relay:      ${answer.relay}`,
     `Devices:    ${answer.devices.length ? "" : "none; pair one with cns gateway pair"}`,
@@ -100,12 +139,22 @@ export async function remove(name: string, options: GatewayOptions): Promise<voi
   print(options, answer, () => `The gateway forgot ${name}; no connector reaches it now. To end the pairing on ${name} too, run there: cns peer remove gateway`);
 }
 
-function parseTools(value: string | undefined): ToolName[] {
-  if (value === undefined || value === "all") return [...TOOL_NAMES];
-  if (value === "read") return [...READ_TOOLS];
+/**
+ * The tools an approval asks for, from --tools: undefined for all of them, which the gateway
+ * expands to every tool it has, so a cns on another version than the gateway still approves.
+ * Named tools must be ones the gateway has, when it lists them; `read` keeps those it has.
+ */
+export function chooseTools(value: string | undefined, build: GatewayBuild): { tools?: ToolName[]; dropped: string[] } {
+  if (value === undefined || value === "all") return { dropped: [] };
+  const offered = build.tools ?? TOOL_NAMES;
+  if (value === "read") return { tools: READ_TOOLS.filter((tool) => offered.includes(tool)), dropped: READ_TOOLS.filter((tool) => !offered.includes(tool)) };
   const tools = value.split(",").map((tool) => tool.trim()).filter(Boolean);
-  for (const tool of tools) if (!(TOOL_NAMES as readonly string[]).includes(tool)) throw new Error(`Unknown tool ${tool}. Tools: ${TOOL_NAMES.join(", ")}; or all, or read.`);
-  return tools as ToolName[];
+  for (const tool of tools) {
+    if (offered.includes(tool)) continue;
+    if ((TOOL_NAMES as readonly string[]).includes(tool)) throw new Error(`The gateway has no tool ${tool}. ${gatewayDrift(build) ?? ""}`.trim());
+    throw new Error(`Unknown tool ${tool}. Tools: ${offered.join(", ")}; or all, or read.`);
+  }
+  return { tools: tools as ToolName[], dropped: [] };
 }
 
 async function confirm(question: string): Promise<boolean> {
@@ -118,18 +167,21 @@ async function confirm(question: string): Promise<boolean> {
 }
 
 export async function approve(code: string, options: GatewayOptions & { devices?: string; tools?: string; yes?: boolean }): Promise<void> {
-  const tools = parseTools(options.tools);
   const devices = options.devices === undefined || options.devices === "all" ? "all" : options.devices.split(",").map((name) => name.trim()).filter(Boolean);
   const { consent } = await call<{ consent: Consent | null }>(options, "consent", { code });
   if (!consent || consent.status !== "pending") throw new Error(`No connector is waiting with code ${code}. Codes last ten minutes; connect again from Claude.`);
-  const { devices: paired } = await call<{ devices: Device[] }>(options, "status");
-  const chosen = devices === "all" ? paired.map((device) => device.name) : devices;
+  const status = await call<GatewayStatus>(options, "status");
+  const build = await gatewayBuild(options, status);
+  const { tools, dropped } = chooseTools(options.tools, build);
+  const drift = gatewayDrift(build);
+  const chosen = devices === "all" ? status.devices.map((device) => device.name) : devices;
   console.error([
     `${consent.clientName} wants to use devices through the gateway.`,
     consent.clientDomain ? `  Published by:    ${consent.clientDomain}` : "  Its name is not verified: it registered itself.",
     `  Access goes to:  ${consent.redirectHost}${consent.loopback ? "  (an app on that computer: approve only if you just connected from it)" : ""}`,
     `  Devices:         ${chosen.join(", ") || "none"}`,
-    `  Tools:           ${toolsText(tools)}`,
+    `  Tools:           ${tools ? toolsText(tools) : build.tools ? `all ${build.tools.length} the gateway has` : "all the gateway has"}${dropped.length ? ` (not ${dropped.join(", ")}: the gateway lacks them)` : ""}`,
+    ...drift ? [`  ${drift}`] : [],
     "Check that the code and the app match the page you opened; approve only connections you started.",
   ].join("\n"));
   if (!options.yes && !(await confirm("Approve it?"))) {
@@ -138,7 +190,14 @@ export async function approve(code: string, options: GatewayOptions & { devices?
     process.exitCode = 3;
     return;
   }
-  const answer = await call<{ consent: Consent }>(options, "approve", { code, devices, tools });
+  let answer: { consent: Consent };
+  try { answer = await call<{ consent: Consent }>(options, "approve", { code, devices, ...tools ? { tools } : {} }); }
+  catch (error) {
+    // A gateway that does not list its tools refuses one it lacks only here.
+    const unknown = /^Unknown tool (\S+?)\.?$/.exec((error as Error).message);
+    if (unknown) throw new Error(`The gateway has no tool ${unknown[1]}. ${gatewayDrift(build) ?? ""} Or approve with --tools naming tools it has.`.replace(/ +/g, " "), { cause: error });
+    throw error;
+  }
   print(options, answer, () => `Approved ${consent.clientName} for ${chosen.join(", ")}. The page you opened returns to it now.`);
 }
 
