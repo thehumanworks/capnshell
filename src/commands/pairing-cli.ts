@@ -20,6 +20,7 @@ import { plain } from "../terminal.js";
 import { selfCheck, type SelfFacts } from "../self-check.js";
 import type { ShellApi } from "../shell.js";
 import type { RpcStub } from "capnweb";
+import type { Pointer } from "bun:ffi";
 import { RefusingShell } from "../refusing-shell.js";
 import { connectControl, daemonStatePath, processExited, removeStaleState, runsUnder, startDaemon, stopDaemon, type ControlConnection, type DaemonStatus } from "./daemon.js";
 import { selfInvocation, selfPath } from "../runtime.js";
@@ -238,7 +239,7 @@ export async function restart(options: RestartOptions): Promise<void> {
   if (overrides.length) console.error(`Warning: ${restartAdvice({ service: status.service, installed: { kind: installed!.kind, ...installedServiceRuns(installed!, selfPath()), overrides }, platform: process.platform })}`);
   const inside = runsUnder(status.pid);
   const log = path.join(path.dirname(state), "restart.log");
-  await keepStandardHandles();
+  await keepHandlesHere();
   const handle = await open(log, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | (constants.O_NOFOLLOW ?? 0), 0o600);
   const invocation = selfInvocation(["daemon", "restart", "--state", state, "--worker", String(inside === false ? 0 : RESTART_DELAY_MS)]);
   const worker = spawn(invocation.file, invocation.args, { detached: true, windowsHide: true, stdio: ["ignore", handle.fd, handle.fd] });
@@ -256,24 +257,27 @@ export async function restart(options: RestartOptions): Promise<void> {
 }
 
 /**
- * On Windows a new process inherits every inheritable handle of the one that starts it. Started
- * from PowerShell, as a paired device's command is, this process's standard handles are the
- * command's pipes, so the restart would hold them open, and the command would not end until the
- * daemon cut it off. Keep them out of the processes this one starts.
+ * On Windows a new process inherits every inheritable handle of the one that starts it, not only
+ * the standard handles it is given. Started from PowerShell, as a paired device's command is, this
+ * process holds handles to that command's pipes, so the restart would hold them open, and the
+ * command would not end until the daemon cut it off. Mark every handle here as not inherited:
+ * handles are multiples of 4, and a process like this one has far fewer than 2^18 of them.
  */
-async function keepStandardHandles(): Promise<void> {
+async function keepHandlesHere(): Promise<void> {
   if (process.platform !== "win32") return;
   try {
-    const { dlopen, FFIType } = await import("bun:ffi");
+    const { dlopen, FFIType, ptr } = await import("bun:ffi");
     const kernel32 = dlopen("kernel32.dll", {
-      GetStdHandle: { args: [FFIType.u32], returns: FFIType.ptr },
+      GetHandleInformation: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.bool },
       SetHandleInformation: { args: [FFIType.ptr, FFIType.u32, FFIType.u32], returns: FFIType.bool },
     });
+    const flags = new Uint32Array(1);
+    const flagsAt = ptr(flags);
     try {
-      // STD_INPUT_HANDLE, STD_OUTPUT_HANDLE and STD_ERROR_HANDLE; HANDLE_FLAG_INHERIT is 1.
-      for (const id of [-10, -11, -12]) {
-        const handle = kernel32.symbols.GetStdHandle(id >>> 0);
-        if (handle) kernel32.symbols.SetHandleInformation(handle, 1, 0);
+      // HANDLE_FLAG_INHERIT is 1.
+      for (let value = 4; value < 1 << 20; value += 4) {
+        const handle = value as Pointer;
+        if (kernel32.symbols.GetHandleInformation(handle, flagsAt) && (flags[0]! & 1)) kernel32.symbols.SetHandleInformation(handle, 1, 0);
       }
     } finally { kernel32.close(); }
   } catch (error) {
@@ -291,7 +295,7 @@ async function restartNow(statePath: string | undefined, delayMs: number): Promi
   const plan = restartPlan(status.service, installedService(state)?.kind);
   console.error(`Restarting the daemon (pid ${status.pid}).`);
   // The daemon started below would otherwise hold this log open.
-  await keepStandardHandles();
+  await keepHandlesHere();
   if (plan.stop) {
     // Once stopped, always try to start it again: nobody may be left to run cns up on this device.
     // Wait for the old process to be gone too, or a service manager can take it for still running.
