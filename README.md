@@ -258,6 +258,8 @@ cns skills sync --to studio: pdf      # or into studio's (needs the files grant 
 - **Sync.** `cns skills sync NAME...` copies each skill to `PATH/NAME`, where `PATH` is this device's `~/.agents/skills` unless `--to [DEVICE:]PATH` says otherwise; `--to DEVICE:` alone is that device's `~/.agents/skills`. Files replace files of the same name there, and other files there are kept. A `PATH/NAME` that is not a skill (it has no `SKILL.md`) is never copied over. Every copied file keeps its source's modification time and permission bits, so a copy ties with its source rather than looking newer, and syncing it again from this device finds it already here. A copy onto a paired device needs the `files` grant there; one within a paired device is refused.
 - **Grants.** `skills` is read-only and reaches only skills: names cannot contain separators, paths cannot contain `..` or hidden parts, and every file read must resolve inside its skill's directory. `files` also lets a device read skills, since it can read those files anyway. Both are enforced by the device that holds the skills.
 
+This repository's [skills/](skills/README.md) folder holds skills that teach agents to use cns: running commands and sessions on other devices, sharing skills, using mesh secrets without printing them, reading denials and troubleshooting. Copy them into `~/.agents/skills` on one device, then `cns skills sync --to DEVICE: NAME...` spreads them.
+
 ## Interactive terminals (PTY)
 
 `shell` runs a program on a pseudo-terminal on the peer, so interactive CLIs and full-screen TUIs such as `vim`, `top` or Claude Code render and take keyboard input:
