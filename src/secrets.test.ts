@@ -77,6 +77,22 @@ test("a secret for the whole mesh reaches every member through any reader, only 
   assert.equal(on(studio, () => read(studio, states, "API_KEY")), "two");
 });
 
+test("a mesh's gateway is offered no secret, and none it offers or is named for is kept", async (t) => {
+  const on = await devices(t);
+  const gateway = generateIdentity();
+  const plain = home();
+  const list = nextList(plain.list, (members) => [...members, { key: gateway.publicKey, name: "gateway", gateway: true }], NOW);
+  const states = [{ ...plain, signed: signList(list, admin), list }];
+  on(laptop, () => keepSecret(sealSecret(laptop, fields("API_KEY", 1), value("one"))));
+  assert.equal(on(laptop, () => secretsFor(studio.publicKey, laptop, states)).length, 1);
+  assert.deepEqual(on(laptop, () => secretsFor(gateway.publicKey, laptop, states)), []);
+  // A record the gateway signs, or one set for it alone, is kept by no member.
+  const fromGateway = on(gateway, () => { keepSecret(sealSecret(gateway, fields("TOKEN", 1), value("x"))); return secretsFor(studio.publicKey, gateway, states); });
+  assert.deepEqual(on(studio, () => takeSecrets(gateway.publicKey, studio, states, fromGateway)), []);
+  on(laptop, () => keepSecret(sealSecret(laptop, fields("FOR_GATEWAY", 1, gateway), value("y"))));
+  assert.deepEqual(on(laptop, () => heldSecrets(laptop.publicKey, states).map(({ record }) => record.name)), ["API_KEY"]);
+});
+
 test("a member keeps only what its owner signed, with a key that opens it", async (t) => {
   const on = await devices(t);
   const states = [home()];

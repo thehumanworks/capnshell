@@ -13,7 +13,7 @@ const OLD_TOOLS = ["list_peers", "run_command", "start_session", "send_keys", "r
 
 interface Fake {
   /** What the gateway's status adds: nothing for one deployed before 2.3.1. */
-  build?: { version?: string; tools?: string[] };
+  build?: { version?: string; tools?: string[]; meshes?: unknown[] };
   /** The first line of its root page: `cns gateway` alone before 1.4.0. */
   root: string;
 }
@@ -100,7 +100,7 @@ test("a gateway that lists its tools gets only those it has for --tools read, an
 });
 
 test("a gateway on this cns approves everything without a warning, and status shows its version", async (t) => {
-  const gateway = await fakeGateway(t, { root: `cns gateway ${CNS_VERSION}`, build: { version: CNS_VERSION, tools: [...TOOL_NAMES] } });
+  const gateway = await fakeGateway(t, { root: `cns gateway ${CNS_VERSION}`, build: { version: CNS_VERSION, tools: [...TOOL_NAMES], meshes: [{ name: "home", admin: "studio", version: 4, members: ["laptop", "nas"] }] } });
   const { out, err } = await capture(() => approve("ABCD-EFGH", { url: gateway.url, yes: true }));
   assert.match(err, /Devices: {9}all, including devices paired with the gateway later \(now: studio\)\n/);
   assert.match(out, /Approved Claude for every device paired with the gateway \(now studio\) and any paired later\./);
@@ -108,6 +108,7 @@ test("a gateway on this cns approves everything without a warning, and status sh
   assert.doesNotMatch(err, /Redeploy/);
   const shown = await capture(() => status({ url: gateway.url }));
   assert.match(shown.out, new RegExp(`^Version: {4}cns ${CNS_VERSION.replaceAll(".", "\\.")}\\n`, "m"));
+  assert.match(shown.out, /^Meshes: {5}reached by connectors approved for all devices\n {2}home {2}run by studio, version 4: laptop, nas$/m);
   assert.doesNotMatch(shown.out, /Redeploy/);
   const old = await fakeGateway(t, { root: "cns gateway" });
   assert.match((await capture(() => status({ url: old.url }))).out, /^Version: {4}a cns too old to report its version\n {2}The gateway runs a cns too old to report its version, not this cns's [\d.]+, so it may lack tools this cns has\. Redeploy it/m);

@@ -31,6 +31,8 @@ test("a daemon keeps no standing link to a device that gave no address and grant
   assert.equal(worthDialing({ publicKey: SMALL, addresses: [], grants: { outgoing: ["shell"] } }, undefined), false);
   // A mesh member is a daemon, whose grants are learned over the link.
   assert.equal(worthDialing({ publicKey: SMALL, addresses: [], grants: { outgoing: [] }, mesh: "home" }, RELAY), true);
+  // Except the gateway, which a mesh can list: it never answers through the relay.
+  assert.equal(worthDialing({ publicKey: SMALL, addresses: [DIRECT], grants: { outgoing: ["shell"] }, mesh: "home", gateway: true }, RELAY), false);
 });
 
 test("a dial loop dials without a link, and with one only to replace a relayed link past the race", () => {

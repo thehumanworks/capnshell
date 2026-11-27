@@ -77,6 +77,29 @@ test("a member's records follow the list: created, renamed when taken, regranted
   assert.deepEqual([onAdmin.create, onAdmin.update, onAdmin.remove], [[], [], []]);
 });
 
+test("a list that names the gateway is of v 2, and members save it as a gateway they never dial", () => {
+  const gateway = generateIdentity();
+  const plain = homeList();
+  assert.equal(plain.v, 1);
+  const withGateway = nextList(plain, (members) => [...members, member(gateway.publicKey, "gateway", { gateway: true, limit: ["shell"] })], NOW);
+  assert.equal(withGateway.v, 2);
+  assert.deepEqual(openList(signList(withGateway, admin)), withGateway);
+  // A v 1 list cannot name it, a v 2 list must, and the admin is never the gateway.
+  assert.throws(() => signList({ ...withGateway, v: 1 }, admin), /exactly when it is of v 2/);
+  assert.throws(() => signList({ ...plain, v: 2 }, admin), /exactly when it is of v 2/);
+  assert.throws(() => nextList(plain, ([first, ...rest]) => [{ ...first!, gateway: true }, ...rest], NOW), /admin is not a gateway/);
+  // Taking it out again makes the list v 1, which members on any cns read.
+  assert.equal(nextList(withGateway, (members) => members.filter((entry) => !entry.gateway), NOW).v, 1);
+
+  const plan = (list: MemberList, records: PeerEntry[]) => planMesh({ self: laptop.publicKey, mesh: "home", allow: ["shell", "files"], list, records, now: NOW });
+  const added = plan(withGateway, [record("admin", admin.publicKey)]);
+  assert.deepEqual(added.create.map(({ name, record: saved }) => [name, saved.grants.incoming, saved.gateway]), [["studio", ["shell", "files"], undefined], ["gateway", ["shell"], true]]);
+  // A member that becomes the gateway, or stops being it, is saved again under its name.
+  const asMember = record("gateway", gateway.publicKey, { mesh: "home", grants: { incoming: ["shell"], outgoing: [] } });
+  const became = plan(withGateway, [record("admin", admin.publicKey), record("studio", studio.publicKey, { mesh: "home", grants: { incoming: ["shell", "files"], outgoing: [] } }), asMember]);
+  assert.deepEqual([became.remove, became.create.map(({ name, record: saved }) => [name, saved.gateway])], [[{ name: "gateway", publicKey: gateway.publicKey }], [["gateway", true]]]);
+});
+
 test("a member that missed the removal reuses the bot's alias for its replacement key", () => {
   const list = homeList();
   const oldKey = generateIdentity().publicKey;

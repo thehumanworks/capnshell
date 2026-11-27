@@ -41,8 +41,9 @@ are end to end, and access can be withdrawn at once.
    tool names in its token props; the MCP server registers only those tools and resolves
    only those devices. `all` (the default) is every device paired with the gateway when a
    call runs, so pairing a device needs no new approval; it was the devices paired at
-   approval until 2.4.0. Each of them accepted the gateway itself; a device's own peers and
-   mesh members are not reached through it. Revoking a grant removes it from the OAuth store and marks it revoked in the
+   approval until 2.4.0. Each of them accepted the gateway itself; a device's own peers are
+   not reached through it. Since 2.5.0 `all` also covers the members of meshes whose admin
+   listed the gateway as their gateway (ADR 0009). Revoking a grant removes it from the OAuth store and marks it revoked in the
    Durable Object, which refuses its requests immediately.
 7. **libsodium is replaced in the Worker** by a pure-JavaScript implementation of the same
    primitives on `@noble` (`gateway/nacl.ts`), since Workers forbid compiling WebAssembly

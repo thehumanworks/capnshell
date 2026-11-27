@@ -63,9 +63,11 @@ export function keepsOutbound(ownKey: string, otherKey: string): boolean {
  * own and lets this one do nothing, such as the gateway (gateway/), never answers through
  * the relay and offers nothing over a link: it dials when it needs this device, so dialing
  * it would only knock on the relay every 30 seconds for nothing. A mesh member is a daemon,
- * and what it lets this device do is learned over the link, so it is dialed all the same.
+ * and what it lets this device do is learned over the link, so it is dialed all the same,
+ * unless the mesh's list says it is the gateway.
  */
-export function worthDialing(entry: { publicKey: string; addresses: readonly string[]; grants: { outgoing: readonly string[] }; mesh?: string }, relay: string | undefined): boolean {
+export function worthDialing(entry: { publicKey: string; addresses: readonly string[]; grants: { outgoing: readonly string[] }; mesh?: string; gateway?: true }, relay: string | undefined): boolean {
+  if (entry.gateway) return false;
   if (entry.mesh === undefined && !entry.addresses.length && !entry.grants.outgoing.length) return false;
   return dialAddresses(entry, relay).length > 0;
 }

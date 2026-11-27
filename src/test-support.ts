@@ -169,7 +169,8 @@ export async function testDevices(t: TestContext, prefix = "cns-devices-") {
      * `guestGrants` what the host may do on the guest.
      */
     async pair(host: TestDevice, guest: TestDevice, { hostGrants = "all", guestGrants = "none" }: { hostGrants?: string; guestGrants?: string } = {}) {
-      const inviting = launchCli(t, ["pair", "--yes", "--name", guest.name, "--grant", hostGrants, "--state", host.state], { env: host.env });
+      // --long: an invite to paste, even for a device that has a relay to show a code through.
+      const inviting = launchCli(t, ["pair", "--long", "--yes", "--name", guest.name, "--grant", hostGrants, "--state", host.state], { env: host.env });
       inviting.child.stdin.end();
       await inviting.waitFor("Invite: cns1:");
       const invite = /Invite: (cns1:[A-Za-z0-9_-]+)/.exec(inviting.stdout)![1]!;

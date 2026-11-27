@@ -16,6 +16,14 @@ export interface GatewayDevice {
   publicKey: PublicKey;
   /** Where it can be reached; only relay addresses work from Cloudflare. */
   addresses: string[];
+  /** For a member of a mesh the gateway is in, rather than a device paired with it: that mesh. */
+  mesh?: string;
+}
+
+/** How the gateway learns its meshes: which devices to ask for their lists, and what to do with an answer. */
+export interface MeshLists {
+  asks(device: GatewayDevice): boolean;
+  take(device: GatewayDevice, offered: unknown): void;
 }
 
 /** How long one device gets to answer, so one offline device does not hold up list_peers. */
@@ -43,14 +51,14 @@ interface Opened { channel: SecureChannel; remote: RpcStub<ShellApi> }
  * relay for each call, as `cns mcp DEVICE` does from a laptop. `approved` gives the devices
  * this client was approved for; each device enforces its own grants to the gateway on top.
  */
-export function gatewayTarget(approved: () => readonly GatewayDevice[], identity: Identity, relay: string): McpTarget {
+export function gatewayTarget(approved: () => readonly GatewayDevice[], identity: Identity, relay: string, lists?: MeshLists): McpTarget {
   let active = 0;
   return {
     label: "the gateway's devices",
     async open(signal: AbortSignal): Promise<Link> {
       signal.throwIfAborted();
       // Read for each call, so a device removed from the gateway is gone at once.
-      const devices = approved();
+      let devices = approved();
       if (active >= MAX_CALLS) throw new Error(`Too many tool calls in progress (${MAX_CALLS}); wait for some to finish.`);
       active++;
       const opened = new Map<string, Promise<Opened>>();
@@ -82,10 +90,18 @@ export function gatewayTarget(approved: () => readonly GatewayDevice[], identity
       const remote = async (id: string) => (await connect(id)).remote;
       const controller: ToolController = {
         async peers() {
-          const answers = await Promise.allSettled(devices.map(async (device) => {
-            const info = await plain((await remote(device.name)).info());
+          const describe = async (device: GatewayDevice) => {
+            const shell = await remote(device.name);
+            // A device that runs meshes offers the lists naming the gateway; an answer that fails, as from a cns older than meshes, changes nothing.
+            const meshes = lists?.asks(device) ? plain((shell as unknown as RpcStub<GrantedShell>).meshes([])).then((offered) => lists.take(device, offered)).catch(() => {}) : undefined;
+            const [info] = await Promise.all([plain(shell.info()), meshes]);
             return { id: device.name, info, peer: { name: device.name, fingerprint: fingerprint(device.publicKey), daemon: false, via: "relay" as const } };
-          }));
+          };
+          const answers = await Promise.allSettled(devices.map(describe));
+          // The lists may name members this call does not reach yet.
+          const asked = new Set(devices.map((device) => device.publicKey));
+          devices = approved();
+          answers.push(...await Promise.allSettled(devices.filter((device) => !asked.has(device.publicKey)).map(describe)));
           // Devices that are offline or refuse the gateway are left out; their calls say why.
           return answers.flatMap((answer) => answer.status === "fulfilled" ? [answer.value] : []);
         },
@@ -106,7 +122,7 @@ export function gatewayTarget(approved: () => readonly GatewayDevice[], identity
           if (requested !== undefined) {
             if (devices.some((device) => device.name === requested)) return requested;
             if (requested === DEVICE_PEER && devices.length === 1) return devices[0]!.name;
-            throw new Error(`Unknown peer ${requested}. ${devices.length ? `This connector reaches: ${devices.map((device) => device.name).join(", ")}.` : "This connector reaches no devices."}`);
+            throw new Error(`Unknown peer ${requested}. ${devices.length ? `This connector reaches: ${devices.map((device) => device.name).join(", ")}.` : "This connector reaches no devices."} list_peers picks up mesh members added since.`);
           }
           if (devices.length === 1) return devices[0]!.name;
           throw new Error(devices.length

@@ -95,6 +95,8 @@ export const pairedPeerSchema = z.strictObject({
    * A cns older than meshes refuses the whole record, so it never lets a mesh member in.
    */
   mesh: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/).optional(),
+  /** Set on a mesh's record for the cns gateway, which dials this device and is never dialed (mesh.ts). */
+  gateway: z.literal(true).optional(),
 });
 export type PairedPeer = z.infer<typeof pairedPeerSchema>;
 

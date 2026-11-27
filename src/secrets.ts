@@ -79,7 +79,8 @@ export function secretId(record: Pick<SecretRecord, "mesh" | "admin" | "owner" |
   return createHash("sha256").update([record.mesh, record.admin, record.owner, record.device ?? "", record.name].join("\0")).digest("hex").slice(0, 40);
 }
 
-const isMember = (state: MeshState, key: PublicKey) => state.list.members.some((member) => member.key === key);
+/** The gateway is no member here: it never sets, reads or carries a mesh's secrets. */
+const isMember = (state: MeshState, key: PublicKey) => state.list.members.some((member) => member.key === key && !member.gateway);
 
 /** Whether `key` may read the record: a member of its mesh, and the member it is for or its owner when it names one. */
 export function mayRead(record: SecretRecord, state: MeshState, key: PublicKey): boolean {

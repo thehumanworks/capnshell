@@ -60,7 +60,9 @@ interface Device { name: string; fingerprint: string; granted: string[]; pairedA
 interface Consent { code: string; clientName: string; clientDomain: string | null; redirectHost: string; loopback: boolean; expiresAt: number; status: string; devices: string[] | "all"; tools: string[] }
 interface Grant { id: string; client: string; devices: string[]; tools: string[]; createdAt: number; expiresAt?: number }
 
-interface GatewayStatus { fingerprint: string; name: string; relay: string; devices: Device[]; pending: Consent[]; grants: Grant[]; owner: string; version?: unknown; tools?: unknown }
+interface GatewayMesh { name: string; admin: string; version: number; members: string[] }
+/** `meshes` is absent from a gateway deployed before 2.5.0. */
+interface GatewayStatus { fingerprint: string; name: string; relay: string; devices: Device[]; meshes?: GatewayMesh[]; pending: Consent[]; grants: Grant[]; owner: string; version?: unknown; tools?: unknown }
 
 /**
  * What the gateway was deployed from: its cns version and the tools it can grant. A gateway
@@ -109,6 +111,7 @@ export async function status(options: GatewayOptions): Promise<void> {
     `Relay:      ${answer.relay}`,
     `Devices:    ${answer.devices.length ? "" : "none; pair one with cns gateway pair"}`,
     ...answer.devices.map((device) => `  ${device.name}  ${device.fingerprint}  may use: ${describeGrants(expandGrants(device.granted))}`),
+    ...answer.meshes?.length ? ["Meshes:     reached by connectors approved for all devices", ...answer.meshes.map((mesh) => `  ${mesh.name}  run by ${mesh.admin}, version ${mesh.version}: ${mesh.members.join(", ") || "no other members"}`)] : [],
     `Connectors: ${answer.grants.length ? "" : "none"}`,
     ...answer.grants.map((grant) => `  ${grant.id.slice(0, 8)}  ${grant.client}  devices: ${grant.devices.join(", ")}  ${toolsText(grant.tools)}`),
     ...answer.pending.length ? ["Waiting for approval:", ...answer.pending.map((consent) => `  ${consent.code}  ${consent.clientName} (access goes to ${consent.redirectHost})`)] : [],

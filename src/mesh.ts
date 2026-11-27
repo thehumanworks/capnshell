@@ -40,10 +40,16 @@ const memberSchema = z.strictObject({
   addresses: z.array(addressSchema).max(16).optional(),
   /** The most it may use on any member, whatever that member allows. */
   limit: grantsSchema.optional(),
+  /**
+   * The cns gateway (gateway/): it reaches members within their grants, as any member does,
+   * but it dials them, never answers, and takes no part in mesh secrets. Only in lists of v 2.
+   */
+  gateway: z.literal(true).optional(),
 });
 export type Member = z.infer<typeof memberSchema>;
+// A list naming the gateway is v 2, which a cns from before 2.5.0 cannot read: such a member leaves the mesh, rather than let the gateway in as a member like any other.
 const listSchema = z.strictObject({
-  v: z.literal(1),
+  v: z.union([z.literal(1), z.literal(2)]),
   mesh: nameSchema,
   admin: publicKeySchema,
   version: z.int().positive(),
@@ -53,6 +59,8 @@ const listSchema = z.strictObject({
   if (new Set(list.members.map((member) => member.key)).size !== list.members.length) context.addIssue({ code: "custom", message: "A device is listed twice." });
   if (new Set(list.members.map((member) => member.name)).size !== list.members.length) context.addIssue({ code: "custom", message: "A name is listed twice." });
   if (!list.members.some((member) => member.key === list.admin)) context.addIssue({ code: "custom", message: "The admin is not a member." });
+  if (list.members.some((member) => member.gateway && member.key === list.admin)) context.addIssue({ code: "custom", message: "The admin is not a gateway." });
+  if ((list.v === 2) !== list.members.some((member) => member.gateway)) context.addIssue({ code: "custom", message: "A list names a gateway exactly when it is of v 2." });
 });
 export type MemberList = z.infer<typeof listSchema>;
 /** A member list as it is kept and sent: its JSON text and the admin's signature over it. */
@@ -103,9 +111,10 @@ export function firstList(mesh: string, admin: { key: PublicKey; name: string; a
   return listSchema.parse({ v: 1, mesh, admin: admin.key, version: after + 1, issuedAt: new Date(now).toISOString(), members: [{ key: admin.key, name: admin.name, ...admin.addresses?.length ? { addresses: admin.addresses } : {} }] });
 }
 
-/** The next version of a list, with `change` applied to its members. */
+/** The next version of a list, with `change` applied to its members: of v 2 when it names a gateway, else 1. */
 export function nextList(list: MemberList, change: (members: Member[]) => Member[], now: number): MemberList {
-  return listSchema.parse({ ...list, version: list.version + 1, issuedAt: new Date(now).toISOString(), members: change(list.members.map((member) => ({ ...member }))) });
+  const members = change(list.members.map((member) => ({ ...member })));
+  return listSchema.parse({ ...list, v: members.some((member) => member.gateway) ? 2 : 1, version: list.version + 1, issuedAt: new Date(now).toISOString(), members });
 }
 
 /** What a member may use here: what this device allows members, within that member's limit. */
@@ -144,8 +153,15 @@ export function planMesh({ self, mesh, allow, list, records, now }: { self: Publ
   for (const member of members) {
     const incoming = memberGrants(allow, member.limit);
     const existing = records.find((record) => record.publicKey === member.key);
+    const gateway = member.gateway ? { gateway: true as const } : {};
     if (existing) {
       if (existing.mesh !== mesh) continue;
+      // A member that became the gateway, or stopped being it, gets a new record under its name.
+      if (existing.gateway !== member.gateway) {
+        plan.remove.push({ name: existing.name, publicKey: existing.publicKey });
+        plan.create.push({ name: existing.name, record: { publicKey: member.key, addresses: member.addresses ?? [], pairedAt: existing.pairedAt, grants: { incoming, outgoing: [] }, mesh, ...gateway } });
+        continue;
+      }
       const current = existing.grants.incoming;
       if (current.length !== incoming.length || current.some((permission, index) => permission !== incoming[index])) plan.update.push({ name: existing.name, incoming });
       continue;
@@ -153,7 +169,7 @@ export function planMesh({ self, mesh, allow, list, records, now }: { self: Publ
     let name = member.name;
     for (let n = 2; taken.has(name); n++) name = `${member.name.slice(0, 60)}-${n}`;
     taken.add(name);
-    plan.create.push({ name, record: { publicKey: member.key, addresses: member.addresses ?? [], pairedAt: new Date(now).toISOString(), grants: { incoming, outgoing: [] }, mesh } });
+    plan.create.push({ name, record: { publicKey: member.key, addresses: member.addresses ?? [], pairedAt: new Date(now).toISOString(), grants: { incoming, outgoing: [] }, mesh, ...gateway } });
   }
   return plan;
 }
