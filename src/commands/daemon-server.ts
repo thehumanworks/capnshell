@@ -37,9 +37,9 @@ import { daemonStatePath, removeOwnedState, stateSchema, type DaemonStatus, type
 interface SocketData { transport?: BunWebSocketTransport<SocketData> }
 
 /**
- * A peer's file operations for a local client, such as the MCP file tools. Calls go to the
- * peer's own shell rather than a fork of it, so a paired device that grants only `files`
- * allows them; forking needs `shell`.
+ * A peer's file and skill reads and writes for a local client, such as the MCP tools. Calls go
+ * to the peer's own shell rather than a fork of it, so a paired device that grants only `files`,
+ * or `skills` for its skills, allows them; forking needs `shell`.
  */
 class PeerFiles extends RpcTarget {
   #files: ReturnType<ConnectionController["files"]>;
@@ -52,6 +52,9 @@ class PeerFiles extends RpcTarget {
   async glob(pattern: string, cwd: string, options?: GlobOptions) { return await this.#shell().glob(pattern, cwd, options); }
   async readFile(file: string, options?: ReadFileOptions) { return await this.#shell().readFile(file, options); }
   async writeFile(file: string, data: Uint8Array) { return await this.#shell().writeFile(file, data); }
+  async skills() { return await this.#shell().skills(); }
+  async skillFiles(name: string) { return await this.#shell().skillFiles(name); }
+  async readSkillFile(name: string, file: string, options?: ReadFileOptions) { return await this.#shell().readSkillFile(name, file, options); }
 }
 
 /** Only this narrow local control surface is exported over Cap'n Web. */

@@ -99,6 +99,33 @@ and with nothing readable by a device that may not read it.
 - The first consequence above about agents holds here too: an agent with `shell` on a
   reader can run `cns secret run`. There are still no MCP or pi tools for secrets.
 
+## Addendum, 2026-11-27: secrets for agents (cns 2.3.0)
+
+Tomas asked for MCP tools that let agents run commands with secrets. The first consequence
+above, "there are no MCP tools for secrets", changes as follows.
+
+- **The device that runs the program supplies the secrets.** `run_command` and `start_session`
+  take `secrets`, names written as for `--only`. They travel as a `secrets` option of the call
+  that starts the program, and the device it runs on opens its own copies and sets them as
+  the program's variables (GrantedShell). The values never cross a link, so they never reach
+  `cns mcp`, the gateway or the agent's results, unless the program prints them.
+- **No new access.** The option needs only what the call needs anyway: `shell` for a
+  command, `sessions:create` for a session. A program started with either can read every
+  secret on that device already (`cns secret get`, or the identity file itself), so a device's
+  grants mean what they meant before. `list_secrets` (the new host call `secretNames`) shows
+  names, meshes, readers and owners, never values, and needs `shell`.
+- **Named, never all.** As with `--only`, the agent names each secret, so the variables that
+  steer programs, such as `BASH_ENV`, are set only when named.
+- **Not offered:** tools that print, set or remove a secret. A value an agent printed would sit
+  in its transcript, and one it set would pass through it. `cns secret set --device` keeps a
+  secret off the devices agents use.
+- **The alternative** was `cns run --secret`'s path: the device running `cns mcp` opens its
+  copies and sends them. It works only for a local `cns mcp`, not the gateway, and gives an
+  agent every secret on that device, which it cannot read today.
+- A device from before 2.3.0 refuses the unknown option before starting anything, and lacks
+  `secretNames`; the tools then say to update it. A call without `secrets` sends no option, so
+  it still runs on older devices.
+
 ## Alternatives considered
 
 - **Fetching from the owner when needed.** Simpler, but it fails whenever the owner sleeps,

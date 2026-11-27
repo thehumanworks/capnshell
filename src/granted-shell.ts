@@ -1,8 +1,32 @@
 import { RpcTarget } from "capnweb";
+import { z } from "zod";
 import { describeGrants, type Permission } from "./peers.js";
+import { envSchema, MAX_ENV_VARIABLES } from "./platform.js";
 import {
-  ShellApi, type AttachOptions, type CaptureOptions, type KeysOptions, type NamedPty, type PtyAttachment, type PtySink, type ShellInfo, type WaitOptions,
+  ShellApi, type AttachOptions, type CaptureOptions, type KeysOptions, type NamedPty, type PtyAttachment, type PtySessionOptions, type PtySink,
+  type RunOptions, type ShellInfo, type WaitOptions,
 } from "./shell.js";
+
+/** A mesh secret this device reads, as a paired device sees it: by name, never its value. */
+export interface SecretSummary {
+  mesh: string;
+  name: string;
+  /** "this device" for a secret set for this member alone, else "all members". */
+  readBy: string;
+  /** Who set it, by this device's name for them; two when two members set the name, and then it cannot be used. */
+  setBy: string[];
+}
+/** This device's mesh secrets, for programs a paired device starts here (secret-cli.ts). */
+export interface SecretsHere {
+  list(): SecretSummary[];
+  /** The variables the secrets `names` name, each NAME or MESH:NAME, as this device reads them. */
+  variables(names: string[]): Record<string, string>;
+}
+const noSecrets: SecretsHere = { list: () => [], variables: () => { throw new Error("This device keeps no mesh secrets."); } };
+/** What a call's `secrets` option holds: the names of mesh secrets to set as the program's variables. */
+const secretNamesSchema = z.array(z.string().min(1).max(256)).min(1).max(MAX_ENV_VARIABLES);
+/** Options that may name secrets, which this device turns into variables before the program starts. */
+export type WithSecrets<T> = T & { secrets?: string[] };
 
 /**
  * A peer's view of this device's shell, limited to what this device granted it.
@@ -25,13 +49,15 @@ export class GrantedShell extends RpcTarget {
   #addresses: () => string[];
   #meshes: (offered: unknown) => unknown[];
   #secrets: (offered: unknown) => unknown[];
+  #secretsHere: SecretsHere;
   /**
    * `owner` is the peer's fingerprint, the owner of the sessions it starts here.
    * `addresses` says where this device can be reached now, which any paired device may ask.
    * `meshes` takes the mesh member lists the peer offers and answers with the ones it is in (mesh.ts).
    * `secrets` takes the mesh secrets the peer offers and answers with the ones it may read (secrets.ts).
+   * `secretsHere` opens the ones this device reads for the programs the peer starts here.
    */
-  constructor(shell: ShellApi, grants: readonly Permission[] | GrantHolder, peer: string, owner: string | null = null, addresses: () => string[] = () => [], meshes: (offered: unknown) => unknown[] = () => [], secrets: (offered: unknown) => unknown[] = () => []) {
+  constructor(shell: ShellApi, grants: readonly Permission[] | GrantHolder, peer: string, owner: string | null = null, addresses: () => string[] = () => [], meshes: (offered: unknown) => unknown[] = () => [], secrets: (offered: unknown) => unknown[] = () => [], secretsHere: SecretsHere = noSecrets) {
     super();
     this.#shell = shell;
     this.#grants = Array.isArray(grants) ? { current: [...grants] } : grants as GrantHolder;
@@ -40,6 +66,7 @@ export class GrantedShell extends RpcTarget {
     this.#addresses = addresses;
     this.#meshes = meshes;
     this.#secrets = secrets;
+    this.#secretsHere = secretsHere;
   }
   /** Where this device can be reached now, so a paired device can keep its saved record current. It needs no grant. */
   addresses(): string[] { return [...this.#addresses()]; }
@@ -61,11 +88,28 @@ export class GrantedShell extends RpcTarget {
   get grants(): string { return describeGrants([...this.#grants.current]); }
   #require(...permissions: Permission[]) { require(this.#grants, this.#peer, permissions); }
   info(): ShellInfo { return this.#shell.info(); }
-  run(...args: Parameters<ShellApi["run"]>) { this.#require("shell"); return this.#shell.run(...args); }
+  /**
+   * `secrets` names mesh secrets this device reads, which the program gets as variables. A peer
+   * that may start a program here could read them here anyway, and their values stay here.
+   */
+  run(command: string, options?: WithSecrets<RunOptions>) { this.#require("shell"); return this.#shell.run(command, this.#withSecrets(options)); }
   exec(...args: Parameters<ShellApi["exec"]>) { this.#require("shell"); return this.#shell.exec(...args); }
   openPty(...args: Parameters<ShellApi["openPty"]>) { this.#require("shell"); return this.#shell.openPty(...args); }
   /** A fork carries the same grants. */
-  fork(): GrantedShell { this.#require("shell"); return new GrantedShell(this.#shell.fork(), this.#grants, this.#peer, this.#owner, this.#addresses, this.#meshes, this.#secrets); }
+  fork(): GrantedShell { this.#require("shell"); return new GrantedShell(this.#shell.fork(), this.#grants, this.#peer, this.#owner, this.#addresses, this.#meshes, this.#secrets, this.#secretsHere); }
+  /** The mesh secrets this device reads, by name and never by value, which run's and startPtySession's `secrets` take. */
+  secretNames(): SecretSummary[] { this.#require("shell"); return this.#secretsHere.list(); }
+  /** `options` with the secrets it names opened here and added to its variables. */
+  #withSecrets<T extends object>(options: WithSecrets<T> | undefined): T | undefined {
+    if (!options || typeof options !== "object" || !("secrets" in options)) return options;
+    const { secrets, ...rest } = options;
+    if (secrets === undefined) return rest as T;
+    const env = envSchema.optional().parse((rest as { env?: unknown }).env) ?? {};
+    const variables = this.#secretsHere.variables(secretNamesSchema.parse(secrets));
+    const twice = Object.keys(variables).find((name) => Object.hasOwn(env, name));
+    if (twice) throw new Error(`${twice} is given both as a variable and as a secret; give it once.`);
+    return { ...rest, env: { ...env, ...variables } } as T;
+  }
   stat(...args: Parameters<ShellApi["stat"]>) { this.#require("files"); return this.#shell.stat(...args); }
   access(...args: Parameters<ShellApi["access"]>) { this.#require("files"); return this.#shell.access(...args); }
   readdir(...args: Parameters<ShellApi["readdir"]>) { this.#require("files"); return this.#shell.readdir(...args); }
@@ -82,9 +126,9 @@ export class GrantedShell extends RpcTarget {
   readSkillFile(...args: Parameters<ShellApi["readSkillFile"]>) { this.#requireSkills(); return this.#shell.readSkillFile(...args); }
   ptySessions() { this.#require("sessions:list"); return this.#shell.ptySessions(); }
   /** Starting a session needs `sessions:create`; the peer then owns it and may view, type into and kill it. */
-  startPtySession(...args: Parameters<ShellApi["startPtySession"]>) {
+  startPtySession(name: string, options?: WithSecrets<PtySessionOptions>) {
     this.#require("sessions:create");
-    return new GrantedNamedPty(this.#shell.startPtySession(...args), this.#grants, this.#peer, this.#owner);
+    return new GrantedNamedPty(this.#shell.startPtySession(name, this.#withSecrets(options)), this.#grants, this.#peer, this.#owner);
   }
   /**
    * A handle on a session, whose every use is checked: info, capture, wait and attach need

@@ -5,7 +5,7 @@ import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { serve } from "bun";
 import { errorMessage } from "../errors.js";
 import { LegacySessions } from "../mcp/legacy-sessions.js";
-import { createMcpServer } from "../mcp/server.js";
+import { createMcpServer, type McpServerOptions } from "../mcp/server.js";
 import { daemonTarget, pairedTarget, type McpTarget } from "../mcp/target.js";
 import type { McpConfig } from "../options.js";
 
@@ -16,13 +16,14 @@ const tokenPattern = /^[A-Za-z0-9._~+/-]{32,1024}=*$/;
 /** Serve the MCP tools on stdio or Streamable HTTP until stopped. */
 export async function startMcp(config: McpConfig): Promise<void> {
   const target = config.expect ? pairedTarget(config.expect, config.cwd) : daemonTarget(config.state, config.cwd);
-  if (config.http) await serveHttp(target, config.http);
-  else await serveOnStdio(target);
+  const options = { env: config.env };
+  if (config.http) await serveHttp(target, config.http, options);
+  else await serveOnStdio(target, options);
 }
 
 /** Answer until stdin closes or a signal arrives. Stdout carries only MCP messages. */
-async function serveOnStdio(target: McpTarget): Promise<void> {
-  const handle = serveStdio(() => createMcpServer(target), {
+async function serveOnStdio(target: McpTarget, options: McpServerOptions): Promise<void> {
+  const handle = serveStdio(() => createMcpServer(target, options), {
     onerror: (error) => console.error(`MCP: ${errorMessage(error)}`),
   });
   await new Promise<void>((resolve) => {
@@ -66,13 +67,13 @@ interface HttpOptions { bind: string; port: number; remote: boolean }
  * bearer token, and browsers are refused outright: their pages could otherwise
  * reach a local endpoint, and no MCP client of this server is a web page.
  */
-export async function serveHttp(target: McpTarget, { bind, port, remote }: HttpOptions): Promise<void> {
+export async function serveHttp(target: McpTarget, { bind, port, remote }: HttpOptions, options: McpServerOptions = {}): Promise<void> {
   const { token, generated } = readToken();
   const expected = Buffer.from(`Bearer ${token}`);
   const host = isIP(bind) === 6 ? `[${bind}]` : bind;
   // Loopback endpoints also reject DNS-rebound host names; remote ones rely on the token.
   const hostnames = remote ? undefined : [...new Set([...localhostAllowedHostnames(), host])];
-  const build = () => createMcpServer(target);
+  const build = () => createMcpServer(target, options);
   const onerror = (error: Error) => console.error(`MCP: ${errorMessage(error)}`);
   const modern = createMcpHandler(build, { legacy: "reject", onerror });
   const legacy = new LegacySessions(build, onerror);

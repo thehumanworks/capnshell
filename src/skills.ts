@@ -98,6 +98,20 @@ async function walk(directory: string, limit: number): Promise<{ files: SkillFil
   return { files, complete };
 }
 
+/**
+ * The copies of each skill, newest first. Times are compared to the second, so a copy that
+ * cns skills sync made, which keeps its source's times, ties with it; a tie goes to this
+ * device, then to the device whose name sorts first.
+ */
+export function byNewest<T extends { name: string; modifiedMs: number; device?: string }>(copies: readonly T[]): Map<string, T[]> {
+  const second = (ms: number) => Math.floor(ms / 1000);
+  const order = (a: T, b: T) => second(b.modifiedMs) - second(a.modifiedMs)
+    || (a.device === b.device ? 0 : a.device === undefined ? -1 : b.device === undefined ? 1 : a.device < b.device ? -1 : 1);
+  const groups = new Map<string, T[]>();
+  for (const copy of copies) groups.set(copy.name, [...groups.get(copy.name) ?? [], copy]);
+  return new Map([...groups].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([name, group]) => [name, group.sort(order)]));
+}
+
 /** SKILL.md, or another spelling of it such as skill.md, among a skill's files. */
 export const mainFile = (files: readonly SkillFile[]): SkillFile | undefined => files.find((file) => file.path === "SKILL.md") ?? files.find((file) => /^skill\.md$/i.test(file.path));
 
