@@ -61,5 +61,16 @@ shell command (`cns run DEVICE -- cat ...`) needs `shell`, which is more again.
   skill of more than 1,000 files is listed but cannot be listed file by file or copied.
 - `rg` reads the files it searches over the link; a search on the device would be faster for
   large sets of skills, at the cost of another method.
-- Not built: an MCP tool for skills, which would also need a gateway release, and a sync that
-  deletes files the source no longer has.
+- Not built: a sync that deletes files the source no longer has.
+
+## Addendum, 2026-11-27: skills for agents over MCP (cns 2.3.0)
+
+- `cns mcp` and the gateway offer `list_skills`, `read_skill` and `search_skills`, the
+  agent's `cns skills list`, `load`/`ls`/`cat` and `rg` over the peers the server reaches.
+  They use the same host calls, so the same grants apply (`skills`, or `files`), and pick the
+  newest copy the same way. Without `peer` they ask every peer at once, each for at most 10
+  seconds, and report the ones that did not answer or refused.
+- A server has no device of its own, so its own `~/.agents/skills` is not listed, and there is
+  no sync tool: an agent that needs a copy can read the files and write them with `write_file`.
+- Through the local daemon, the skill calls go through the daemon's file handle for the peer,
+  so a daemon from before 2.3.0 refuses them; the tools then say to restart it.

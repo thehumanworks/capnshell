@@ -451,8 +451,8 @@ Restarting ends the daemon's named sessions. A daemon that runs a newer cns than
 | Tool | Purpose |
 | --- | --- |
 | `list_peers` | Each peer's ID, hostname, OS, shell, home directory and cns version. |
-| `run_command` | Run one command as `cns run` does and return its exit code, stdout and stderr. |
-| `start_session` | Start a named PTY session, as `cns shell --name` does, optionally waiting for its first screen. |
+| `run_command` | Run one command as `cns run` does and return its exit code, stdout and stderr. `secrets` sets mesh secrets the peer holds as its variables. |
+| `start_session` | Start a named PTY session, as `cns shell --name` does, optionally waiting for its first screen. Takes `secrets` too. |
 | `send_keys` | Send keys and text, as `cns keys` does, optionally waiting for the screen they produce. |
 | `read_screen` | Return the rendered screen, as `cns screen` does, optionally once it shows some text. |
 | `list_sessions` | A peer's named sessions. |
@@ -461,10 +461,18 @@ Restarting ends the daemon's named sessions. A daemon that runs a newer cns than
 | `write_file` | Create or replace a file with UTF-8 text, up to 4 MiB, creating missing parent directories. |
 | `list_directory` | A directory's entries and their kinds. |
 | `glob` | Absolute paths of files matching a pattern such as `**/*.ts`, with `ignore` patterns. |
+| `list_skills` | The agent skills on every peer, or one, as `cns skills list` shows them: each once, from the newest copy. |
+| `read_skill` | A skill's `SKILL.md`, or another of its files, and the list of its files, as `cns skills load` and `cat` do. |
+| `search_skills` | Lines of skills that match a regular expression, as `cns skills rg` finds them. |
+| `list_secrets` | The mesh secrets a peer holds, by name, as `cns secret list` shows them there; never their values. |
 
 `list_peers` also gives each paired device's `name` and `fingerprint`, and `peer` accepts the name. Results include text for the agent and structured content matching each tool's output schema. A command that exits nonzero is a normal result with its exit code; an unreachable peer, a missing session or invalid arguments are tool errors. `run_command` has a default deadline of 120 seconds (`timeoutMs: 0` removes it) and returns the start and end of output longer than 30,000 characters. Peers still keep at most 1 MiB. With several devices linked to the daemon, calls must name a `peer`.
 
-The file tools take paths in the peer's own syntax. A relative path starts from `--cwd`, else the peer user's home, and `~` means that home. `read_file` refuses binary files and returns at most 30,000 characters per call. These tools need the `files` grant (`cns peer grant NAME files` on that device); without it they fail with a permission error, while `run_command` only needs `shell`.
+The file tools take paths in the peer's own syntax. A relative path starts from `--cwd`, else the peer user's home, and `~` means that home. `read_file` refuses binary files and returns at most 30,000 characters per call. These tools need the `files` grant (`cns peer grant NAME files` on that device); without it they fail with a permission error, while `run_command` only needs `shell`. The skill tools need `skills` or `files`.
+
+`secrets: ["API_KEY", "work:TOKEN"]` on `run_command` or `start_session` names mesh secrets that the peer itself holds, as a member of their mesh. The peer opens its own copies and sets them as the program's variables, as `cns secret run --only` does there, so the values never pass through `cns mcp`, the gateway or the agent's results, unless the program prints them. It needs what the call needs anyway (`shell`, or `sessions:create` for a session), with which a program could read the secrets on that device already, so no grant changes. `list_secrets` needs `shell`. The peer needs cns 2.3.0 or later; an older one refuses before starting anything. There are no tools to print, set or remove a secret: keep a secret off devices agents use with `cns secret set --device`.
+
+`cns mcp --env GITHUB_TOKEN,NPM_TOKEN` (or `CNS_MCP_ENV`) offers variables of the `cns mcp` process itself, such as ones the MCP client's configuration sets, to the same tools: `env: ["GITHUB_TOKEN"]` sets it, with its value there, for the program on the device, and the agent never sees the value unless the program prints it. Only the names listed are offered, and the tool's schema lists them; without `--env`, there is no `env` argument. The gateway has no environment of its own to pass on, so it offers `secrets` only.
 
 By default the client starts `cns mcp` and talks to it over stdin and stdout. With a device's name, `cns mcp studio`, the tools use that paired device, reaching it for each call as `cns run` does: over the local daemon's link to it, or a connection of their own. Without one (`--state PATH` names another daemon) they use the devices linked to this device's daemon, chosen by name in each call, which suits devices that only link out to yours. `--cwd PATH` (or `CNS_CWD`) sets the working directory for calls that do not pass `cwd`.
 

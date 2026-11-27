@@ -7,6 +7,7 @@ import { peerNamePattern } from "../peer-files.js";
 import { getPeer, listPeers } from "../peers.js";
 import { bash, powershell, powershellArgs } from "../platform.js";
 import { heldSecrets, keepSecret, MAX_SECRETS, MAX_VALUE_BYTES, openSecret, sealSecret, secretNamePattern, type HeldSecret } from "../secrets.js";
+import type { SecretsHere } from "../granted-shell.js";
 import { secureReady } from "../secure.js";
 import { versionOrder } from "../version.js";
 import { connectControl } from "./daemon.js";
@@ -291,21 +292,43 @@ export async function getSecret(first: string, second: string | undefined, optio
  * options, never in its text.
  */
 export async function secretEnv(values: readonly string[]): Promise<Record<string, string>> {
-  const refs = refsOf("--secret", values);
-  const identity = await setup();
+  return variables(await setup(), refsOf("--secret", values), "--secret", noSecret);
+}
+
+/** The variables the secrets `refs` name become here. `flag` is what named them, for messages. */
+function variables(identity: Identity, refs: readonly SecretRef[], flag: string, none: (ref: SecretRef) => () => Error): Record<string, string> {
   const self = identity.publicKey;
   const all = readable(self, memberMeshes(self));
   const env: Record<string, string> = {};
   const from = new Map<string, string>();
   for (const ref of refs) {
     if (ref.mesh !== undefined) memberOf(ref.mesh, self);
-    const found = single(all, ref, (mesh) => `--secret ${mesh}:${ref.name}`, noSecret(ref));
+    const found = single(all, ref, (mesh) => `${flag} ${mesh}:${ref.name}`, none(ref));
     const earlier = from.get(found.name);
-    if (earlier !== undefined && earlier !== found.state.name) throw new Error(`--secret names ${found.name} in both ${earlier} and ${found.state.name}, and the variable ${found.name} holds one value. Name one of them.`);
+    if (earlier !== undefined && earlier !== found.state.name) throw new Error(`${flag} names ${found.name} in both ${earlier} and ${found.state.name}, and the variable ${found.name} holds one value. Name one of them.`);
     from.set(found.name, found.state.name);
     env[found.name] = asVariable(identity, found);
   }
   return env;
+}
+
+/**
+ * This device's mesh secrets for the programs a paired device starts here, such as an agent's
+ * through cns mcp or the gateway: their names, and the variables the ones a call names become.
+ * Starting a program here could read them anyway, so this gives the device nothing new, and
+ * the values never leave this device.
+ */
+export function secretsHere(identity: Identity): SecretsHere {
+  const self = identity.publicKey;
+  const summaries = () => readable(self, memberMeshes(self)).map(({ state, name, copies }) => ({
+    mesh: state.name, name, readBy: copies[0]!.record.device === undefined ? "all members" : "this device",
+    setBy: [...new Set(copies.map(({ record }) => nameOf(state, record.owner, self)))],
+  }));
+  const none = (ref: SecretRef) => () => {
+    const held = summaries().map((secret) => `${secret.mesh}:${secret.name}`);
+    return new Error(`This device holds no mesh secret ${ref.name}${ref.mesh === undefined ? "" : ` in ${ref.mesh}`}. ${held.length ? `It holds ${list(held)}.` : "It holds none."}`);
+  };
+  return { list: summaries, variables: (names) => variables(identity, refsOf("secrets", names), "secrets", none) };
 }
 
 /**

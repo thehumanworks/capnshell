@@ -1,4 +1,5 @@
 import type { RpcStub } from "capnweb";
+import type { GrantedShell } from "../src/granted-shell.js";
 import { fingerprint, type Identity, type PublicKey } from "../src/identity.js";
 import { DEVICE_PEER, MAX_CALLS, type Link, type McpTarget, type PeerFiles, type ToolController } from "../src/mcp/target.js";
 import { dialAddresses, isRelayAddress } from "../src/relay-hub.js";
@@ -96,6 +97,7 @@ export function gatewayTarget(approved: () => readonly GatewayDevice[], identity
         },
         async ptySession(id, name) { return await (await remote(id)).ptySession(name) as unknown as RemoteNamedPty; },
         async files(id) { return await remote(id) as unknown as PeerFiles; },
+        async secrets(id) { return await plain((await remote(id) as unknown as RpcStub<GrantedShell>).secretNames()); },
       };
       return {
         controller,

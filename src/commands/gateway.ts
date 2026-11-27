@@ -15,7 +15,7 @@ import { TOOL_NAMES, type ToolName } from "../mcp/server.js";
 export const DEFAULT_GATEWAY = "https://gateway.cns.nothuman.work";
 
 /** What `--tools read` approves: tools that look, and change nothing. */
-export const READ_TOOLS: readonly ToolName[] = ["list_peers", "read_file", "list_directory", "glob", "list_sessions", "read_screen"];
+export const READ_TOOLS: readonly ToolName[] = ["list_peers", "read_file", "list_directory", "glob", "list_sessions", "read_screen", "list_skills", "read_skill", "search_skills"];
 
 export interface GatewayOptions { url?: string; json?: boolean }
 

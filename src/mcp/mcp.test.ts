@@ -1,16 +1,18 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { Client, InMemoryTransport, StreamableHTTPClientTransport, type CallToolResult } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
-import { newBunWebSocketRpcSession, RpcTarget, type BunWebSocketTransport } from "capnweb";
+import { newBunWebSocketRpcSession, newMessagePortRpcSession, RpcTarget, type BunWebSocketTransport } from "capnweb";
 import { connectControl } from "../commands/daemon.js";
-import { GrantedShell } from "../granted-shell.js";
+import { GrantedShell, type SecretsHere } from "../granted-shell.js";
 import type { Permission } from "../peers.js";
-import { ShellApi, type FileChunk } from "../shell.js";
+import { ShellApi, type FileChunk, type ShellInfo } from "../shell.js";
+import { plain } from "../terminal.js";
+import { listSkillFiles, listSkills, readSkillFile } from "../skills.js";
 import { cliEnvironment, cliInvocation, launchCli, settledLink, testDevices, unusedPort } from "../test-support.js";
 import { LegacySessions, MAX_SESSIONS } from "./legacy-sessions.js";
 import { clip, createMcpServer, MAX_RESULT_CHARS, readLines } from "./server.js";
@@ -234,7 +236,7 @@ test("stdio MCP server runs commands on a paired device and reports failures as 
   assert.match(client.getInstructions() ?? "", /run_command/);
   const { tools } = await client.listTools();
   assert.deepEqual(tools.map((tool) => tool.name).sort(),
-    ["glob", "kill_session", "list_directory", "list_peers", "list_sessions", "read_file", "read_screen", "run_command", "send_keys", "start_session", "write_file"]);
+    ["glob", "kill_session", "list_directory", "list_peers", "list_secrets", "list_sessions", "list_skills", "read_file", "read_screen", "read_skill", "run_command", "search_skills", "send_keys", "start_session", "write_file"]);
   const run = tools.find((tool) => tool.name === "run_command")!;
   assert.equal(run.annotations?.destructiveHint, true);
   assert.equal(run.annotations?.readOnlyHint, false);
@@ -485,7 +487,7 @@ test("the daemon target chooses among linked devices and kills cancelled command
     await settledLink(watcher, name);
     return device;
   };
-  await linked("first", "FIRST");
+  const firstDevice = await linked("first", "FIRST");
   assert.equal(succeeded(await client.callTool({ name: "list_peers", arguments: {} })).peers.length, 1);
   const only = succeeded(await client.callTool({ name: "run_command", arguments: { command: `printf "$CNS_TEST_PEER"` } }));
   assert.equal(only.stdout, "FIRST");
@@ -496,7 +498,7 @@ test("the daemon target chooses among linked devices and kills cancelled command
   assert.equal(succeeded(await client.callTool({ name: "read_file", arguments: { path: noteFile } })).content, "via daemon");
   assert.deepEqual(succeeded(await client.callTool({ name: "glob", arguments: { pattern: "**/*.txt", path: directory } })).paths, [noteFile]);
 
-  await linked("second", "SECOND");
+  const secondDevice = await linked("second", "SECOND");
   const both = succeeded(await client.callTool({ name: "list_peers", arguments: {} }));
   assert.equal(both.peers.length, 2);
   // Through the daemon too: the version survives the daemon's check of each device's handshake.
@@ -505,6 +507,14 @@ test("the daemon target chooses among linked devices and kills cancelled command
   assert.equal(ambiguous.isError, true);
   assert.match(text(ambiguous), /Several peers are connected \(first \(p\d+\), second \(p\d+\)\); pass peer/);
   assert.equal(succeeded(await client.callTool({ name: "run_command", arguments: { command: `printf "$CNS_TEST_PEER"`, peer: "second" } })).stdout, "SECOND");
+
+  // Each device's skills, through the daemon with the files grant: listed once, from the newest copy.
+  await skill(path.join(firstDevice.dir, ".agents", "skills"), "notes", { "SKILL.md": "---\ndescription: Take notes\n---\nfirst\n" }, 1_900_000_000);
+  await skill(path.join(secondDevice.dir, ".agents", "skills"), "notes", { "SKILL.md": "---\ndescription: Take notes\n---\nsecond\n" }, 2_000_000_000);
+  const skills = succeeded(await client.callTool({ name: "list_skills", arguments: {} }));
+  assert.deepEqual(skills.skills.map(({ name, peer, alsoOn }: Record<string, unknown>) => ({ name, peer, alsoOn })), [{ name: "notes", peer: "second", alsoOn: ["first"] }]);
+  assert.equal(succeeded(await client.callTool({ name: "read_skill", arguments: { name: "notes" } })).content.split("\n").at(-1), "second");
+  assert.equal(succeeded(await client.callTool({ name: "read_skill", arguments: { name: "notes", peer: "first", offset: 4 } })).content, "first");
 
   const controller = new AbortController();
   const pidFile = path.join(directory, "daemon.pid");
@@ -744,4 +754,238 @@ test("a server limited to some tools lists and runs only those, and reports each
   assert.equal(failed.isError, true);
   assert.deepEqual(calls.map(({ tool, ok }) => ({ tool, ok })), [{ tool: "run_command", ok: true }, { tool: "read_file", ok: false }]);
   assert.equal(calls[0]!.args.command, "echo hi");
+});
+
+/** A skill in `root`: a directory with these files, all last changed at `modified` seconds. */
+async function skill(root: string, name: string, files: Record<string, string>, modified: number) {
+  for (const [file, content] of Object.entries(files)) {
+    const full = path.join(root, name, ...file.split("/"));
+    await mkdir(path.dirname(full), { recursive: true });
+    await writeFile(full, content);
+    await utimes(full, modified, modified);
+  }
+}
+
+/** An in-process client whose peers are named devices, each with the skills in its own directory; `refusing` grant none. */
+async function skillsClient(t: TestContext, roots: Record<string, string>, refusing: string[] = []) {
+  const info = new ShellApi().info();
+  const target: McpTarget = {
+    label: "test peers",
+    async open() {
+      return {
+        controller: {
+          peers: async () => Object.keys(roots).map((name) => ({ id: name, info, peer: { name, fingerprint: "f", daemon: true, via: "direct" as const } })),
+          files: async (id: string) => ({
+            async skills() {
+              if (refusing.includes(id)) throw new Error("Permission denied: skills not granted to laptop.");
+              return await listSkills(roots[id]);
+            },
+            skillFiles: (name: string) => listSkillFiles(name, roots[id]),
+            readSkillFile: (name: string, file: string, options: { offset?: number }) => readSkillFile(name, file, options, roots[id]),
+          }) as unknown as PeerFiles,
+        } as unknown as ToolController,
+        peer: async (requested) => requested ?? assert.fail("pass peer"),
+        lost: false,
+        close() {},
+      };
+    },
+  };
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+  const server = createMcpServer(target);
+  await server.connect(serverSide);
+  const client = new Client({ name: "cns-tests", version: "1" });
+  await client.connect(clientSide);
+  t.after(async () => { await client.close(); await server.close(); });
+  return client;
+}
+
+test("skill tools list every peer's skills once, newest first, and read and search them", async (t) => {
+  const studio = await temporaryDirectory(t);
+  const mini = await temporaryDirectory(t);
+  await skill(studio, "pdf", { "SKILL.md": "---\ndescription: Fill PDF forms\n---\nRun scripts/fill.py.\n", "scripts/fill.py": "print('fill')\n" }, 2_000_000_000);
+  await skill(mini, "pdf", { "SKILL.md": "---\ndescription: An older copy\n---\nold\n" }, 1_900_000_000);
+  await skill(mini, "deploy", { "SKILL.md": "---\ndescription: Ship a release\n---\nRun make release, then Release notes.\n" }, 1_900_000_000);
+  const client = await skillsClient(t, { studio, mini, laptop: mini }, ["laptop"]);
+
+  const listed = succeeded(await client.callTool({ name: "list_skills", arguments: {} }));
+  assert.deepEqual(listed.skills.map(({ name, peer, alsoOn, description }: Record<string, unknown>) => ({ name, peer, alsoOn, description })), [
+    { name: "deploy", peer: "mini", alsoOn: [], description: "Ship a release" },
+    { name: "pdf", peer: "studio", alsoOn: ["mini"], description: "Fill PDF forms" },
+  ]);
+  assert.deepEqual(listed.unlisted, [{ peer: "laptop", reason: listed.unlisted[0].reason }]);
+  assert.match(listed.unlisted[0].reason, /Permission denied: skills not granted to laptop\./);
+  assert.deepEqual(succeeded(await client.callTool({ name: "list_skills", arguments: { peer: "mini" } })).skills.map((entry: { name: string }) => entry.name), ["deploy", "pdf"]);
+  const refused = await client.callTool({ name: "list_skills", arguments: { peer: "laptop" } });
+  assert.equal(refused.isError, true);
+
+  // The newest copy unless a peer is named, its SKILL.md unless a file is.
+  const main = await client.callTool({ name: "read_skill", arguments: { name: "pdf" } });
+  assert.deepEqual([structured(main).peer, structured(main).file, structured(main).totalLines], ["studio", "SKILL.md", 4]);
+  assert.deepEqual(structured(main).files, [{ path: "SKILL.md", size: 57 }, { path: "scripts/fill.py", size: 14 }]);
+  assert.match(text(main), /^\[pdf\/SKILL\.md on studio: lines 1-4 of 4 .*\]\n---\ndescription: Fill PDF forms\n---\nRun scripts\/fill\.py\.\n\[Other files of pdf: scripts\/fill\.py\. Read one with read_skill and file\.\]$/);
+  assert.equal(succeeded(await client.callTool({ name: "read_skill", arguments: { name: "pdf", file: "scripts/fill.py" } })).content, "print('fill')");
+  assert.equal(succeeded(await client.callTool({ name: "read_skill", arguments: { name: "pdf", peer: "mini", offset: 4 } })).content, "old");
+  const absent = await client.callTool({ name: "read_skill", arguments: { name: "nope" } });
+  assert.equal(absent.isError, true);
+  assert.match(text(absent), /No skill nope on the peers that answered\. Skills there: pdf, deploy\. Not listed: laptop \(Permission denied/);
+  const outside = await client.callTool({ name: "read_skill", arguments: { name: "pdf", file: "../deploy/SKILL.md" } });
+  assert.equal(outside.isError, true);
+
+  const found = succeeded(await client.callTool({ name: "search_skills", arguments: { pattern: "release", ignoreCase: true } }));
+  assert.deepEqual(found.matches, [{ peer: "mini", skill: "deploy", file: "SKILL.md", line: 2, text: "description: Ship a release" }, { peer: "mini", skill: "deploy", file: "SKILL.md", line: 4, text: "Run make release, then Release notes." }]);
+  assert.equal(found.truncated, false);
+  const capped = await client.callTool({ name: "search_skills", arguments: { pattern: "e", limit: 1 } });
+  assert.deepEqual([structured(capped).matches.length, structured(capped).truncated], [1, true]);
+  assert.match(text(capped), /^\[1 matching line in 2 skills, more not shown\]\nmini:deploy\/SKILL\.md:1: ---|^\[1 matching line in 2 skills, more not shown\]\ndeploy\/SKILL\.md:2: /);
+  // Only the newest copy of each skill is searched, and only the skills named.
+  assert.deepEqual(succeeded(await client.callTool({ name: "search_skills", arguments: { pattern: "old|fill", skills: ["pdf"] } })).matches.map((match: { file: string }) => match.file), ["SKILL.md", "scripts/fill.py"]);
+  const bad = await client.callTool({ name: "search_skills", arguments: { pattern: "(" } });
+  assert.equal(bad.isError, true);
+  assert.match(text(bad), /is not a regular expression/);
+});
+
+/** An in-process client whose one peer is this machine's shell with `grants`, holding the secrets `held`; `version` is what it reports. */
+async function secretsClient(t: TestContext, grants: Permission[], held: Record<string, string>, version?: string, shell?: ShellApi, env?: string[]) {
+  const here: SecretsHere = {
+    list: () => Object.keys(held).map((name) => ({ mesh: "home", name, readBy: name === "MINE" ? "this device" : "all members", setBy: name === "MINE" ? ["this device"] : ["laptop"] })),
+    variables(names) {
+      const missing = names.find((name) => !(name.replace(/^home:/, "") in held));
+      if (missing) throw new Error(`This device holds no mesh secret ${missing}.`);
+      return Object.fromEntries(names.map((name) => [name.replace(/^home:/, ""), held[name.replace(/^home:/, "")]!]));
+    },
+  };
+  // Over Cap'n Web, as a peer is reached.
+  const channel = new MessageChannel();
+  newMessagePortRpcSession(channel.port1, shell ?? new GrantedShell(new ShellApi(), grants, "laptop", null, undefined, undefined, undefined, here));
+  const peer = newMessagePortRpcSession<GrantedShell>(channel.port2);
+  t.after(() => { peer[Symbol.dispose](); channel.port1.close(); channel.port2.close(); });
+  const info: ShellInfo = { ...new ShellApi().info(), ...version ? { version } : {} };
+  const target: McpTarget = {
+    label: "studio",
+    async open() {
+      return {
+        controller: {
+          peers: async () => [{ id: "p1", info, peer: { name: "studio", fingerprint: "f", daemon: true, via: "direct" as const } }],
+          run: async (_id: string, command: string, options: object) => await plain(peer.run(command, options)),
+          async startPtySession(_id: string, name: string, options: object) {
+            using session = await peer.startPtySession(name, options);
+            return await plain(session.info());
+          },
+          ptySessions: async () => await plain(peer.ptySessions()),
+          ptySession: async (_id: string, name: string) => await peer.ptySession(name),
+          // As through a daemon: a fork of the peer's shell.
+          async secrets() {
+            using fork = await peer.fork();
+            return await plain(fork.secretNames());
+          },
+        } as unknown as ToolController,
+        peer: async () => "p1",
+        lost: false,
+        close() {},
+      };
+    },
+  };
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+  const server = createMcpServer(target, { env });
+  await server.connect(serverSide);
+  const client = new Client({ name: "cns-tests", version: "1" });
+  await client.connect(clientSide);
+  t.after(async () => { await client.close(); await server.close(); });
+  return client;
+}
+
+test("commands and sessions get the secrets their peer holds as variables, which only shell lists, by name", { skip: !posix, timeout: 30000 }, async (t) => {
+  const client = await secretsClient(t, ["shell", "sessions:create", "sessions:list", "sessions:view", "sessions:kill"], { API_KEY: "sk-home", MINE: "m" });
+  const listed = succeeded(await client.callTool({ name: "list_secrets", arguments: {} }));
+  assert.deepEqual(listed, { peer: "studio", secrets: [
+    { mesh: "home", name: "API_KEY", readBy: "all members", setBy: ["laptop"] }, { mesh: "home", name: "MINE", readBy: "studio only", setBy: ["studio"] },
+  ] });
+  const show = `printf '%s|%s' "\${API_KEY-unset}" "\${MINE-unset}"`;
+  assert.equal(succeeded(await client.callTool({ name: "run_command", arguments: { command: show, secrets: ["home:API_KEY"] } })).stdout, "sk-home|unset");
+  assert.equal(succeeded(await client.callTool({ name: "run_command", arguments: { command: show } })).stdout, "unset|unset");
+  const missing = await client.callTool({ name: "run_command", arguments: { command: show, secrets: ["NOPE"] } });
+  assert.equal(missing.isError, true);
+  assert.match(text(missing), /This device holds no mesh secret NOPE\./);
+  const invalid = await client.callTool({ name: "run_command", arguments: { command: show, secrets: ["not a name"] } });
+  assert.equal(invalid.isError, true);
+
+  const started = succeeded(await client.callTool({ name: "start_session", arguments: { name: "keys", command: `${show}; sleep 30`, secrets: ["API_KEY", "MINE"], until: "sk-home" } }));
+  assert.equal(started.matched, true);
+  assert.match(started.screen.text, /sk-home\|m/);
+  assert.doesNotMatch(JSON.stringify(succeeded(await client.callTool({ name: "list_sessions", arguments: {} }))), /sk-home/);
+  succeeded(await client.callTool({ name: "kill_session", arguments: { name: "keys" } }));
+
+  // Without the shell grant there is nothing to list, and a command could not use them.
+  const sessionsOnly = await secretsClient(t, ["sessions:create"], { API_KEY: "sk-home" });
+  const denied = await sessionsOnly.callTool({ name: "list_secrets", arguments: {} });
+  assert.equal(denied.isError, true);
+  assert.match(text(denied), /Permission denied: shell not granted to laptop/);
+});
+
+test("secrets on a peer from before secrets for agents say which cns to update, and nothing starts", { skip: !posix, timeout: 30000 }, async (t) => {
+  const directory = await temporaryDirectory(t);
+  const marker = path.join(directory, "ran");
+  // A cns from before: its shell knows no secrets option and no secretNames call.
+  const client = await secretsClient(t, [], {}, "2.2.0", new ShellApi());
+  for (const [name, args] of [
+    ["run_command", { command: `touch '${marker}'`, secrets: ["API_KEY"] }],
+    ["start_session", { name: "old", command: `touch '${marker}'`, secrets: ["API_KEY"] }],
+    ["list_secrets", {}],
+  ] as const) {
+    const result = await client.callTool({ name, arguments: args });
+    assert.equal(result.isError, true, name);
+    assert.match(text(result), /studio runs cns 2\.2\.0, from before secrets for agents, so nothing was done there\. Update cns on studio to 2\.3\.0 or later\./, name);
+  }
+  assert.equal(existsSync(marker), false);
+});
+
+test("an agent's commands on a mesh member get the secrets that member holds, without the values passing through cns mcp", { skip: !posix, timeout: 120000 }, async (t) => {
+  const devices = await testDevices(t, "cns-mcp-secrets-");
+  const hub = await devices.device("hub");
+  const laptop = await devices.device("laptop");
+  for (const device of [hub, laptop]) await devices.up(device);
+  await devices.pair(hub, laptop);
+  const ok = async (device: typeof hub, args: string[], input = "") => {
+    const result = await devices.cli(device, [...args, "--state", device.state], input);
+    assert.equal(result.code, 0, result.output);
+  };
+  await ok(hub, ["mesh", "create", "home"]);
+  await ok(hub, ["mesh", "add", "home", "laptop"]);
+  await ok(laptop, ["mesh", "join", "home", "--via", "hub"]);
+  await ok(laptop, ["secret", "set", "API_KEY"], "sk-home\n");
+  await eventually(async () => (await devices.cli(hub, ["secret", "get", "API_KEY"])).stdout === "sk-home", "hub to read laptop's secret", 20000);
+
+  const { client } = await stdioClient(t, ["hub"], "auto", laptop.env);
+  assert.deepEqual(succeeded(await client.callTool({ name: "list_secrets", arguments: {} })).secrets, [{ mesh: "home", name: "API_KEY", readBy: "all members", setBy: ["laptop"] }]);
+  const show = `printf '%s' "\${API_KEY-unset}"`;
+  assert.equal(succeeded(await client.callTool({ name: "run_command", arguments: { command: show, secrets: ["API_KEY"] } })).stdout, "sk-home");
+  assert.equal(succeeded(await client.callTool({ name: "run_command", arguments: { command: show, secrets: ["home:API_KEY"] } })).stdout, "sk-home");
+  const missing = await client.callTool({ name: "run_command", arguments: { command: show, secrets: ["NOPE"] } });
+  assert.equal(missing.isError, true);
+  assert.match(text(missing), /This device holds no mesh secret NOPE\. It holds home:API_KEY\./);
+});
+
+test("cns mcp --env lets calls set the variables it names from its own environment, and offers no others", { skip: !posix, timeout: 30000 }, async (t) => {
+  process.env.CNS_TEST_FORWARDED = "gh-token";
+  delete process.env.CNS_TEST_UNSET;
+  t.after(() => { delete process.env.CNS_TEST_FORWARDED; });
+  const client = await secretsClient(t, ["shell", "sessions:create", "sessions:view"], { API_KEY: "sk-home" }, undefined, undefined, ["CNS_TEST_FORWARDED", "CNS_TEST_UNSET"]);
+  const { tools } = await client.listTools();
+  const schema = tools.find((tool) => tool.name === "run_command")!.inputSchema as { properties: Record<string, { items?: { enum?: string[] } }> };
+  assert.deepEqual(schema.properties.env!.items!.enum, ["CNS_TEST_FORWARDED", "CNS_TEST_UNSET"]);
+  const show = `printf '%s|%s' "\${CNS_TEST_FORWARDED-unset}" "\${API_KEY-unset}"`;
+  assert.equal(succeeded(await client.callTool({ name: "run_command", arguments: { command: show, env: ["CNS_TEST_FORWARDED"], secrets: ["API_KEY"] } })).stdout, "gh-token|sk-home");
+  const started = succeeded(await client.callTool({ name: "start_session", arguments: { name: "env", command: `${show}; sleep 30`, env: ["CNS_TEST_FORWARDED"], until: "gh-token" } }));
+  assert.equal(started.matched, true);
+  const unset = await client.callTool({ name: "run_command", arguments: { command: show, env: ["CNS_TEST_UNSET"] } });
+  assert.equal(unset.isError, true);
+  assert.match(text(unset), /CNS_TEST_UNSET is not set where cns mcp runs\./);
+  const unlisted = await client.callTool({ name: "run_command", arguments: { command: show, env: ["PATH"] } });
+  assert.equal(unlisted.isError, true);
+
+  const plainServer = await secretsClient(t, ["shell"], {});
+  const run = (await plainServer.listTools()).tools.find((tool) => tool.name === "run_command")!.inputSchema as { properties: Record<string, unknown> };
+  assert.equal(run.properties.env, undefined);
+  const refused = await plainServer.callTool({ name: "run_command", arguments: { command: show, env: ["CNS_TEST_FORWARDED"] } });
+  assert.equal(refused.isError, true);
 });

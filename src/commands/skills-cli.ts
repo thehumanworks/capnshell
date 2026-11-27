@@ -10,7 +10,7 @@ import { explainDenial, listPeers, resolvePeer, type Permission } from "../peers
 import { secureReady } from "../secure.js";
 import type { ShellApi } from "../shell.js";
 import {
-  listSkillFiles, listSkills, mainFile, readSkillFile, skillNameSchema, skillsDirectory, type SkillFile, type SkillSummary,
+  byNewest, listSkillFiles, listSkills, mainFile, readSkillFile, skillNameSchema, skillsDirectory, type SkillFile, type SkillSummary,
 } from "../skills.js";
 import { plain } from "../terminal.js";
 import { copy, localSide, remoteSide, type Side } from "./copy.js";
@@ -138,19 +138,6 @@ async function gather(links: Links, timeoutMs = LIST_TIMEOUT_MS): Promise<{ copi
   };
 }
 
-/**
- * The copies of each skill, newest first. Times are compared to the second, so a copy that
- * cns skills sync made, which keeps its source's times, ties with it; a tie goes to this
- * device, then to the device whose name sorts first.
- */
-export function byNewest<T extends { name: string; modifiedMs: number; device?: string }>(copies: readonly T[]): Map<string, T[]> {
-  const second = (ms: number) => Math.floor(ms / 1000);
-  const order = (a: T, b: T) => second(b.modifiedMs) - second(a.modifiedMs)
-    || (a.device === b.device ? 0 : a.device === undefined ? -1 : b.device === undefined ? 1 : a.device < b.device ? -1 : 1);
-  const groups = new Map<string, T[]>();
-  for (const copy of copies) groups.set(copy.name, [...groups.get(copy.name) ?? [], copy]);
-  return new Map([...groups].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([name, group]) => [name, group.sort(order)]));
-}
 const newest = (copies: readonly Copy[]) => byNewest(copies.map((copy) => ({ ...copy, device: copy.host.device })));
 
 /** A line on stderr for each paired device that was not listed. */

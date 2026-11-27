@@ -1,17 +1,27 @@
+import type { RpcStub } from "capnweb";
 import { connectControl } from "../commands/daemon.js";
 import type { PeerController, PeerSummary } from "../console.js";
 import { openDeviceLink } from "../device-link.js";
+import type { GrantedShell, SecretSummary, WithSecrets } from "../granted-shell.js";
 import { fingerprint, loadIdentity } from "../identity.js";
-import type { ShellApi } from "../shell.js";
+import type { PtySessionInfo, PtySessionOptions, RunOptions, RunResult, ShellApi } from "../shell.js";
 import { plain, type RemoteNamedPty } from "../terminal.js";
 
-/** The file calls the file tools make, which the `files` grant covers on a paired device. */
-export type PeerFiles = Pick<ShellApi, "stat" | "readdir" | "mkdir" | "glob" | "readFile" | "writeFile">;
+/**
+ * The file calls the file tools make, which the `files` grant covers on a paired device, and
+ * the skill calls the skill tools make, which `skills` or `files` covers.
+ */
+export type PeerFiles = Pick<ShellApi, "stat" | "readdir" | "mkdir" | "glob" | "readFile" | "writeFile" | "skills" | "skillFiles" | "readSkillFile">;
 
 /** The controller calls the tools make; terminals need a local TTY and are left out. */
-export type ToolController = Pick<PeerController, "peers" | "run" | "ptySessions" | "startPtySession" | "ptySession"> & {
-  /** The peer's files, for the length of one call: closing the link releases them. */
+export type ToolController = Pick<PeerController, "peers" | "ptySessions" | "ptySession"> & {
+  /** `secrets` names mesh secrets the peer reads, which it sets as the command's variables. */
+  run(id: string, command: string, options: WithSecrets<RunOptions>): Promise<RunResult>;
+  startPtySession(id: string, name: string, options: WithSecrets<PtySessionOptions>): Promise<PtySessionInfo>;
+  /** The peer's files and skills, for the length of one call: closing the link releases them. */
   files(id: string): Promise<PeerFiles>;
+  /** The mesh secrets the peer reads, by name and never by value; it needs the shell grant there. */
+  secrets(id: string): Promise<SecretSummary[]>;
 };
 
 /** One connection, opened for one tool call. Closing it ends the call's remote work. */
@@ -101,6 +111,7 @@ export function pairedTarget(expect: { name: string; publicKey: string; addresse
         },
         async ptySession(_id, name) { return await remote.ptySession(name) as unknown as RemoteNamedPty; },
         async files() { return remote as unknown as PeerFiles; },
+        async secrets() { return await plain((remote as unknown as RpcStub<GrantedShell>).secretNames()); },
       };
       return {
         controller,
@@ -198,6 +209,12 @@ export function daemonTarget(statePath?: string, cwd?: string): McpTarget {
           // Closing the connection, as cancelling the call does, kills the command.
           async run(id, command, options) {
             return await plain(remote.runWhileConnected(id, command, options));
+          },
+          async secrets(id) {
+            // A fork of the peer's shell, which the peer needs to grant anyway.
+            const shell = await remote.shell(id) as unknown as RpcStub<GrantedShell>;
+            forks.push(shell);
+            return await plain(shell.secretNames());
           },
         },
         get lost() { return lost; },

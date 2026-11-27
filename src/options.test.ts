@@ -39,7 +39,7 @@ after(() => {
 // Exercise Commander's real environment handling without inheriting user defaults
 // or leaking an individual test's environment to other tests.
 function withEnvironment<T>(env: NodeJS.ProcessEnv, parse: () => T): T {
-  const names = ["CNS_BIND", "CNS_PORT", "CNS_CWD", "CNS_KEY", "CNS_KITTY_KEYS"];
+  const names = ["CNS_BIND", "CNS_PORT", "CNS_CWD", "CNS_KEY", "CNS_KITTY_KEYS", "CNS_MCP_ENV"];
   const saved = names.map((name) => process.env[name]);
   try {
     for (const name of names) {
@@ -102,6 +102,9 @@ test("mcp uses the daemon's linked devices, or one named paired device", { skip:
   assert.deepEqual(parseMcp(["studio"]).expect, { name: "studio", publicKey: studio.publicKey, addresses: expected.addresses });
   assert.deepEqual(parseMcp(["-D", "studio", "-w", "/srv"]).expect, { name: "studio", publicKey: studio.publicKey, addresses: expected.addresses });
   assert.deepEqual(parseMcp(["-S", "/tmp/d.json"]).state, "/tmp/d.json");
+  assert.deepEqual(parseMcp(["--env", "GITHUB_TOKEN, NPM_TOKEN,GITHUB_TOKEN"]).env, ["GITHUB_TOKEN", "NPM_TOKEN"]);
+  assert.deepEqual(parseMcp([], { CNS_MCP_ENV: "A_KEY" }).env, ["A_KEY"]);
+  assert.throws(() => parseMcp(["--env", "GITHUB_TOKEN,1BAD"]), /--env takes variable names separated by commas, such as GITHUB_TOKEN,NPM_TOKEN; 1BAD is not one\./);
   assert.deepEqual(parseMcp(["-p", "47382", "-b", "0.0.0.0", "-R"]).http, { bind: "0.0.0.0", port: 47382, remote: true });
   assert.throws(() => parseMcp(["studio", "--device", "studio"]), /Name the device once/);
 });

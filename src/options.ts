@@ -399,6 +399,8 @@ export interface McpConfig {
   /** The local daemon's state file, when the tools use its linked devices. */
   state?: string;
   cwd?: string;
+  /** Variables of this process that tool calls may set for their programs, by name. */
+  env?: string[];
   /** Serve Streamable HTTP rather than stdio. */
   http?: { bind: string; port: number; remote: boolean };
 }
@@ -407,13 +409,19 @@ const mcpOptionsSchema = z.strictObject({
   device: z.string().min(1).optional(),
   state: z.string().min(1).optional(),
   cwd: z.string().min(1).optional(),
+  env: z.string().optional().transform((value, ctx) => {
+    const names = [...new Set((value ?? "").split(",").map((name) => name.trim()).filter(Boolean))];
+    const wrong = names.find((name) => !/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(name));
+    if (wrong !== undefined) ctx.addIssue({ code: "custom", message: `--env takes variable names separated by commas, such as GITHUB_TOKEN,NPM_TOKEN; ${wrong} is not one.` });
+    return names.length ? names : undefined;
+  }),
   http: portSchema("--http").optional(),
   httpBind: bindSchema("--http-bind").optional(),
   allowRemote: z.boolean().default(false),
 });
 
 function resolveMcpOptions(command: Command, device: string | undefined): McpConfig {
-  const { state, cwd, http, httpBind, allowRemote } = mcpOptionsSchema.parse({ ...command.opts() });
+  const { state, cwd, env, http, httpBind, allowRemote } = mcpOptionsSchema.parse({ ...command.opts() });
   if (state !== undefined && device !== undefined) throw new Error("--state applies to the daemon's linked devices; a named device is reached directly.");
   if (http === undefined) {
     if (httpBind !== undefined) throw new Error("--http-bind requires --http.");
@@ -429,7 +437,7 @@ function resolveMcpOptions(command: Command, device: string | undefined): McpCon
     expect = { name: peer.name, publicKey: peer.publicKey, addresses: peer.addresses };
   }
   return {
-    ...expect ? { expect } : {}, state, cwd,
+    ...expect ? { expect } : {}, state, cwd, ...env ? { env } : {},
     http: http === undefined ? undefined : { bind: address, port: http, remote: !isLoopback(address) },
   };
 }
@@ -442,6 +450,7 @@ export function addMcpCommand(program: Command, run: (config: McpConfig) => void
     .addOption(deviceOption())
     .option("-S, --state <path>", "Without a device, the local daemon's state file")
     .addOption(new Option("-w, --cwd <path>", "Absolute working directory on devices for calls that do not name one").env("CNS_CWD"))
+    .addOption(new Option("-e, --env <names>", "Variables of this process, comma-separated, that tools may set for programs on devices, by name").env("CNS_MCP_ENV"))
     .option("-p, --http <port>", "Serve Streamable HTTP at http://127.0.0.1:PORT/mcp instead of stdio")
     .option("-b, --http-bind <address>", "Numeric interface address for --http (default: 127.0.0.1)")
     .option("-R, --allow-remote", "Explicitly allow a non-loopback --http-bind")
@@ -452,7 +461,10 @@ devices linked to this device's daemon (cns up), chosen by name in each call.
 --http clients must send Authorization: Bearer TOKEN. TOKEN is CNS_MCP_TOKEN, at least 32
 characters, or else a random token printed at startup. Browser origins are refused.
 Clients get shell access as the devices' users: connect only clients you would trust with it.
-Examples: cns mcp studio    cns mcp --cwd /srv/app
+--env GITHUB_TOKEN,NPM_TOKEN lets run_command and start_session set those variables, with the
+values they have here, for programs on devices: the agent names them and never sees the values,
+unless a program prints them. Only the names listed are offered.
+Examples: cns mcp studio    cns mcp --cwd /srv/app    cns mcp studio --env GITHUB_TOKEN
           CNS_MCP_TOKEN=$(openssl rand -hex 32) cns mcp studio --http 47382`);
   rejectRepeatedOptions(command);
   command.action((device: string | undefined) => run(resolveMcpOptions(command, oneDevice("mcp", device, command.opts<{ device?: string }>().device))));

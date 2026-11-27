@@ -97,7 +97,9 @@ cns gateway approve ABCD-EFGH --devices studio --tools read
 ```
 
 The page then returns to Claude, and its tools reach the approved devices by name
-(`list_peers` lists them). Other commands:
+(`list_peers` lists them). A connector keeps the tools it was approved for: when a cns release
+adds tools, such as the skill tools and `list_secrets` in 2.3.0, remove the connector and add it
+again to approve them. `--tools read` includes the skill tools. Other commands:
 
 | Command | Does |
 | --- | --- |

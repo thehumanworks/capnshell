@@ -11,5 +11,8 @@ test("the audit log keeps commands and paths, but not file contents or typed key
   assert.equal(call("start_session", { name: "dev" }), "dev: login shell");
   assert.equal(call("glob", { pattern: "**/*.ts", path: "/src" }), "**/*.ts in /src");
   assert.equal(call("list_peers", {}), "");
+  assert.equal(call("run_command", { command: "npm publish", secrets: ["NPM_TOKEN", "home:API_KEY"] }), "npm publish with secrets NPM_TOKEN, home:API_KEY");
+  assert.equal(call("read_skill", { name: "pdf" }), "pdf/SKILL.md");
+  assert.equal(call("search_skills", { pattern: "deploy" }), "deploy");
   assert.equal(call("run_command", { command: "x".repeat(600) }).length, 503);
 });

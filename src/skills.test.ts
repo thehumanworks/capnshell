@@ -5,8 +5,8 @@ import path from "node:path";
 import test from "node:test";
 import { MessageChannel } from "node:worker_threads";
 import { newMessagePortRpcSession, RpcTarget } from "capnweb";
-import { byNewest, explained } from "./commands/skills-cli.js";
-import { listSkillFiles, listSkills, readSkillFile, skillDescription } from "./skills.js";
+import { explained } from "./commands/skills-cli.js";
+import { byNewest, listSkillFiles, listSkills, readSkillFile, skillDescription } from "./skills.js";
 
 const posix = process.platform !== "win32";
 
