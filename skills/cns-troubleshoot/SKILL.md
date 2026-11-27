@@ -37,7 +37,7 @@ Follow what they print: when something is wrong they name the command that fixes
 
 A running daemon keeps the executable it started with. After installing a new cns,
 `cns status`, `cns up` and `cns doctor` say when the daemon runs another version, and print
-the restart command that fits how it was started: today `cns stop`, then `cns up`, or
+the restart command that fits how it was started: usually `cns daemon restart`, or
 `cns up --install` again for a service that points at another executable. Use the command
 they print.
 

@@ -93,6 +93,11 @@ If your tools include cns MCP tools (from `cns mcp` or the gateway connector), t
 same work: `list_peers`, `run_command` (120 s default deadline), `start_session`,
 `send_keys`, `read_screen`, `list_sessions`, `kill_session`, and `read_file`, `write_file`,
 `list_directory`, `glob`, which need the `files` grant. Pass `peer` when several are linked.
+`list_skills`, `read_skill` and `search_skills` work like `cns skills` (see the cns-skills
+skill). `list_secrets` and the `secrets` argument of `run_command` and `start_session` give
+a program mesh secrets by name (see the cns-secrets skill). An `env` argument appears only
+when the user started `cns mcp --env NAMES`, and passes those variables of the `cns mcp`
+process.
 
 ## Exit statuses
 
