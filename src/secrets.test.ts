@@ -48,19 +48,19 @@ const read = (device: Identity, states: MeshState[], name: string) => {
 test("a secret for the whole mesh reaches every member through any reader, only as its owner signed it", async (t) => {
   const on = await devices(t);
   const states = [home()];
-  on(laptop, () => keepSecret(sealSecret(laptop, fields("API_KEY", 1), value("one"))));
-  assert.equal(on(laptop, () => read(laptop, states, "API_KEY")), "one");
-  // The file holds ciphertext only.
+  on(laptop, () => keepSecret(sealSecret(laptop, fields("API_KEY", 1), value("value one"))));
+  assert.equal(on(laptop, () => read(laptop, states, "API_KEY")), "value one");
+  // The file holds ciphertext only. A space never occurs in base64url, so the check cannot match by chance, as a bare "one" did in 1 run of about 2,000.
   const offered = on(laptop, () => secretsFor(studio.publicKey, laptop, states));
   assert.equal(offered.length, 1);
-  assert.ok(!JSON.stringify(offered).includes("one"));
+  assert.ok(!JSON.stringify(offered).includes("value one"));
   assert.deepEqual(on(laptop, () => secretsFor(stranger.publicKey, laptop, states)), []);
   assert.equal(on(studio, () => takeSecrets(laptop.publicKey, studio, states, offered)).length, 1);
-  assert.equal(on(studio, () => read(studio, states, "API_KEY")), "one");
+  assert.equal(on(studio, () => read(studio, states, "API_KEY")), "value one");
   // studio, not its owner, seals it for the admin.
   const passed = on(studio, () => secretsFor(admin.publicKey, studio, states));
   assert.equal(on(admin, () => takeSecrets(studio.publicKey, admin, states, passed)).length, 1);
-  assert.equal(on(admin, () => read(admin, states, "API_KEY")), "one");
+  assert.equal(on(admin, () => read(admin, states, "API_KEY")), "value one");
   // Nothing is taken twice, or from a device outside the mesh, or for a device outside it.
   assert.deepEqual(on(studio, () => takeSecrets(laptop.publicKey, studio, states, offered)), []);
   const fresh = generateIdentity();
