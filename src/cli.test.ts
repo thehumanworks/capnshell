@@ -31,15 +31,20 @@ test("cns --version prints this cns's version and nothing else", async (t) => {
 test("the CLI exposes only cross-platform peer commands with side-effect-free help", async (t) => {
   const cwd = await temporaryDirectory(t);
   const { stdout } = await runCli(["--help"], cwd);
-  for (const command of ["up", "pair", "peers", "run", "shell", "cp", "sessions", "ui", "keys", "screen", "kill", "mcp", "attach", "stop"]) {
+  for (const command of ["up", "pair", "peers", "run", "shell", "cp", "sessions", "ui", "keys", "screen", "kill", "mcp", "attach", "stop", "daemon"]) {
     assert.ok(stdout.includes(command));
     const result = await runCli([command, "--help"], cwd);
     assert.match(result.stdout, /Usage: cns/);
     assert.doesNotMatch(result.stdout, /listening at/);
     if (command === "run" || command === "shell") assert.match(result.stdout, /CNS_CWD/);
   }
-  // The daemon command is cns up's to run, and the unauthenticated commands are gone.
-  assert.doesNotMatch(stdout, /^\s+(daemon|listen|connect)\b/m);
+  for (const command of ["start", "stop", "restart"]) {
+    const result = await runCli(["daemon", command, "--help"], cwd);
+    assert.match(result.stdout, new RegExp(`Usage: cns daemon ${command}`));
+  }
+  // The options cns daemon runs the daemon with are cns up's to give, and the unauthenticated commands are gone.
+  assert.doesNotMatch(stdout, /^\s+(listen|connect)\b/m);
+  assert.doesNotMatch((await runCli(["daemon", "--help"], cwd)).stdout, /--bind|--service/);
   assert.doesNotMatch(stdout, /bundle-mac|install-windows|integration-smoke|\bwindows\b|\bwsl\b/);
   assert.deepEqual(await readdir(cwd), []);
 });

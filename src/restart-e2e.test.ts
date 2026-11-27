@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import test from "node:test";
 import { connectControl, runsUnder } from "./commands/daemon.js";
 import { restartPlan } from "./commands/pairing-cli.js";
@@ -23,12 +25,13 @@ test("a paired device restarts this device's daemon with cns run, and the daemon
   const laptop = await devices.device("laptop");
   await devices.up(studio);
   await devices.pair(studio, laptop);
+  const log = async () => { try { return await readFile(path.join(studio.dir, "restart.log"), "utf8"); } catch (error) { return String(error); } };
   /** The daemon that answers once the one with pid `old` has gone. */
   const replaced = async (old: number) => {
     const deadline = Date.now() + 20000;
     for (;;) {
       try { const now = await daemonAt(studio.state); if (now.pid !== old) return now; } catch { /* Between the two daemons. */ }
-      if (Date.now() > deadline) throw new Error("The daemon did not come back.");
+      if (Date.now() > deadline) throw new Error(`The daemon did not come back. The restart's log:\n${await log()}`);
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
   };
@@ -37,9 +40,9 @@ test("a paired device restarts this device's daemon with cns run, and the daemon
 
   // The command runs under the daemon it restarts: it returns first, then the daemon goes and comes back.
   const ran = await devices.cli(laptop, ["run", "studio", "--", restart]);
-  assert.equal(ran.code, 0, ran.output);
-  assert.match(ran.stdout, /^Restarting the daemon in a moment\. Links to this device drop and come back within seconds/);
   const after = await replaced(before.pid);
+  assert.equal(ran.code, 0, `${ran.output}\nThe restart's log:\n${await log()}`);
+  assert.match(ran.stdout, /^Restarting the daemon in a moment\. Links to this device drop and come back within seconds/);
   assert.equal(after.port, before.port);
   const again = await devices.cli(laptop, ["run", "studio", "--", "echo back"]);
   assert.equal(again.code, 0, again.output);
