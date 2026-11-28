@@ -94,22 +94,29 @@ test("cns audit prints the newest entries first, filtered by peer and time, as a
   const hour = 3_600_000;
   const at = (ms: number) => new Date(Date.now() - ms).toISOString();
   const write = auditLog({ file: path.join(dir, "audit.log") });
-  write(entry({ start: at(3 * hour), end: at(3 * hour - 2000), cwd: "/srv/app", secrets: ["home:NPM_TOKEN"], exitCode: 0 }));
+  const made = { start: at(3 * hour), cwd: "/srv/app", secrets: ["home:NPM_TOKEN"] };
+  write(entry({ ...made, phase: "start" }));
+  write(entry({ ...made, end: at(3 * hour - 2000), exitCode: 0 }));
   write(entry({ start: at(2 * hour), peer: "studio", fingerprint: "zzzz", action: "session.start", target: "build", command: "npm run dev" }));
   write(entry({ start: at(hour), action: "file.read", target: "/etc/shadow", error: "Permission denied: files not granted to laptop." }));
+  // Still running, or its daemon stopped before it ended: only its start is there.
+  write(entry({ start: at(hour / 2), target: "sleep 9999", phase: "start" }));
   write(entry({ start: at(1000), end: at(0), action: "terminal", target: "(login shell)\u001b]0;pwned\u0007", exitCode: null, signal: "SIGHUP" }));
 
   const table = run({}).split("\n");
   assert.match(table[0]!, /^STARTED \(UTC\) +PEER +ACTION +RESULT +TARGET$/);
   assert.match(table[1]!, /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d +laptop +terminal +killed by SIGHUP after 1s +\(login shell\)\?\]0;pwned\?$/);
-  assert.match(table[2]!, /laptop +file\.read +failed +\/etc\/shadow: Permission denied: files not granted to laptop\.$/);
-  assert.match(table[3]!, /studio +session\.start +ok +build: npm run dev$/);
-  assert.match(table[4]!, /laptop +run +exited 0 after 2s +make test \(in \/srv\/app\) with secrets home:NPM_TOKEN$/);
-  assert.equal(table.length, 5);
+  assert.match(table[2]!, /laptop +run +no end recorded +sleep 9999$/);
+  assert.match(table[3]!, /laptop +file\.read +failed +\/etc\/shadow: Permission denied: files not granted to laptop\.$/);
+  assert.match(table[4]!, /studio +session\.start +ok +build: npm run dev$/);
+  assert.match(table[5]!, /laptop +run +exited 0 after 2s +make test \(in \/srv\/app\) with secrets home:NPM_TOKEN$/);
+  assert.equal(table.length, 6, "a command that ended is shown once");
 
   assert.deepEqual(JSON.parse(run({ json: true, peer: "studio" })).map((logged: AuditEntry) => logged.target), ["build"]);
   assert.deepEqual(JSON.parse(run({ json: true, peer: "zzzz" })).map((logged: AuditEntry) => logged.peer), ["studio"]);
-  assert.equal(JSON.parse(run({ json: true, since: "90m" })).length, 2);
+  assert.deepEqual(JSON.parse(run({ json: true })).filter((logged: AuditEntry) => logged.action === "run").map((logged: AuditEntry) => [logged.target, logged.phase]),
+    [["sleep 9999", "start"], ["make test", undefined]]);
+  assert.equal(JSON.parse(run({ json: true, since: "90m" })).length, 3);
   assert.equal(JSON.parse(run({ json: true, limit: "1" }))[0].action, "terminal");
   assert.deepEqual(JSON.parse(run({ json: true, peer: "nobody" })), []);
   assert.equal(run({ peer: "nobody" }), "");

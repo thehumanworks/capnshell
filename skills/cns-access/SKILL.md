@@ -47,8 +47,9 @@ cns audit --peer laptop --since 1h   # one device, the last hour
 cns run studio -- cns audit --json   # what devices did on studio
 ```
 
-Each entry names the device, the command line, path or session, and how it ended. Secrets
-appear by name only.
+Each entry names the device, the command line, path or session, and how it ended; a command
+still running, or cut off by a daemon that stopped, shows as `no end recorded`. Secrets appear
+by name only, and keys typed into sessions never appear.
 
 ## Permission denied
 

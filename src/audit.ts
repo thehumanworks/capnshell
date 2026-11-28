@@ -10,13 +10,18 @@ import { errorMessage } from "./errors.js";
  * input, environment variables or secret values.
  */
 
-export type AuditAction = "run" | "terminal" | "session.start" | "session.end" | "session.kill" | "file.read" | "file.write" | "file.mkdir" | "skill.read";
+export type AuditAction = "run" | "terminal" | "session.start" | "session.attach" | "session.end" | "session.kill" | "file.read" | "file.write" | "file.mkdir" | "skill.read";
 
 export interface AuditEntry {
   /** When it started, as an ISO time. */
   start: string;
   /** When it ended, for a command, a terminal and a session's end. */
   end?: string;
+  /**
+   * "start" on the line a command or terminal gets as it starts. The line that ends it follows,
+   * with the same action, target and start; without one, it is still running or its daemon stopped.
+   */
+  phase?: "start";
   /** The device's name on this device, when it acted. */
   peer: string;
   /** The device's key fingerprint, which a rename does not change. */

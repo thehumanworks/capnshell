@@ -175,7 +175,8 @@ test("a granted shell records what the peer does, by name and fingerprint, with 
     return shell;
   };
   const shell = as(["all"]);
-  const recorded = (action: string) => entries.filter((entry) => entry.action === action);
+  const recorded = (action: string) => entries.filter((entry) => entry.action === action && entry.phase === undefined);
+  const started = () => entries.filter((entry) => entry.phase === "start").map((entry) => [entry.action, entry.target, entry.end, entry.exitCode]);
   async function eventually(action: string) {
     for (const deadline = Date.now() + 10000; !recorded(action).length;) {
       if (Date.now() > deadline) assert.fail(`No ${action} entry: ${JSON.stringify(entries)}`);
@@ -183,10 +184,15 @@ test("a granted shell records what the peer does, by name and fingerprint, with 
     }
   }
 
-  // A command, with the mesh secret it got by name, and none of the caller's variables.
-  const result = await shell.run('printf %s "$API_KEY$CALLER"; exit 3', { cwd: dir, secrets: ["home:API_KEY"], env: { CALLER: "caller-secret" } });
+  // A command, with the mesh secret it got by name, and none of the caller's variables. Its start
+  // is recorded while it runs, so a command that never ends still leaves a line.
+  const running = shell.run('printf %s "$API_KEY$CALLER"; exit 3', { cwd: dir, secrets: ["home:API_KEY"], env: { CALLER: "caller-secret" } });
+  assert.deepEqual([started(), recorded("run")], [[["run", 'printf %s "$API_KEY$CALLER"; exit 3', undefined, undefined]], []]);
+  const result = await running;
   assert.deepEqual([result.stdout, result.exitCode], ["sk-secret-valuecaller-secret", 3]);
   const [run] = recorded("run");
+  // The start line is the end line without how it ended, so cns audit can pair them.
+  assert.deepEqual({ ...entries[0], phase: undefined, end: undefined, exitCode: undefined }, { ...run, phase: undefined, end: undefined, exitCode: undefined });
   assert.deepEqual({ ...run, start: undefined, end: undefined }, {
     start: undefined, end: undefined, action: "run", target: 'printf %s "$API_KEY$CALLER"; exit 3', cwd: dir, secrets: ["home:API_KEY"], exitCode: 3, peer: "laptop", fingerprint: "k7qm",
   });
@@ -211,9 +217,16 @@ test("a granted shell records what the peer does, by name and fingerprint, with 
   assert.deepEqual(recorded("file.write").map((entry) => entry.target), [copy, path.join(dir, "whole.txt")]);
   assert.deepEqual(recorded("file.mkdir").map((entry) => entry.target), [path.join(dir, "made")]);
 
-  // A session's start, its kill and its end; a terminal once its program has ended.
+  // A session's start, each attach but nothing typed through it, its kill and its end.
   const session = shell.startPtySession("work", { command: "sleep 30", secrets: ["API_KEY"] });
   assert.deepEqual(recorded("session.start").map((entry) => [entry.target, entry.command, entry.secrets]), [["work", "sleep 30", ["API_KEY"]]]);
+  const attachment = shell.ptySession("work").attach({ output() {}, exit() {} });
+  const before = entries.length;
+  attachment.write("hunter2\r");
+  attachment.keys(["Enter"]);
+  attachment.detach();
+  assert.equal(entries.length, before, "typing is never recorded");
+  assert.deepEqual(recorded("session.attach").map((entry) => [entry.target, entry.peer, entry.error]), [["work", "laptop", undefined]]);
   await session.kill();
   await eventually("session.end");
   assert.deepEqual(recorded("session.kill").map((entry) => entry.target), ["work"]);
@@ -221,7 +234,8 @@ test("a granted shell records what the peer does, by name and fingerprint, with 
   shell.openPty({ output() {}, exit() {} }, { command: "exit 5" });
   await eventually("terminal");
   assert.deepEqual(recorded("terminal").map((entry) => [entry.target, entry.exitCode]), [["exit 5", 5]]);
-  assert.ok(!JSON.stringify(entries).includes("sk-secret-value") && !JSON.stringify(entries).includes("caller-secret"));
+  assert.deepEqual(started().map(([action, target]) => [action, target]), [["run", 'printf %s "$API_KEY$CALLER"; exit 3'], ["run", "exit 4"], ["terminal", "exit 5"]]);
+  for (const secret of ["sk-secret-value", "caller-secret", "hunter2"]) assert.ok(!JSON.stringify(entries).includes(secret), secret);
 
   // A refusal is recorded too, and still thrown at once.
   const reader = as(["sessions:list"]);
@@ -230,6 +244,7 @@ test("a granted shell records what the peer does, by name and fingerprint, with 
   await assert.rejects(async () => { await reader.run("id"); }, /shell not granted/);
   assert.deepEqual(entries.slice(-3).map((entry) => [entry.action, entry.target, /^Permission denied/.test(entry.error ?? "")]),
     [["file.read", "/etc/hosts", true], ["skill.read", "pdf/SKILL.md", true], ["run", "id", true]]);
+  assert.equal(started().length, 3, "a refused command never started");
 
   // An audit log that fails makes nothing else fail.
   const careless = as(["shell"], () => { throw new Error("disk full"); });

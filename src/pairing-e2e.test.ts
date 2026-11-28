@@ -139,6 +139,9 @@ test("two devices pair, run commands within their grants, and refuse everyone el
     ["session.end", "work", null], ["session.kill", "work", undefined], ["session.start", "work", undefined],
   ]);
   assert.ok(audited.every((entry) => entry.peer === "laptop" && entry.fingerprint === laptopIdentity.fingerprint));
+  // Each command also got a line as it started, which cns audit leaves out once it ended.
+  const lines = (await readFile(path.join(studio.dir, "audit.log"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(lines.filter((line) => line.phase === "start" && line.action === "run").length, 3);
   assert.equal((await stat(path.join(studio.dir, "audit.log"))).mode & 0o777, 0o600);
   assert.match((await cli(studio, ["audit"])).stdout, /^STARTED \(UTC\) +PEER +ACTION +RESULT +TARGET\n.+ laptop +session\.(kill|end) /);
 

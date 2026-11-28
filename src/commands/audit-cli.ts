@@ -24,6 +24,8 @@ function span(ms: number): string {
 
 function result(entry: AuditEntry): string {
   if (entry.error !== undefined) return "failed";
+  // Still running, or its daemon stopped first.
+  if (entry.phase === "start") return "no end recorded";
   if (entry.exitCode === undefined && entry.signal === undefined) return "ok";
   const exit = describeExit({ exitCode: entry.exitCode ?? null, signal: entry.signal ?? null, timedOut: entry.timedOut === true });
   const took = entry.end ? Date.parse(entry.end) - Date.parse(entry.start) : NaN;
@@ -46,6 +48,13 @@ export function formatAudit(entries: readonly AuditEntry[]): string {
   return table.map((row) => row.map((cell, index) => index === row.length - 1 ? cell : cell.padEnd(widths[index]!)).join("  ")).join("\n");
 }
 
+/** One entry per action: a command's or a terminal's start line is left out once the line that ends it is there. */
+function oncePerAction(entries: readonly AuditEntry[]): AuditEntry[] {
+  const key = (entry: AuditEntry) => JSON.stringify([entry.start, entry.fingerprint, entry.action, entry.target]);
+  const ended = new Set(entries.filter((entry) => entry.phase !== "start").map(key));
+  return entries.filter((entry) => entry.phase !== "start" || !ended.has(key(entry)));
+}
+
 /**
  * `cns audit`: the newest entries of this device's audit log, newest first: what paired devices
  * did here. `--peer` takes a device's name here or its fingerprint; `--since` keeps what ended
@@ -55,7 +64,7 @@ export function audit(options: AuditOptions): void {
   const limit = options.limit === undefined ? 50 : Number(options.limit);
   if (!Number.isInteger(limit) || limit < 1) throw new Error("--limit takes a number of entries, such as 100.");
   const since = options.since === undefined ? undefined : sinceTime(options.since);
-  const entries = readAuditLog().filter((entry) =>
+  const entries = oncePerAction(readAuditLog()).filter((entry) =>
     (options.peer === undefined || entry.peer === options.peer || entry.fingerprint === options.peer)
     && (since === undefined || Date.parse(entry.end ?? entry.start) >= since)).reverse().slice(0, limit);
   if (options.json) { console.log(JSON.stringify(entries, null, 2)); return; }

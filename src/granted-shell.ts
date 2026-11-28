@@ -53,13 +53,21 @@ const ended = (exit: { exitCode: number | null; signal: string | null; timedOut:
   end: new Date().toISOString(), exitCode: exit.exitCode, ...exit.signal ? { signal: exit.signal } : {}, ...exit.timedOut ? { timedOut: true } : {},
 });
 
+interface AuditedOptions<T> {
+  /** What the entry adds once the call has settled, such as how a command ended. */
+  after?: (result: Awaited<T>) => Partial<AuditEntry> | Promise<Partial<AuditEntry>>;
+  /** Record only a failure. */
+  quiet?: boolean;
+  /** Also record the start, once the call is under way, so that what never ends leaves a trace. */
+  starts?: boolean;
+}
+
 /**
  * Do `call` and record `entry` once it has settled, with what `after` says of its result, or with
- * why it failed; `quiet` records only a failure. A call that throws at once still throws at once,
- * and recording never fails a call.
+ * why it failed. A call that throws at once still throws at once, and recording never fails a call.
  */
 function audited<T>(record: Recorder, entry: Pick<AuditEntry, "action" | "target"> & Partial<AuditEntry>, call: () => T,
-  after: (result: Awaited<T>) => Partial<AuditEntry> | Promise<Partial<AuditEntry>> = () => ({}), quiet = false): T {
+  { after = () => ({}), quiet = false, starts = false }: AuditedOptions<T> = {}): T {
   const start = new Date().toISOString();
   const failed = (error: unknown) => record({ start, ...entry, error: errorMessage(error) });
   const settled = (result: Awaited<T>) => {
@@ -73,6 +81,7 @@ function audited<T>(record: Recorder, entry: Pick<AuditEntry, "action" | "target
   let result: T;
   try { result = call(); }
   catch (error) { failed(error); throw error; }
+  if (starts) record({ start, ...entry, phase: "start" });
   if (!(result instanceof Promise)) { settled(result as Awaited<T>); return result; }
   return result.then((value: Awaited<T>) => { settled(value); return value; }, (error: unknown) => { failed(error); throw error; }) as T;
 }
@@ -137,7 +146,7 @@ export class GrantedShell extends RpcTarget {
     const key = `${action}\0${target}`;
     const goesOn = at > 0 && this.#parts.get(key) === at;
     this.#parts.delete(key);
-    return audited(this.#record, { action, target }, call, undefined, goesOn).then((result) => {
+    return audited(this.#record, { action, target }, call, { quiet: goesOn }).then((result) => {
       const length = next(result);
       if (length !== undefined) this.#parts.set(key, at + length);
       if (this.#parts.size > MAX_PARTS) this.#parts.delete(this.#parts.keys().next().value!);
@@ -168,18 +177,20 @@ export class GrantedShell extends RpcTarget {
    * `secrets` names mesh secrets this device reads, which the program gets as variables. A peer
    * that may start a program here could read them here anyway, and their values stay here.
    */
+  /** A command is recorded when it starts and again when it ends. */
   run(command: string, options?: WithSecrets<RunOptions>) {
     return audited(this.#record, { action: "run", target: text(command), ...program(options) },
-      () => { this.#require("shell"); return this.#shell.run(command, this.#withSecrets(options)); }, ended);
+      () => { this.#require("shell"); return this.#shell.run(command, this.#withSecrets(options)); }, { after: ended, starts: true });
   }
   exec(...args: Parameters<ShellApi["exec"]>) {
-    return audited(this.#record, { action: "run", target: text(args[1]), ...program(args[2]) }, () => { this.#require("shell"); return this.#shell.exec(...args); }, ended);
+    return audited(this.#record, { action: "run", target: text(args[1]), ...program(args[2]) },
+      () => { this.#require("shell"); return this.#shell.exec(...args); }, { after: ended, starts: true });
   }
-  /** A terminal is recorded once its program has ended. */
+  /** A terminal is recorded when it starts and again once its program has ended. */
   openPty(...args: Parameters<ShellApi["openPty"]>) {
     const { command, ...options } = program(args[1]);
     return audited(this.#record, { action: "terminal", target: command ?? "(login shell)", ...options },
-      () => { this.#require("shell"); return this.#shell.openPty(...args); }, (session) => programExited(session).then(ended));
+      () => { this.#require("shell"); return this.#shell.openPty(...args); }, { after: (session) => programExited(session).then(ended), starts: true });
   }
   /** A fork carries the same grants, and records to the same audit log. */
   fork(): GrantedShell { this.#require("shell"); return new GrantedShell(this.#shell.fork(), this.#grants, this.#peer, this.#owner, this.#addresses, this.#meshes, this.#secrets, this.#secretsHere, this.#audit); }
@@ -292,13 +303,18 @@ class GrantedNamedPty extends RpcTarget {
   resize(cols: number, rows: number) { this.#check("sessions:control"); return this.#inner.resize(cols, rows); }
   capture(options?: CaptureOptions) { this.#check("sessions:view"); return this.#inner.capture(options); }
   wait(options: WaitOptions) { this.#check("sessions:view"); return this.#inner.wait(options); }
-  /** Attaching needs `sessions:view`; without `sessions:control` the viewer cannot type, resize or answer the program's queries. */
+  /**
+   * Attaching needs `sessions:view`; without `sessions:control` the viewer cannot type, resize or
+   * answer the program's queries. Each attach is recorded; what is typed through it never is.
+   */
   attach(sink: PtySink, options: AttachOptions = {}) {
-    this.#check("sessions:view");
-    let control = true;
-    try { this.#check("sessions:control"); } catch { control = false; }
-    const attachment = this.#inner.attach(sink, control ? options : {});
-    return new GrantedAttachment(attachment, () => this.#check("sessions:control"), () => this.#check("sessions:view"));
+    return audited(this.#record, { action: "session.attach", target: this.#name }, () => {
+      this.#check("sessions:view");
+      let control = true;
+      try { this.#check("sessions:control"); } catch { control = false; }
+      const attachment = this.#inner.attach(sink, control ? options : {});
+      return new GrantedAttachment(attachment, () => this.#check("sessions:control"), () => this.#check("sessions:view"));
+    });
   }
   /** Killing needs `sessions:kill`, unless the peer started the session. */
   kill() { return audited(this.#record, { action: "session.kill", target: this.#name }, () => { this.#check("sessions:kill"); return this.#inner.kill(); }); }
