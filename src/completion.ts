@@ -257,6 +257,8 @@ _cns() {
     case $c in *[/:\\\\]) [[ -n $_cns_space ]] || compopt -o nospace ;; *) c+=$_cns_space ;; esac
     COMPREPLY+=("\${c#"$pre"}")
   done < <(cns __complete bash "\${words[@]:1}" 2>/dev/null)
+  # Nothing for DEVICE:PATH: keep what is typed, rather than let bash put a local file there.
+  if [[ -n $pre && \${#COMPREPLY[@]} == 0 ]]; then COMPREPLY=("\${cur#"$pre"}"); [[ -n $_cns_space ]] || compopt -o nospace; fi
 }
 # Bash 3.2 has no compopt: there, a space is added to each candidate that takes one.
 if type compopt >/dev/null 2>&1; then _cns_space=; complete -o default -F _cns cns

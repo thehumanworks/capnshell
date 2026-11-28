@@ -88,6 +88,8 @@ test("the bash script joins DEVICE:PATH again, replaces what follows the colon, 
   cns.reply([]);
   assert.deepEqual(complete(["cns", ""], "cns "), []);
   assert.deepEqual(cns.asked().at(-1), ["__complete", "bash", ""]);
+  // Nothing for a remote path leaves it as typed: bash would otherwise complete a local file there.
+  assert.deepEqual(complete(["cns", "cp", "studio", ":", "no"], "cns cp studio:no"), ["[no]"]);
 });
 
 test("the zsh script completes in an interactive zsh: the path is quoted, and a directory gets no space", { skip: !posix || !installed("zsh"), timeout: 60000 }, async (t) => {
