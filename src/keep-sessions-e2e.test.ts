@@ -6,7 +6,7 @@ import net from "node:net";
 import path from "node:path";
 import test from "node:test";
 import { connectControl, processExited } from "./commands/daemon.js";
-import { HOLDERS, holderDirectory } from "./held-sessions.js";
+import { HeldSessions, HOLDERS, holderDirectory } from "./held-sessions.js";
 import { launchCli, testDevices, type TestDevice } from "./test-support.js";
 
 const program = "printf 'READY\\n'; while IFS= read -r line; do printf 'got:%s\\n' \"$line\"; done";
@@ -128,4 +128,29 @@ test("the daemon adopts its holders before it accepts links, leaves the ones it 
   assert.match(taken.output, /A PTY session named newer already exists/);
   assert.deepEqual(JSON.parse((await ok(laptop, ["sessions", "studio", "--json"])).stdout).map((session: { name: string }) => session.name), ["work"]);
   assert.equal((await records()).length, 3);
+});
+
+test("a device that may only start sessions is refused, with exit 4, the ones it did not start, also one no paired device started", { skip: !HOLDERS, timeout: 120000 }, async (t) => {
+  const { devices, studio, dir, ok } = await setUp(t);
+  const phone = await devices.device("phone");
+  await devices.pair(studio, phone, { hostGrants: "sessions:create" });
+  // A session that no paired device owns, in a holder the daemon adopts when it restarts.
+  const host = new HeldSessions(dir);
+  await host.adopt();
+  await host.startSession("host", { command: program }, null);
+  host[Symbol.dispose]();
+  await ok(studio, ["daemon", "restart", "--state", studio.state]);
+  const refusals: Array<[string[], string]> = [
+    [["screen", "studio", "host"], "sessions:view"], [["keys", "studio", "host", "x"], "sessions:control"], [["kill", "studio", "host"], "sessions:kill"],
+    [["screen", "studio", "work"], "sessions:view"],
+  ];
+  for (const [args, permission] of refusals) {
+    const refused = await devices.cli(phone, args);
+    assert.equal(refused.code, 4, `cns ${args.join(" ")}:\n${refused.output}`);
+    assert.match(refused.stderr, new RegExp(`^Permission denied: ${permission} `), refused.stderr);
+  }
+  // What it starts, it owns.
+  await ok(phone, ["shell", "studio", "--name", "mine", "--", program]);
+  await ok(phone, ["screen", "studio", "mine", "--until", "READY"]);
+  await ok(phone, ["kill", "studio", "mine"]);
 });

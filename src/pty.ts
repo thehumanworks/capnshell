@@ -693,12 +693,15 @@ class PtyControls extends RpcTarget {
  * as the audit log. A function rather than a method, so that no RPC caller can reach it.
  */
 export function programExited(handle: PtySession | SessionHandle): Promise<PtyExit> {
-  return facts.get(handle)?.exited() ?? accessors.get(handle)!().exited;
+  const about = facts.get(handle);
+  return about ? about.exited() : accessors.get(handle)!().exited;
 }
 
 /** Who started the session behind a handle, as PtySessionInfo.owner says, without asking its holder. */
 export function sessionOwner(handle: SessionHandle): string | null {
-  return facts.get(handle)?.owner() ?? accessors.get(handle)!().owner;
+  // Not `??`: a session the host started has no owner, which must not fall through to a handle in this process.
+  const about = facts.get(handle);
+  return about ? about.owner() : accessors.get(handle)!().owner;
 }
 
 /**
