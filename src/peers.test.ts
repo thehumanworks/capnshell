@@ -38,6 +38,37 @@ test("a refusal says which grant is missing and the command that adds it on the 
   expect(explainDenial("Permission denied: shell not granted to $(rm -rf ~).")).toBe("Permission denied: shell not granted to $(rm -rf ~).");
 });
 
+test("port words: one port each, never part of all, shown as ports, and refused where they would be sent", () => {
+  expect(expandGrants(["port:8080", "shell", "port:5432", "port:5432"], { ports: true })).toEqual(["shell", "port:5432", "port:8080"]);
+  expect(expandGrants(["all"], { ports: true }).some((grant) => grant.startsWith("port"))).toBe(false);
+  // Without ports, as for a pairing, a mesh's limit, a bot token or the gateway, a port word is refused with where to give it.
+  expect(() => expandGrants(["shell", "port:5432"])).toThrow("port:5432 is given only on the device that has the port, once paired: cns peer grant NAME port:5432, or cns mesh allow MESH port:5432.");
+  // One port per word: no range, no list in one word, no bare ports.
+  for (const bad of ["port:0", "port:65536", "port:05432", "port:", "port:22-80", "port:5432,8080", "ports", "ports:5432"]) expect(() => expandGrants([bad], { ports: true })).toThrow();
+  expect(describeGrants(["shell", "port:5432", "port:8080"])).toBe("shell, ports 5432, 8080");
+  expect(describeGrants(["port:22"])).toBe("port 22");
+  expect(grantWords(["files", "port:5432", "port:8080"])).toBe("files,port:5432,port:8080");
+  expect(grantWords([])).toBe("none");
+  expect(explainDenial("Permission denied: port:5432 not granted to laptop.", "studio"))
+    .toBe("Permission denied: port:5432 not granted to laptop. To allow it, run on studio: cns peer grant laptop port:5432");
+});
+
+test.skipIf(process.platform === "win32")("a record that holds a port word needs ports, and one that no longer does needs nothing", () => {
+  const studio = generateIdentity();
+  savePairedPeer("studio", { publicKey: studio.publicKey, addresses: [], pairedAt: PAIRED_AT, grants: { incoming: ["files", "port:5432"], outgoing: [] } });
+  expect(JSON.parse(readRecord("studio")).needs).toEqual(["ports"]);
+  expect(getPeer("studio")?.grants.incoming).toEqual(["files", "port:5432"]);
+  // Held in either direction.
+  updatePairedPeer("studio", (peer) => ({ ...peer, grants: { incoming: ["files"], outgoing: ["port:22"] } }));
+  expect(JSON.parse(readRecord("studio")).needs).toEqual(["ports"]);
+  expect(getPeer("studio")?.grants.outgoing).toEqual(["port:22"]);
+  updatePairedPeer("studio", (peer) => ({ ...peer, grants: { incoming: ["files"], outgoing: [] } }));
+  expect(JSON.parse(readRecord("studio")).needs).toBeUndefined();
+  // A port word that is not one is refused, never dropped.
+  writeRecord("studio", { ...JSON.parse(readRecord("studio")), needs: ["ports"], grants: { incoming: ["port:99999"], outgoing: [] } });
+  expect(() => getPeer("studio")).toThrow("not a valid paired-device record");
+});
+
 test.skipIf(process.platform === "win32")("paired devices are saved under a name and keyed by identity", () => {
   const studio = generateIdentity();
   savePairedPeer("studio", { publicKey: studio.publicKey, addresses: ["ws://192.168.1.10:47381"], pairedAt: new Date().toISOString(), grants: { incoming: ["shell"], outgoing: expandGrants(["all"]) } });

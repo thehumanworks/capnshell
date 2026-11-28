@@ -277,7 +277,7 @@ async function dialLocal(port: number): Promise<net.Socket> {
  * The forwarding device's end of one connection: the device calls it with what the port sends,
  * and `closed` tells the forwarding device the device's socket closed.
  */
-export class ForwardEnd extends RpcTarget implements ForwardSink {
+class ForwardEnd extends RpcTarget implements ForwardSink {
   #tunnel: Tunnel;
   #closed: (reason: string | undefined) => void;
   constructor(tunnel: Tunnel, closed: (reason: string | undefined) => void) {
@@ -288,4 +288,29 @@ export class ForwardEnd extends RpcTarget implements ForwardSink {
   data(data: Uint8Array) { return this.#tunnel.receive(data); }
   end() { this.#tunnel.ended(); }
   closed(reason?: string) { this.#closed(typeof reason === "string" ? reason : undefined); }
+}
+
+/** A connection to the port as the forwarding device holds it: a stub of the device's PortConnection. */
+interface HeldConnection { write(data: Uint8Array): PromiseLike<unknown>; end(): unknown; [Symbol.dispose](): void }
+
+/**
+ * Carry `socket`, a connection to the forwarding device's port, through `forward`, the device's
+ * forward: in `tunnels` until it closes. A connection that closed cleanly here waits for the
+ * device to say its socket closed too; one that failed is dropped there at once. Rejects when
+ * the device does not open the connection, which is then closed here.
+ */
+export async function carry(forward: { connect(sink: ForwardSink): PromiseLike<unknown> }, socket: net.Socket, flow: Flow, tunnels: Set<Tunnel>): Promise<void> {
+  const tunnel = new Tunnel(socket, flow);
+  let held: HeldConnection | undefined;
+  let done = false;
+  const release = () => { done = true; held?.[Symbol.dispose](); held = undefined; };
+  const sink = new ForwardEnd(tunnel, (reason) => { if (reason !== undefined) tunnel.close(reason); release(); });
+  tunnels.add(tunnel);
+  void tunnel.closed.then((reason) => { tunnels.delete(tunnel); if (reason !== undefined) release(); });
+  let opened: HeldConnection;
+  try { opened = await forward.connect(sink) as HeldConnection; }
+  catch (error) { tunnel.close("The device did not open the connection."); throw error; }
+  if (done) { opened[Symbol.dispose](); return; }
+  held = opened;
+  tunnel.start({ send: (data) => opened.write(data), end: () => opened.end() });
 }

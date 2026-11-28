@@ -498,6 +498,29 @@ export function createCli(): Command {
       const { wake } = await import("./commands/wake.js");
       process.exitCode = await wake(oneDevice("wake", name, device), options);
     });
+  program.command("forward")
+    .description("Reach a port on localhost on a paired device: listen on 127.0.0.1 here and carry each connection there")
+    .usage("[options] <device> <port>")
+    .argument("[device]", "A paired device's name, or --device")
+    .argument("[port]", "The port on localhost on the device, such as 5432")
+    .addOption(deviceOption("The paired device, in place of the DEVICE argument"))
+    .option("-l, --local <port>", "The port to listen on here, on 127.0.0.1 only (default: PORT)")
+    .addHelpText("after", [
+      "",
+      "Each connection to 127.0.0.1:LOCALPORT here reaches localhost:PORT on DEVICE, 127.0.0.1 or else ::1",
+      "there, over the link cns holds to it, directly or through the relay. Any program on this device can",
+      "use the port, as with ssh -L. DEVICE must grant this one shell, or the port alone: on DEVICE, run",
+      "cns peer grant NAME port:5432 (several: port:5432,port:8080). A lost link closes its connections and",
+      "reconnects, and the listener stays. Exit 3 when DEVICE no longer accepts this device, 4 when it no",
+      "longer lets it reach the port, 130 after Ctrl-C.",
+      "Examples: cns forward studio 5432    cns forward studio 3000 --local 13000",
+    ].join("\n"))
+    .action(async (name: string | undefined, port: string | undefined, given: { device?: string; local?: string }) => {
+      const { device, after, options } = paired("forward", "DEVICE PORT", [name, port], given);
+      if (after.length !== 1) throw new Error("forward takes a device and one port: cns forward DEVICE PORT [--local LOCALPORT].");
+      const { forward } = await import("./commands/forward.js");
+      process.exitCode = await forward(device, after[0]!, options);
+    });
   program.command("identity")
     .description("Show this device's identity for pairing, creating it on first use")
     .option("-j, --json", "Print { publicKey, fingerprint, createdAt, path } as JSON")
