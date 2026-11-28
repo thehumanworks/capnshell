@@ -82,7 +82,17 @@ interface Linked { link: DeviceLink; handle: RpcStub<PortForward>; flow: Flow; t
 export async function forward(name: string, portText: string, options: { local?: string }): Promise<number> {
   const port = portOf(portText, "PORT");
   const local = options.local === undefined ? port : portOf(options.local, "--local");
-  resolvePeer(name);
+  const { publicKey } = resolvePeer(name);
+  /**
+   * The device as it is saved here now. Read again for each link and each connection: a device
+   * unpaired or removed here meanwhile, or another device saved under its name, is not reached.
+   */
+  const saved = () => {
+    let device: ReturnType<typeof resolvePeer>;
+    try { device = resolvePeer(name); } catch (error) { throw new Final(errorMessage(error), 3); }
+    if (device.publicKey !== publicKey) throw new Final(`${name} is saved here for another device now; start cns forward again to reach it.`, 3);
+    return device;
+  };
   const { identity } = ensureIdentity();
   await secureReady();
   const finished = Promise.withResolvers<undefined>();
@@ -132,6 +142,12 @@ export async function forward(name: string, portText: string, options: { local?:
     }
     open++;
     socket.once("close", () => { open--; });
+    try { saved(); }
+    catch (error) {
+      socket.destroy();
+      if (error instanceof Final) finish(error.code, error.message);
+      return;
+    }
     const at = await linkFor(socket);
     if (!at) {
       if (!socket.destroyed && code === undefined) say(`closed a new connection: the link to ${name} did not come back within ${CONNECT_MS / 1000} seconds.`);
@@ -157,9 +173,7 @@ export async function forward(name: string, portText: string, options: { local?:
   };
   /** One link to the device and a forward on it. */
   async function reach(first: boolean): Promise<Linked> {
-    // Read again each time: a device unpaired or removed here meanwhile is not reached.
-    let device: ReturnType<typeof resolvePeer>;
-    try { device = resolvePeer(name); } catch (error) { throw new Final(errorMessage(error), 3); }
+    const device = saved();
     let link: DeviceLink;
     try { link = await openDeviceLink(device, identity, stopping.signal); }
     catch (error) { throw error instanceof AuthError ? error : new Error(`Cannot connect to ${name}: ${errorMessage(error)}`, { cause: error }); }

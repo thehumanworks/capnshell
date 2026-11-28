@@ -206,7 +206,7 @@ test("over the daemon's link: 50 MiB each way by hash while the link still answe
   borrowed.shell[Symbol.dispose]();
 });
 
-test("with only the port's grant, over its own link: other ports refused, one audit entry, and a revoked grant ends it with 4 and unpairing with 3",
+test("with only the port's grant, over its own link: other ports refused, one audit entry, a revoked grant ends it with 4, and unpairing or removing with 3",
   { skip: !posix, timeout: 120000 }, async (t) => {
   const devices = await testDevices(t, "cns-forward-grant-");
   const studio = await devices.device("studio");
@@ -216,6 +216,7 @@ test("with only the port's grant, over its own link: other ports refused, one au
   const echoPort = await service(t, echo);
   const other = await service(t, echo);
   const local = await unusedPort("127.0.0.1");
+
 
   // Port words never travel in a pairing.
   const pairing = await devices.cli(studio, ["pair", "--yes", "--grant", `files,port:${echoPort}`, "--state", studio.state]);
@@ -272,6 +273,38 @@ test("with only the port's grant, over its own link: other ports refused, one au
   assert.equal(removed.code, 0, removed.output);
   assert.equal(await within(again.exited, "the forward exiting on unpairing", () => again.output), 3, again.output);
   assert.match(again.stderr, /cns: studio no longer accepts this device \(/);
+
+  /** Pair the two again, from nothing on either side, with shell for laptop on studio. */
+  const repair = async () => {
+    await devices.cli(laptop, ["peer", "remove", "studio"]);
+    await devices.cli(studio, ["peer", "remove", "laptop", "--state", studio.state]);
+    await devices.pair(studio, laptop, { hostGrants: "shell" });
+  };
+  const notSaved = /cns: No paired device is saved as studio\./;
+
+  // Removed here while forwarding: its own link outlives that until studio's daemon restarts,
+  // and the next link is not made, so it ends with 3.
+  await repair();
+  const removedHere = await forwarding(t, laptop, ["studio", String(echoPort), "--local", local]);
+  const removing = await devices.cli(laptop, ["peer", "remove", "studio"]);
+  assert.equal(removing.code, 0, removing.output);
+  const stopped = await devices.cli(studio, ["stop", "--state", studio.state]);
+  assert.equal(stopped.code, 0, stopped.output);
+  await devices.up(studio, studio.port);
+  assert.equal(await within(removedHere.exited, "the forward exiting once removed here", () => removedHere.output), 3, removedHere.output);
+  assert.match(removedHere.stderr, notSaved);
+
+  // Removed here while forwarding, with the link still up: the next connection is closed, and it ends with 3.
+  await repair();
+  const nextConnection = await forwarding(t, laptop, ["studio", String(echoPort), "--local", local]);
+  assert.equal(await echoed(await dial(local), "before"), "before");
+  await devices.cli(laptop, ["peer", "remove", "studio"]);
+  const late = net.connect({ host: "127.0.0.1", port: Number(local) });
+  late.on("error", () => {});
+  const lateClosed = once(late, "close");
+  assert.equal(await within(nextConnection.exited, "the forward exiting at the next connection", () => nextConnection.output), 3, nextConnection.output);
+  assert.match(nextConnection.stderr, notSaved);
+  await within(lateClosed, "the next connection closing", () => nextConnection.output);
 });
 
 test("through the relay when no direct address answers", { skip: !posix, timeout: 120000 }, async (t) => {
