@@ -73,6 +73,16 @@ export function fromBase64url(text: string): Uint8Array<ArrayBuffer> {
 }
 export function size(data: RelayData): number { return typeof data === "string" ? encoder.encode(data).length : data.byteLength; }
 export const randomId = () => base64url(crypto.getRandomValues(new Uint8Array(16)));
+/**
+ * A device's relay message as a JSON object. Text that is not JSON, and JSON that is not an
+ * object (null, a number, a string, an array), give undefined: reading a field of null throws.
+ */
+export function parseJsonObject(text: string): { [field: string]: unknown } | undefined {
+  try {
+    const value: unknown = JSON.parse(text);
+    return typeof value === "object" && value !== null && !Array.isArray(value) ? value as { [field: string]: unknown } : undefined;
+  } catch { return undefined; }
+}
 
 /**
  * What a registering daemon signs: SHA-256 over the protocol name, the relay's host as
@@ -181,8 +191,8 @@ export class RelayRoom {
     return {
       message: (data) => {
         if (typeof data !== "string" || size(data) > 4096) { safeClose(socket, 4008, "Invalid relay message."); return; }
-        let message: { t?: unknown; sig?: unknown };
-        try { message = JSON.parse(data); } catch { safeClose(socket, 4008, "Invalid relay message."); return; }
+        const message: { t?: unknown; sig?: unknown } | undefined = parseJsonObject(data);
+        if (!message) { safeClose(socket, 4008, "Invalid relay message."); return; }
         if (proved) {
           if (message.t === "ping") json(socket, { t: "pong" });
           return;
@@ -415,10 +425,7 @@ export class PairingRooms {
 
 function parseRoomMessage(data: RelayData): { t?: unknown; m?: unknown; reason?: unknown } | undefined {
   if (typeof data !== "string" || size(data) > MAX_ROOM_MESSAGE_BYTES + 1024) return undefined;
-  try {
-    const value: unknown = JSON.parse(data);
-    return typeof value === "object" && value !== null && !Array.isArray(value) ? value : undefined;
-  } catch { return undefined; }
+  return parseJsonObject(data);
 }
 
 /** A request the relay understands, from its path and query. */

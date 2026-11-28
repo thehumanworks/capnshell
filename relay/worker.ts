@@ -8,7 +8,7 @@
  */
 import {
   ACCEPTED_CLIENT_KEYS, ANSWER_MS, CHALLENGE_MS, CLIENT_HEADER, MAX_DIALS_PER_ADDRESS, MAX_HELD_BYTES, MAX_HELD_MESSAGES, MAX_PIPES_PER_KEY, MAX_RELAY_MESSAGE_BYTES,
-  PairingRooms, RELAY_HEALTH, randomId, route, size, verifyClient, verifyProof, type RelayData,
+  PairingRooms, RELAY_HEALTH, parseJsonObject, randomId, route, size, verifyClient, verifyProof, type RelayData,
 } from "../src/relay-hub.js";
 
 // The few Workers runtime types this file uses, so it typechecks without @cloudflare/workers-types.
@@ -127,9 +127,8 @@ export class RelayKey {
     if (data.role === "listener") {
       if (data.proved) return;
       if (typeof message !== "string" || message.length > 4096) { safeClose(socket, 4008, "Invalid relay message."); return; }
-      let parsed: { t?: unknown; sig?: unknown };
-      try { parsed = JSON.parse(message); } catch { safeClose(socket, 4008, "Invalid relay message."); return; }
-      if (parsed.t !== "proof" || typeof parsed.sig !== "string") { safeClose(socket, 4008, "Invalid relay message."); return; }
+      const parsed: { t?: unknown; sig?: unknown } | undefined = parseJsonObject(message);
+      if (!parsed || parsed.t !== "proof" || typeof parsed.sig !== "string") { safeClose(socket, 4008, "Invalid relay message."); return; }
       if (!(await verifyProof(data.host, data.key, data.nonce, parsed.sig))) { safeClose(socket, 4003, "The proof does not match the key."); return; }
       // A socket that left while its proof was checked must not displace the live one.
       if (socket.readyState !== 1) return;

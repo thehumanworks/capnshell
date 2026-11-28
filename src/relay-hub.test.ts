@@ -40,6 +40,8 @@ async function open(url: string, headers?: Record<string, string>) {
 const external = process.env.CNS_TEST_RELAY_URL;
 /** What a dialer would get, without opening a socket. */
 const dialStatus = async (url: string, headers?: Record<string, string>) => (await fetch(url.replace(/^ws/, "http"), { headers: { Upgrade: "websocket", Connection: "Upgrade", "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Version": "13", ...headers ?? await client(url) } })).status;
+/** Text that is not JSON, and JSON that is not an object: anyone can send these to a relay. */
+const NOT_OBJECTS = ["not json", "null", "42", "true", "false", JSON.stringify("proof"), "[]", JSON.stringify([{ t: "proof", sig: "x" }])];
 
 async function register(base: string, identity: ReturnType<typeof generateIdentity>, sign = identity, host?: string, clientHost = host) {
   const url = relayEndpoint(base, "accept", identity.publicKey);
@@ -141,6 +143,21 @@ test("one address cannot hold many pairing rooms' guests", () => {
   assert.equal(extra.closed?.code, 4029);
 });
 
+test("a pairing room's host that sends anything but a JSON object ends its room, and rooms still open", () => {
+  const rooms = new PairingRooms();
+  for (const bad of NOT_OBJECTS) {
+    const host = roomSocket();
+    rooms.open(host.socket).message(bad);
+    assert.deepEqual(host.closed, { code: 4008, reason: "Invalid relay message." }, bad);
+  }
+  assert.equal(rooms.size, 0);
+  const host = roomSocket();
+  rooms.open(host.socket);
+  const { room } = host.sent.shift() as { room: number };
+  rooms.join(room, roomSocket().socket).message("hello");
+  assert.deepEqual(host.sent, [{ t: "guest" }, { t: "msg", m: "hello" }]);
+});
+
 test("dialAddresses adds the relay only when the record has no relay address", () => {
   const key = generateIdentity().publicKey;
   const direct = ["ws://192.168.1.68:47381", "ws://100.107.74.1:47381"];
@@ -215,6 +232,36 @@ test("a dial refused while a daemon proves its key does not lose the registratio
   listener.socket.send(JSON.stringify({ t: "proof", sig: Buffer.from(studio.sign(await challengeBytes(new URL(url).host, studio.publicKey, challenge.nonce))).toString("base64url") }));
   assert.deepEqual(await listener.json(), { t: "ready" });
   const dialer = await open(relayEndpoint(relay.url, "dial", studio.publicKey));
+  assert.equal((await listener.json()).t, "incoming");
+  dialer.socket.close();
+  listener.socket.close();
+});
+
+test("a daemon that sends anything but a JSON object is refused, and its key still registers", async (t) => {
+  let base = external;
+  if (!base) {
+    const relay = startRelay({ bind: LOOPBACK, port: 0 });
+    t.after(() => relay.stop());
+    base = relay.url;
+  }
+  const studio = generateIdentity();
+  const invalid = { code: 4008, reason: "Invalid relay message." };
+  // Reading a field of null used to throw instead.
+  for (const bad of NOT_OBJECTS) {
+    const early = await open(relayEndpoint(base, "accept", studio.publicKey));
+    assert.equal((await early.json()).t, "challenge");
+    early.socket.send(bad);
+    assert.deepEqual(await early.closed, invalid, `before the proof: ${bad}`);
+    // The Worker leaves a registered daemon's messages to the runtime, which only answers pings.
+    if (external) continue;
+    const late = await register(base, studio);
+    assert.deepEqual(await late.json(), { t: "ready" });
+    late.socket.send(bad);
+    assert.deepEqual(await late.closed, invalid, `after the proof: ${bad}`);
+  }
+  const listener = await register(base, studio);
+  assert.deepEqual(await listener.json(), { t: "ready" });
+  const dialer = await open(relayEndpoint(base, "dial", studio.publicKey));
   assert.equal((await listener.json()).t, "incoming");
   dialer.socket.close();
   listener.socket.close();
