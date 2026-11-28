@@ -355,6 +355,22 @@ export function createCli(): Command {
     .option("-j, --json", "Print the list as JSON")
     .option("-S, --state <path>", "Local daemon state file")
     .action(async (options) => { const { peers } = await import("./commands/pairing-cli.js"); await peers(options); });
+  program.command("audit")
+    .description("Show what paired devices did on this device: the commands, terminals, sessions, files and skills they used")
+    .option("-p, --peer <name>", "Only what this paired device did: its name here, or its fingerprint")
+    .option("-t, --since <time>", "Only what happened since then: a time ago such as 30m, 2h or 7d, or a date such as 2026-11-28")
+    .option("-l, --limit <n>", "How many entries, newest first (default: 50)")
+    .option("-j, --json", "Print a JSON array, newest first: { start, end, peer, fingerprint, action, target, cwd, command, secrets, exitCode, signal, timedOut, error } per entry, each field only when it applies")
+    .addHelpText("after", [
+      "",
+      "The daemon appends a line to audit.log in ~/.cns (or CNS_CONFIG_DIR) for each command and terminal a",
+      "paired device runs here, each named session it starts or kills and each one's end, each file it reads",
+      "or writes, each skill file it reads, and refusals. A command is recorded when it ends, with its exit",
+      "status. Mesh secrets appear by name; file contents, typed keys, variables and secret values never do.",
+      "Past 10 MB the log moves to audit.log.1, so the two hold at most 20 MB. Only your user can read them.",
+      "Another device's log: cns run studio -- cns audit --since 1d",
+    ].join("\n"))
+    .action(async (options) => { const { audit } = await import("./commands/audit-cli.js"); audit(options); });
   program.command("status")
     .description("Show this device's identity, its daemon and its links")
     .option("-j, --json", "Print the status as JSON")

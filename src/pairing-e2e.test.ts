@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
@@ -131,6 +131,16 @@ test("two devices pair, run commands within their grants, and refuse everyone el
   const screen = await cli(laptop, ["screen", "studio", "work", "--until", "READY"]);
   assert.deepEqual([screen.code, screen.stdout], [0, "READY\n"]);
   assert.equal((await cli(laptop, ["kill", "studio", "work"])).code, 0);
+  // Studio's daemon recorded each of those, as laptop's, in a log only studio's user can read.
+  const laptopIdentity = JSON.parse((await cli(laptop, ["identity", "--json"])).stdout);
+  const audited = JSON.parse((await cli(studio, ["audit", "--json", "--peer", "laptop"])).stdout) as { peer: string; fingerprint: string; action: string; target: string; exitCode?: number }[];
+  assert.deepEqual(audited.map((entry) => [entry.action, entry.target, entry.exitCode]).sort(), [
+    ["run", "printf %s-%s a b", 0], ["run", "printf ok; printf err >&2; exit 3", 3], ["run", "tr a-z A-Z", 0],
+    ["session.end", "work", null], ["session.kill", "work", undefined], ["session.start", "work", undefined],
+  ]);
+  assert.ok(audited.every((entry) => entry.peer === "laptop" && entry.fingerprint === laptopIdentity.fingerprint));
+  assert.equal((await stat(path.join(studio.dir, "audit.log"))).mode & 0o777, 0o600);
+  assert.match((await cli(studio, ["audit"])).stdout, /^STARTED \(UTC\) +PEER +ACTION +RESULT +TARGET\n.+ laptop +session\.(kill|end) /);
 
   // Both sides list the pairing; laptop has no daemon of its own, so studio sees it offline between commands.
   const laptopPeers = JSON.parse((await cli(laptop, ["peers", "--json", "--state", laptop.state])).stdout);
