@@ -44,9 +44,6 @@ export class Flow {
   }
 }
 
-/** Settle a call nobody waits for, so that a failure is not reported as unhandled. */
-const settle = (call: unknown) => { void Promise.resolve(call).then(() => {}, () => {}); };
-
 /**
  * One forwarded TCP connection at one end: its socket here, and the other end over the link,
  * which it sends to once started. What the socket reads goes out in order, then its end; while
@@ -114,11 +111,13 @@ export class Tunnel {
       const next = this.#queue[0]!;
       if (next !== null && (this.#sending >= CONNECTION_WINDOW || this.#flow.sending >= FORWARD_WINDOW)) break;
       this.#queue.shift();
-      // The end follows the data on the link, in order, without waiting for its answers.
-      if (next === null) { settle(far.end()); continue; }
+      // The end follows the data on the link, in order, without waiting for its answers. Each
+      // call runs in a microtask, in order, so one the other end broke fails as a rejection,
+      // which closes this connection, and never throws in the socket's handler.
+      if (next === null) { void Promise.resolve().then(() => far.end()).catch((error: unknown) => this.close(errorMessage(error))); continue; }
       this.#sending++;
       this.#flow.sending++;
-      far.send(next).then(() => { this.#sending--; this.#flow.answered(); this.#pump(); },
+      Promise.resolve().then(() => far.send(next)).then(() => { this.#sending--; this.#flow.answered(); this.#pump(); },
         (error: unknown) => { this.#sending--; this.#flow.answered(); this.close(errorMessage(error)); });
     }
     if (!this.#queue.length) { this.socket.resume(); this.#finish(); return; }
@@ -215,7 +214,10 @@ export class PortForward extends RpcTarget {
 
   /** Open a connection to the port: 127.0.0.1, else ::1. What the port sends goes to `sink`. */
   async connect(sink: ForwardSink): Promise<PortConnection> {
-    if (!sink || (typeof sink !== "object" && typeof sink !== "function")) throw new Error("A forward sink is required.");
+    const given = sink as Partial<Record<keyof ForwardSink, unknown>> | null | undefined;
+    if (!given || (typeof given !== "object" && typeof given !== "function") || typeof given.data !== "function" || typeof given.end !== "function" || typeof given.closed !== "function") {
+      throw new Error("A forward sink has data, end and closed.");
+    }
     if (this.#closed) throw new Error("This forward has ended.");
     if (this.#tunnels.size + this.#connecting >= MAX_FORWARD_CONNECTIONS) throw new Error(`A forward carries at most ${MAX_FORWARD_CONNECTIONS} connections at once.`);
     // Parameters are released after the call returns; keep our own reference.
@@ -234,7 +236,7 @@ export class PortForward extends RpcTarget {
       this.#tunnels.delete(tunnel);
       this.#stats.bytesIn += tunnel.written;
       this.#stats.bytesOut += tunnel.read;
-      void Promise.resolve(far.closed(reason)).catch(() => {}).finally(() => far[Symbol.dispose]?.());
+      void Promise.resolve().then(() => far.closed(reason)).catch(() => {}).finally(() => far[Symbol.dispose]?.());
     });
     return new PortConnection(tunnel);
   }

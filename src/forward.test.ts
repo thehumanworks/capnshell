@@ -148,6 +148,39 @@ test("a forwarding device that sends more than the window allows is cut off", as
   void writes;
 });
 
+test("a sink without data, end and closed is refused, and one that breaks closes only its own connection", async (t) => {
+  const port = await server(t, (socket) => socket.write("hello from the service"));
+  const remote = remoteShell(t, [`port:${port}`], "hostile");
+  const forward = await remote.forward(port);
+  for (const shape of [{}, [], { data() {}, end() {} }, { data: 1, end() {}, closed() {} }]) {
+    await assert.rejects(async () => { await forward.connect(shape as unknown as ForwardSink); }, /A forward sink has data, end and closed\./);
+  }
+
+  // A sink whose calls throw: the connection closes with why, and nothing escapes into the socket's handler.
+  const local = new PortForward(port, "hostile-local");
+  t.after(() => local[Symbol.dispose]());
+  const reasons: Array<string | undefined> = [];
+  await local.connect({ data() { throw new Error("broken sink"); }, end() {}, closed(reason) { reasons.push(reason); throw new Error("broken again"); } });
+  await until(() => reasons.length === 1, "the broken sink's connection closing");
+  assert.equal(reasons[0], "broken sink");
+
+  // A plain object's functions are stubs that capnweb releases once connect returns, so the
+  // device's calls on them fail: each such connection closes and gives its slot back.
+  for (let i = 0; i < MAX_FORWARD_CONNECTIONS; i++) await forward.connect({ data() {}, end() {}, closed() {} });
+  class Sink extends RpcTarget implements ForwardSink { got = ""; data(data: Uint8Array) { this.got += Buffer.from(data).toString(); } end() {} closed() {} }
+  const sink = new Sink();
+  let connection: { [Symbol.dispose](): void } | undefined;
+  for (const deadline = Date.now() + 5000; !connection;) {
+    try { connection = await forward.connect(sink); }
+    catch (error) {
+      if (Date.now() > deadline) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
+  await until(() => sink.got === "hello from the service", "the service's bytes through a sink that holds");
+  connection[Symbol.dispose]();
+});
+
 test("connection 33 and forward 9 are refused, and a released one makes room", async (t) => {
   const held: net.Socket[] = [];
   const port = await server(t, (socket) => held.push(socket));
