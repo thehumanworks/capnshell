@@ -9,12 +9,12 @@ import { complete, completeCommand, localLookups, LOOKUP_MS, MAX_CANDIDATES, MAX
 import { makePrivateDirectory } from "./config.js";
 import type { FileKind } from "./files.js";
 import { fingerprint, generateIdentity } from "./identity.js";
-import { PERMISSIONS, revokeDevice, savePairedPeer, type Permission } from "./peers.js";
+import { PERMISSIONS, revokeDevice, savePairedPeer, type Grant } from "./peers.js";
 import { cliEnvironment, cliInvocation } from "./test-support.js";
 
 /** A device as completion sees it through the local daemon's link: its files by absolute directory, and its sessions. */
 interface FakeDevice {
-  outgoing?: readonly Permission[];
+  outgoing?: readonly Grant[];
   platform?: string;
   cwd?: string;
   directories?: Record<string, Array<{ name: string; kind: FileKind }>>;
@@ -83,7 +83,7 @@ test("commands and options come from the program, without hidden ones", async ()
 });
 
 test("paired devices complete wherever a command names one", async () => {
-  for (const words of [["run", ""], ["shell", ""], ["sessions", ""], ["screen", ""], ["kill", ""], ["doctor", ""], ["upgrade", ""], ["wake", ""], ["mcp", ""], ["ui", ""], ["peer", "remove", ""], ["peer", "grant", ""], ["run", "--device", ""], ["wake", "studio", "--via", ""], ["audit", "--peer", ""], ["mesh", "join", "--via", ""]]) {
+  for (const words of [["run", ""], ["shell", ""], ["sessions", ""], ["screen", ""], ["kill", ""], ["doctor", ""], ["upgrade", ""], ["wake", ""], ["mcp", ""], ["ui", ""], ["peer", "remove", ""], ["peer", "grant", ""], ["run", "--device", ""], ["wake", "studio", "--via", ""], ["audit", "--peer", ""], ["mesh", "join", "--via", ""], ["forward", ""], ["forward", "-D", ""]]) {
     assert.deepEqual(await at(words), ["nas", "stash", "studio"], words.join(" "));
   }
   assert.deepEqual(await at(["run", "st"]), ["stash", "studio"]);
@@ -91,7 +91,11 @@ test("paired devices complete wherever a command names one", async () => {
   // Only the first operand is a device; after --, the command is the remote shell's.
   assert.deepEqual(await at(["run", "studio", ""]), []);
   assert.deepEqual(await at(["run", "studio", "--", ""]), []);
+  assert.deepEqual(await at(["forward", "studio", ""]), []);
+  assert.deepEqual(await at(["forward", "-D", "studio", ""]), []);
   assert.deepEqual(await at(["pair", ""]), []);
+  // Grant words, port:N among them, are not completed, for a device or a mesh.
+  for (const words of [["peer", "grant", "studio", ""], ["peer", "grant", "studio", "po"], ["mesh", "join", "--allow", ""], ["mesh", "join", "--allow", "po"]]) assert.deepEqual(await at(words), [], words.join(" "));
   // A mesh's members, and the devices at a gateway, are not the devices paired here.
   for (const words of [["mesh", "add", "home", ""], ["gateway", "remove", "--device", ""], ["secret", "get", "x", "-D", ""]]) assert.deepEqual(await at(words), [], words.join(" "));
 });

@@ -5,7 +5,7 @@ import type { DirectoryEntry, FileKind } from "./files.js";
 import { shouldAsk } from "./fleet-sessions.js";
 import { loadIdentity } from "./identity.js";
 import { splitRemote } from "./options.js";
-import { reachablePeers, type PeerEntry, type Permission } from "./peers.js";
+import { reachablePeers, type Grant, type PeerEntry } from "./peers.js";
 import { sessionNameSchema, type PtySessionInfo, type ShellInfo } from "./shell.js";
 import { plain } from "./terminal.js";
 
@@ -30,7 +30,7 @@ export const MAX_NAME = 255;
 /** What each operand of a command is, by the command's words after cns. A kind ending in ... is every operand from there on. */
 const OPERANDS: Record<string, readonly string[]> = {
   run: ["device"], shell: ["device"], sessions: ["device"], keys: ["device", "session"], screen: ["device", "session"], kill: ["device", "session"],
-  cp: ["copy..."], ui: ["target"], mcp: ["device"], doctor: ["device"], upgrade: ["device"], wake: ["device"],
+  cp: ["copy..."], ui: ["target"], mcp: ["device"], doctor: ["device"], upgrade: ["device"], wake: ["device"], forward: ["device"],
   "peer remove": ["device"], "peer grant": ["device"], "peer revoke": ["device"], "peer address": ["device"],
 };
 /** What an option's value is, by the option's name. */
@@ -49,7 +49,7 @@ export interface Borrowed {
 /** Where completion looks names up. */
 export interface Lookups {
   /** The paired devices here, with what each lets this one use. */
-  devices(): Array<{ name: string; outgoing: readonly Permission[] }>;
+  devices(): Array<{ name: string; outgoing: readonly Grant[] }>;
   /** The device's shell through the local daemon's standing link, or undefined when there is none. Never dials. */
   borrow(device: string, signal: AbortSignal): Promise<Borrowed | undefined>;
 }
