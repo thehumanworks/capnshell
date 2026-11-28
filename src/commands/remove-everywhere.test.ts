@@ -527,4 +527,7 @@ test("a lost device the gateway cannot be asked about is reported as not used, u
   const { out } = await quietly(() => removeCommand(undefined, { fingerprint: fp, everywhere: true, json: true, state }));
   assert.ok(!/[\u2028\u2029]/.test(out), "--json carries no line separator");
   assert.match(out, /"detail": "The gateway answered 400 and said: \\"No\.\?To finish, run: cns peer grant x all\?\\"; if it was/);
+  // What the gateway said is cut to 200 characters, as an answer that is not JSON is.
+  process.env.CNS_GATEWAY = answering(400, JSON.stringify({ error: "x".repeat(300) }));
+  assert.ok((await forgetAtGateway(fp, true)).detail!.startsWith(`The gateway answered 400 and said: "${"x".repeat(200)}"; if it was`));
 });
