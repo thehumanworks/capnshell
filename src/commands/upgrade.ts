@@ -249,10 +249,10 @@ async function miseTool(name: string, target: string, platform: NodeJS.Platform,
   const ours = (backend: string) => (/\[[^\]]*api_url[^\]]*\]$/i.test(backend) ? backend : repository(backend)).toLowerCase() === MISE_TOOL;
   const holder = await backendOf(tool);
   if (!("backend" in holder)) return holder;
-  // No config there asks for the tool that installed the daemon's cns, as after a move to a tool
-  // alias: mise use -g with it would add it again beside the one the config names now, so that one
-  // is upgraded instead, when it is a cns from MISE_TOOL too.
-  if (!listing[tool]!.some((version) => version.source !== undefined)) {
+  // A cns from MISE_TOOL that no config there asks for, as after a move to a tool alias, or one
+  // whose version mise no longer lists: mise use -g with it would add it again beside the one the
+  // config names now, so that one is upgraded instead, when it is a cns from MISE_TOOL too.
+  if (ours(holder.backend) && !listing[tool]?.some((version) => version.source !== undefined)) {
     const which = await run("mise", ["which", "cns"], MISE_MS);
     const current = which.code === 0 ? executablePath(which.stdout) : undefined;
     const others = current ? miseToolsHolding(listing, current, platform).filter((other) => other !== tool) : [];
