@@ -452,8 +452,8 @@ export function createCli(): Command {
     .argument("[device]", "A paired device's name")
     .addOption(deviceOption("The paired device to wake, in place of the DEVICE argument"))
     .option("-v, --via <device>", "Only this paired device sends the packet, through the shell grant it gives this one (default: this device and each paired device known to be on DEVICE's network)")
-    .option("-m, --mac <mac>", "Send the packet from this device for the network card with this MAC address, in place of DEVICE; each sender runs this")
-    .option("-a, --address <ip>", "With --mac: the card's IPv4 address, so the packet goes to the network here that holds it")
+    .option("--mac <mac>", "Send the packet from this device for the network card with this MAC address, in place of DEVICE; each sender runs this")
+    .option("--address <ip>", "With --mac: the card's IPv4 address, so the packet goes to the network here that holds it")
     .addHelpText("after", [
       "",
       "Daemons tell paired devices their network cards over their links, and each device keeps the last",
