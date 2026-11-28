@@ -105,7 +105,17 @@ test("a sink that never answers stops reads: the device reads no more of the por
   await new Promise((resolve) => setTimeout(resolve, 300));
   assert.equal(calls.length, CONNECTION_WINDOW);
   assert.ok(calls.every((call) => call.byteLength <= FORWARD_CHUNK_BYTES));
-  assert.ok(service.writableLength > 32 * 1024 * 1024, `the service's own buffer holds what was not read: ${service.writableLength}`);
+  // Where the runtime keeps a write the kernel has not taken in the socket, as Bun does on Linux
+  // and macOS, the service's write still waits there. Bun on Windows hands the whole write to
+  // the kernel at once (libuv, through IOCP), so writableLength reads 0 there whatever the reader
+  // does; what the device read, below, is the check on every platform.
+  if (process.platform !== "win32") assert.ok(service.writableLength > 32 * 1024 * 1024, `the service's own buffer holds what was not read: ${service.writableLength}`);
+  // What the device read of the port: the window's calls, and what it had read when its socket
+  // paused, which is a read or two (Bun reads up to 512 KiB at a time). Had it kept reading, it
+  // would have read the 64 MiB well within the 300 ms.
+  forward[Symbol.dispose]();
+  const { bytesOut } = await forward.ended;
+  assert.ok(bytesOut <= CONNECTION_WINDOW * FORWARD_CHUNK_BYTES + 2 * 1024 * 1024, `the device read ${bytesOut} bytes of the port`);
 
   // Three connections share the forward's window: their own windows would allow 12 calls
   // unanswered, and together they never have more than FORWARD_WINDOW.
