@@ -88,6 +88,10 @@ test("the advice fits how the daemon runs", () => {
     for (const kind of ["systemd", "launchd"] as const) assert.doesNotMatch(advice({ service: true, installed: { kind, managedByNix: true, runsThis } }), /cns up --install/);
   }
   assert.equal(advice({ service: true }, "darwin"), `A service manager cns did not install runs it: update cns there and restart it. ${ends}`);
+  // A daemon whose sessions run in holders keeps them across the restart, so the advice does not warn of losing them.
+  assert.equal(advice({ service: false, keepsSessions: true }), "Restart it: cns daemon restart.");
+  assert.equal(advice({ installed: { kind: "systemd", managedByNix: true, runsThis: true }, keepsSessions: true }),
+    "Home Manager's service already names this cns; restart it: cns daemon restart. If it still runs the old one afterwards, systemctl --user cat cns shows what overrides it.");
 });
 
 test("cns peers names the devices behind the latest release when it is known, else behind this cns, and never fails without it", () => {

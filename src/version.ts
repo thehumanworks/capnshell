@@ -96,39 +96,42 @@ export interface RestartFacts {
     /** systemd drop-ins whose ExecStart runs another cns, whatever the unit file says; see serviceOverrides. */
     overrides?: string[];
   };
+  /** The daemon's named sessions outlive a restart (DaemonStatus.keepsSessions). */
+  keepsSessions?: boolean;
   platform: NodeJS.Platform;
 }
 
-/** Restarting a daemon ends the named sessions it holds, which nothing brings back. */
+/** Restarting a daemon from before holders (held-sessions.ts) ends the named sessions it holds, which nothing brings back. */
 const SESSIONS_END = "Restarting ends the named sessions it holds.";
 
 /** What to run so that the daemon runs this cns: restart it, reinstall its service, or update the configuration that owns it. */
 export function restartAdvice(facts: RestartFacts): string {
   const { installed } = facts;
+  const ends = facts.keepsSessions ? "" : ` ${SESSIONS_END}`;
   const overrides = installed?.overrides ?? [];
   if (overrides.length) {
     // Checked first: neither a restart nor a new unit file gets past a drop-in that replaces the command.
     const [these, replace, theirs] = overrides.length === 1 ? ["The drop-in", "replaces", "the file or its"] : ["The drop-ins", "replace", "the files or their"];
     return `${these} ${overrides.join(", ")} ${replace} the service's command with another cns, so every restart brings that one back. ` +
-      `Delete ${theirs} ExecStart lines, run systemctl --user daemon-reload, then cns daemon restart. ${SESSIONS_END}`;
+      `Delete ${theirs} ExecStart lines, run systemctl --user daemon-reload, then cns daemon restart.${ends}`;
   }
   if (installed?.managedByNix) {
     const check = installed.kind === "systemd" ? " If it still runs the old one afterwards, systemctl --user cat cns shows what overrides it." : "";
     return installed.runsThis
-      ? `Home Manager's service already names this cns; restart it: cns daemon restart. ${SESSIONS_END}${check}`
-      : `Home Manager owns its service: switch to a configuration with this cns (home-manager switch), which restarts it. ${SESSIONS_END}${check}`;
+      ? `Home Manager's service already names this cns; restart it: cns daemon restart.${ends}${check}`
+      : `Home Manager owns its service: switch to a configuration with this cns (home-manager switch), which restarts it.${ends}${check}`;
   }
   if (installed) {
     return installed.runsThis
-      ? `Restart it: cns daemon restart. ${SESSIONS_END}`
-      : `Its service runs another executable: run cns up --install with this cns, which points the service here and restarts it. ${SESSIONS_END}`;
+      ? `Restart it: cns daemon restart.${ends}`
+      : `Its service runs another executable: run cns up --install with this cns, which points the service here and restarts it.${ends}`;
   }
   if (facts.service) {
     const example = facts.platform === "linux" ? ", such as sudo systemctl restart cns for the NixOS module" : "";
-    return `A service manager cns did not install runs it: update cns there and restart it${example}. ${SESSIONS_END}`;
+    return `A service manager cns did not install runs it: update cns there and restart it${example}.${ends}`;
   }
-  if (facts.service === undefined) return `Restart it: cns daemon restart, or restart the service that runs it. ${SESSIONS_END}`;
-  return `Restart it: cns daemon restart. ${SESSIONS_END}`;
+  if (facts.service === undefined) return `Restart it: cns daemon restart, or restart the service that runs it.${ends}`;
+  return `Restart it: cns daemon restart.${ends}`;
 }
 
 /**

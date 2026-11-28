@@ -253,7 +253,7 @@ export function addPeerCommands(
   for (const role of roles) {
     const command = program.command(role).description(descriptions[role]);
     if (role === "sessions" || sessionRoles.has(role)) {
-      command.addHelpText("after", "\nNamed sessions live in the device's daemon: they survive this command and reconnects,\nand end when they are killed or the daemon stops. A session whose program has ended keeps its\nfinal screen for an hour, or until a new session needs its place. Start one with cns shell DEVICE --name NAME.");
+      command.addHelpText("after", "\nNamed sessions run on the device in processes of their own: they survive this command, reconnects\nand restarts of its daemon, and end when they are killed, their program exits, --timeout passes or\nthe device reboots (on Windows, also when its daemon stops). A session whose program has ended\nkeeps its final screen for an hour, or until a new session needs its place. Start one with\ncns shell DEVICE --name NAME.");
     }
     if (role !== "cp") command.addOption(deviceOption());
     if (sessionRoles.has(role)) command.addOption(new Option("-s, --session <name>", "The session, in place of the NAME argument").argParser(naming("session", "a session's name")));

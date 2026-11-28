@@ -247,7 +247,7 @@ export async function restart(options: RestartOptions): Promise<void> {
   const plan = restartPlan(status.service, installed?.kind);
   // A drop-in that pins another cns comes back with every restart; say so before the device is cut off.
   const overrides = installed ? serviceOverrides(installed.kind, selfPath()).map(printable) : [];
-  if (overrides.length) console.error(`Warning: ${restartAdvice({ service: status.service, installed: { kind: installed!.kind, ...installedServiceRuns(installed!, selfPath()), overrides }, platform: process.platform })}`);
+  if (overrides.length) console.error(`Warning: ${restartAdvice({ service: status.service, keepsSessions: status.keepsSessions, installed: { kind: installed!.kind, ...installedServiceRuns(installed!, selfPath()), overrides }, platform: process.platform })}`);
   const inside = runsUnder(status.pid);
   const log = path.join(path.dirname(state), "restart.log");
   await keepHandlesHere();
@@ -259,7 +259,7 @@ export async function restart(options: RestartOptions): Promise<void> {
   if (inside !== false) {
     // Inside the daemon, or where that cannot be told: the daemon may end this command any moment now.
     worker.unref();
-    console.log(`Restarting the daemon${through} in a moment. Links to this device drop and come back within seconds, and the named sessions it holds end. Check with cns status; the restart's log is ${log}.`);
+    console.log(`Restarting the daemon${through} in a moment. Links to this device drop and come back within seconds; ${status.keepsSessions ? "named sessions keep running" : "the named sessions it holds end"}. Check with cns status; the restart's log is ${log}.`);
     return;
   }
   const code = await new Promise<number | null>((resolve, reject) => { worker.once("error", reject); worker.once("exit", resolve); });
@@ -372,6 +372,7 @@ function driftWarning(status: DaemonStatus, state?: string): string | undefined 
     self,
     advice: restartAdvice({
       service: status.service,
+      keepsSessions: status.keepsSessions,
       ...installed ? {
         installed: {
           kind: installed.kind, ...installedServiceRuns(installed, self.executable),
