@@ -4,6 +4,7 @@ import { isIP } from "node:net";
 import { errorMessage } from "./errors.js";
 import { fingerprint, type PublicKey } from "./identity.js";
 import { isRelayAddress } from "./relay-hub.js";
+import { CNS_VERSION } from "./version.js";
 
 /**
  * Paired devices, each saved under an alias in the peers directory. Trust is keyed by the device's public key; the alias is only this user's
@@ -79,20 +80,58 @@ export function explainDenial(message: string, device?: string): string {
   return `${message} To allow it, run ${where}: cns peer grant ${match[2]} ${grantWords(missing)}`;
 }
 
+/**
+ * Features a saved record can need. A field that restricts or changes what a device may
+ * do, such as an expiry on its grants, belongs to a feature, and a record that holds it
+ * names the feature in `needs`. A cns refuses a record that needs a feature it does not
+ * know, rather than ignore the field and let the device do more than it should; any other
+ * field it does not know, at the top or in `grants`, it ignores. None yet: a feature is
+ * named here and its fields marked with it in PEER_FIELDS, and recordText then lists it in
+ * `needs` of every record that holds one of them. PEER_FIELDS has the rules a new field
+ * keeps.
+ */
+const FEATURES = [] as const;
+type Feature = typeof FEATURES[number];
+const knownFeatures: ReadonlySet<string> = new Set<string>(FEATURES);
+
+/**
+ * What a cns that does not know a field does with it, for every field of a record:
+ * - `base`: does not happen, as every cns that reads `needs` knows the field. Only fields
+ *   from before `needs` are base (peers.test.ts).
+ * - `informational`: ignores it and keeps it when it rewrites the record, so the field must
+ *   be safe to ignore and to go stale, as a label or a last-seen time is.
+ * - a feature: refuses the record, which lists that feature in `needs` (neededFeatures).
+ * Since a cns keeps the fields it does not know when it rewrites a record, three rules hold:
+ * a field's name is never reused with a new meaning; a released feature never gains fields,
+ * as a new field means a new feature; and a field in `grants` that widens access is a
+ * feature, never informational, since an older cns keeps it through `cns peer revoke`.
+ */
+type FieldKind = "base" | "informational" | Feature;
+export const PEER_FIELDS = {
+  record: { version: "base", needs: "base", publicKey: "base", addresses: "base", pairedAt: "base", grants: "base", mesh: "base" },
+  grants: { incoming: "base", outgoing: "base" },
+} as const satisfies { record: Record<keyof PairedPeer, FieldKind>; grants: Record<keyof PairedPeer["grants"], FieldKind> };
+
 const base64url = /^[A-Za-z0-9_-]+$/;
 export const publicKeySchema = z.string().regex(base64url).refine((value) => Buffer.from(value, "base64url").length === 32, "A public key is 32 bytes.");
 const addressSchema = z.string().max(2048).refine((value) => { try { validatePeerUrl(value); return true; } catch { return false; } }, "A peer address is a ws:// or wss:// URL.");
-export const pairedPeerSchema = z.strictObject({
+const needsSchema = z.array(z.string().regex(/^[a-z][a-z0-9-]{0,31}$/)).max(16);
+/** Fields this cns does not know are dropped when it reads a record; see FEATURES. */
+export const pairedPeerSchema = z.object({
   version: z.literal(2),
+  /** The features the record needs (FEATURES). Written only when there is one, so 2.4.0 and older, which refuse any field they do not know, still read every record that has no field newer than them. */
+  needs: needsSchema.refine((needs) => needs.every((feature) => knownFeatures.has(feature)), "The record needs a feature this cns does not know.").optional(),
   publicKey: publicKeySchema,
   /** Where this device has reached the peer; tried in order. */
   addresses: z.array(addressSchema).max(16),
   pairedAt: z.iso.datetime(),
-  grants: z.strictObject({ incoming: grantsSchema, outgoing: grantsSchema }),
+  grants: z.object({ incoming: grantsSchema, outgoing: grantsSchema }),
   /**
    * Set when the device is here because it is a member of this mesh (mesh.ts), not because
    * it paired with this one: the mesh's member list keeps the record and its incoming grants.
-   * A cns older than meshes refuses the whole record, so it never lets a mesh member in.
+   * A cns older than meshes refuses the whole record, so it never lets a mesh member in. It
+   * is older than `needs` too, so `needs` leaves mesh out: listing it would only make 2.4.0,
+   * which knows meshes, refuse mesh records.
    */
   mesh: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/).optional(),
   /** Set on a mesh's record for the cns gateway, which dials this device and is never dialed (mesh.ts). */
@@ -103,12 +142,52 @@ export type PairedPeer = z.infer<typeof pairedPeerSchema>;
 /** A saved paired device: its record, the alias it is saved under and its key's fingerprint. */
 export type PeerEntry = { name: string; fingerprint: string } & PairedPeer;
 
+/**
+ * A saved record this cns cannot use, with the key it names when that is a valid one. A
+ * mesh saves no record of its own beside it for that device (planMesh): what this cns
+ * cannot read may be what narrows the device's access, as in a newer cns's record.
+ */
+export class UnreadablePeer extends Error {
+  constructor(message: string, readonly publicKey?: PublicKey) { super(message); }
+}
+
 function entryFor(name: string, content: string): PeerEntry {
   let parsed: unknown;
-  try { parsed = JSON.parse(content); } catch { throw new Error(`Saved peer ${name} is not a paired-device record. Remove it with cns peer remove ${name}, then pair again.`); }
+  try { parsed = JSON.parse(content); } catch { throw new UnreadablePeer(`Saved peer ${name} is not a paired-device record. Remove it with cns peer remove ${name}, then pair again.`); }
+  const record = parsed as { publicKey?: unknown; needs?: unknown } | null;
+  const key = publicKeySchema.safeParse(record?.publicKey).data;
+  const missing = [...new Set(needsSchema.safeParse(record?.needs ?? []).data?.filter((feature) => !knownFeatures.has(feature)))];
+  if (missing.length) {
+    const which = process.platform === "win32" ? "Get-Command cns" : "command -v cns";
+    throw new UnreadablePeer(`Saved peer ${name} needs ${missing.length === 1 ? "the feature" : "the features"} ${missing.join(", ")}, which this cns (${CNS_VERSION}) does not have, so it leaves ${name} out: a newer cns saved it. ` +
+      `Update cns on this device, then restart its daemon: cns daemon restart. If the newer cns is installed already, ${which} shows which one a shell runs.`, key);
+  }
   const peer = pairedPeerSchema.safeParse(parsed);
-  if (!peer.success) throw new Error(`Saved peer ${name} is not a valid paired-device record: ${errorMessage(peer.error)}`);
+  if (!peer.success) throw new UnreadablePeer(`Saved peer ${name} is not a valid paired-device record: ${errorMessage(peer.error)}`, key);
   return { name, fingerprint: fingerprint(peer.data.publicKey), ...peer.data };
+}
+
+/** The features a record's fields need, as its `needs` lists them. */
+function neededFeatures(record: PairedPeer): Feature[] {
+  const used = (fields: Record<string, FieldKind>, value: object) => Object.entries(fields)
+    .flatMap(([key, kind]) => kind === "base" || kind === "informational" || (value as Record<string, unknown>)[key] === undefined ? [] : [kind]);
+  return [...new Set([...used(PEER_FIELDS.record, record), ...used(PEER_FIELDS.grants, record.grants)])].sort();
+}
+
+/**
+ * A record as it is saved. `needs` is left out when the record needs nothing, so 2.4.0 and
+ * older read it as before. The fields of `saved`, the record as it was, that this cns does
+ * not know are kept: a newer cns wrote them, and by leaving them out of `needs` it said a
+ * cns that does not know them may carry them along.
+ */
+function recordText(record: PairedPeer, saved?: unknown): string {
+  const unknownFields = (value: unknown, known: object) => value !== null && typeof value === "object" && !Array.isArray(value)
+    ? Object.fromEntries(Object.entries(value).filter(([key]) => !Object.hasOwn(known, key)))
+    : {};
+  const { version, needs: _needs, ...fields } = record;
+  const needs = neededFeatures(record);
+  const grants = { ...fields.grants, ...unknownFields((saved as { grants?: unknown } | undefined)?.grants, PEER_FIELDS.grants) };
+  return JSON.stringify({ version, ...needs.length ? { needs } : {}, ...fields, grants, ...unknownFields(saved, PEER_FIELDS.record) }, null, 2) + "\n";
 }
 
 const reportInvalid = (name: string, error: unknown) => console.error(`cns: skipping saved peer ${name}: ${errorMessage(error)}`);
@@ -148,17 +227,17 @@ export function savePairedPeer(name: string, peer: Omit<PairedPeer, "version">):
   const existing = findPairedPeer(peer.publicKey);
   if (existing) throw new Error(`This device is already paired as ${existing.name}.`);
   const record: PairedPeer = pairedPeerSchema.parse({ version: 2, ...peer });
-  createPeerFile(name, JSON.stringify(record, null, 2) + "\n");
+  createPeerFile(name, recordText(record));
 }
 
-/** Change a paired device's record, for example its grants or addresses. */
+/** Change a paired device's record, for example its grants or addresses. Fields this cns does not know stay as they were. */
 export function updatePairedPeer(name: string, change: (peer: PairedPeer) => PairedPeer): PairedPeer {
-  const entry = getPeer(name);
-  if (!entry) throw new Error(`Unknown peer: ${name}`);
-  const { name: _name, fingerprint: _fingerprint, ...current } = entry;
+  const content = readPeerFile(name);
+  if (content === undefined) throw new Error(`Unknown peer: ${name}`);
+  const { name: _name, fingerprint: _fingerprint, ...current } = entryFor(name, content);
   const updated = pairedPeerSchema.parse(change(current));
   if (updated.publicKey !== current.publicKey) throw new Error("A paired device's key cannot change; pair with the new device instead.");
-  rewritePeerFile(name, JSON.stringify(updated, null, 2) + "\n");
+  rewritePeerFile(name, recordText(updated, JSON.parse(content)));
   return updated;
 }
 
