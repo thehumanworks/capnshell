@@ -180,7 +180,8 @@ export async function forward(name: string, portText: string, options: { local?:
         if (code !== undefined) return code;
         const final = forwardFailure(error, name, port, first);
         if (final) { finish(final.code, final.message); return final.code; }
-        if (first) throw error;
+        // Nothing was forwarded yet: say what failed, in words that may be the device's, and stop.
+        if (first) { finish(1, errorMessage(error)); return 1; }
         await Promise.race([new Promise((resolve) => setTimeout(resolve, wait)), finished.promise]);
         wait = Math.min(RETRY_MAX_MS, wait * 2);
         continue;

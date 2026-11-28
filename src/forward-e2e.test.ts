@@ -274,4 +274,10 @@ test("through the relay when no direct address answers", { skip: !posix, timeout
   assert.equal(sha(await readAll(await dial(local))), sha(down));
   forward.child.kill("SIGINT");
   assert.equal(await forward.exited, 130, forward.output);
+
+  // Nothing answers now: the first attempt fails with 1, and says why on one line.
+  await relay.stop();
+  const unreachable = await devices.cli(laptop, ["forward", "studio", String(bulk), "--local", local]);
+  assert.equal(unreachable.code, 1, unreachable.output);
+  assert.match(unreachable.stderr, /^cns: Cannot connect to studio: [^\n]*\n$/);
 });
