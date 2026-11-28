@@ -360,15 +360,16 @@ export function createCli(): Command {
     .option("-p, --peer <name>", "Only what this paired device did: its name here, or its fingerprint")
     .option("-t, --since <time>", "Only what happened since then: a time ago such as 30m, 2h or 7d, or a date such as 2026-11-28")
     .option("-l, --limit <n>", "How many entries, newest first (default: 50)")
-    .option("-j, --json", "Print a JSON array, newest first: { start, end, phase, peer, fingerprint, action, target, cwd, command, secrets, exitCode, signal, timedOut, error } per entry, each field only when it applies")
+    .option("-j, --json", "Print a JSON array, newest first: { start, end, phase, id, peer, fingerprint, action, target, cwd, command, secrets, variables, exitCode, signal, timedOut, error } per entry, each field only when it applies")
     .addHelpText("after", [
       "",
       "The daemon appends a line to audit.log in ~/.cns (or CNS_CONFIG_DIR) for each command and terminal a",
       "paired device runs here, each named session it starts, attaches to or kills and each one's end, each",
       "file it reads or writes, each skill file it reads, and refusals. A command or terminal gets a line as",
       "it starts and one as it ends, with its exit status; this shows them once, as \"no end recorded\" while",
-      "it runs or when the daemon stopped before it ended. Mesh secrets appear by name; file contents, typed",
-      "keys, variables and secret values never do.",
+      "it runs or when the daemon stopped before it ended. A program's line names the mesh secrets it got",
+      "here (secrets) and the variables the device gave it (variables), such as a --secret from cns run;",
+      "never their values. File contents and typed keys never appear either.",
       "Past 10 MB the log moves to audit.log.1, so the two hold at most 20 MB. Only your user can read them.",
       "Another device's log: cns run studio -- cns audit --since 1d",
     ].join("\n"))

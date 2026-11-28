@@ -48,8 +48,9 @@ cns run studio -- cns audit --json   # what devices did on studio
 ```
 
 Each entry names the device, the command line, path or session, and how it ended; a command
-still running, or cut off by a daemon that stopped, shows as `no end recorded`. Secrets appear
-by name only, and keys typed into sessions never appear.
+still running, or cut off by a daemon that stopped, shows as `no end recorded`. A program's
+entry names the mesh secrets it got there (`secrets`) and the variables the device gave it, such
+as a `--secret` (`variables`), but never their values; file contents and typed keys never appear.
 
 ## Permission denied
 

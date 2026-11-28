@@ -184,22 +184,30 @@ test("a granted shell records what the peer does, by name and fingerprint, with 
     }
   }
 
-  // A command, with the mesh secret it got by name, and none of the caller's variables. Its start
+  // A command, with the mesh secret it got here and the caller's variables, by name only. Its start
   // is recorded while it runs, so a command that never ends still leaves a line.
   const running = shell.run('printf %s "$API_KEY$CALLER"; exit 3', { cwd: dir, secrets: ["home:API_KEY"], env: { CALLER: "caller-secret" } });
   assert.deepEqual([started(), recorded("run")], [[["run", 'printf %s "$API_KEY$CALLER"; exit 3', undefined, undefined]], []]);
   const result = await running;
   assert.deepEqual([result.stdout, result.exitCode], ["sk-secret-valuecaller-secret", 3]);
   const [run] = recorded("run");
-  // The start line is the end line without how it ended, so cns audit can pair them.
+  // The start line is the end line without how it ended, with the same id, so cns audit can pair them.
   assert.deepEqual({ ...entries[0], phase: undefined, end: undefined, exitCode: undefined }, { ...run, phase: undefined, end: undefined, exitCode: undefined });
-  assert.deepEqual({ ...run, start: undefined, end: undefined }, {
-    start: undefined, end: undefined, action: "run", target: 'printf %s "$API_KEY$CALLER"; exit 3', cwd: dir, secrets: ["home:API_KEY"], exitCode: 3, peer: "laptop", fingerprint: "k7qm",
+  assert.deepEqual({ ...run, start: undefined, end: undefined, id: undefined }, {
+    start: undefined, end: undefined, id: undefined, action: "run", target: 'printf %s "$API_KEY$CALLER"; exit 3', cwd: dir,
+    secrets: ["home:API_KEY"], variables: ["CALLER"], exitCode: 3, peer: "laptop", fingerprint: "k7qm",
   });
+  assert.match(run!.id!, /^[\w-]{8}$/);
   assert.ok(Date.parse(run!.end!) >= Date.parse(run!.start));
   class Sink extends RpcTarget { output() {} }
   assert.equal((await shell.exec(new Sink(), "exit 4")).exitCode, 4);
   assert.deepEqual(recorded("run").map((entry) => [entry.target, entry.exitCode]), [['printf %s "$API_KEY$CALLER"; exit 3', 3], ["exit 4", 4]]);
+  assert.notEqual(recorded("run")[1]!.id, run!.id, "each command has an id of its own");
+
+  // A secret the caller opened with cns run --secret travels as a variable: its name is recorded, never its value.
+  assert.equal((await shell.run('printf %s "$OPENAI_API_KEY"', { env: { OPENAI_API_KEY: "sk-opened-by-caller" } })).stdout, "sk-opened-by-caller");
+  const opened = recorded("run").at(-1)!;
+  assert.deepEqual([opened.variables, opened.secrets], [["OPENAI_API_KEY"], undefined]);
 
   // A file read or written in parts is one entry; reading it again is another, and so is a read from the middle.
   const file = path.join(dir, "notes.txt");
@@ -234,8 +242,9 @@ test("a granted shell records what the peer does, by name and fingerprint, with 
   shell.openPty({ output() {}, exit() {} }, { command: "exit 5" });
   await eventually("terminal");
   assert.deepEqual(recorded("terminal").map((entry) => [entry.target, entry.exitCode]), [["exit 5", 5]]);
-  assert.deepEqual(started().map(([action, target]) => [action, target]), [["run", 'printf %s "$API_KEY$CALLER"; exit 3'], ["run", "exit 4"], ["terminal", "exit 5"]]);
-  for (const secret of ["sk-secret-value", "caller-secret", "hunter2"]) assert.ok(!JSON.stringify(entries).includes(secret), secret);
+  assert.deepEqual(started().map(([action, target]) => [action, target]),
+    [["run", 'printf %s "$API_KEY$CALLER"; exit 3'], ["run", "exit 4"], ["run", 'printf %s "$OPENAI_API_KEY"'], ["terminal", "exit 5"]]);
+  for (const secret of ["sk-secret-value", "caller-secret", "sk-opened-by-caller", "hunter2"]) assert.ok(!JSON.stringify(entries).includes(secret), secret);
 
   // A refusal is recorded too, and still thrown at once.
   const reader = as(["sessions:list"]);
@@ -244,7 +253,15 @@ test("a granted shell records what the peer does, by name and fingerprint, with 
   await assert.rejects(async () => { await reader.run("id"); }, /shell not granted/);
   assert.deepEqual(entries.slice(-3).map((entry) => [entry.action, entry.target, /^Permission denied/.test(entry.error ?? "")]),
     [["file.read", "/etc/hosts", true], ["skill.read", "pdf/SKILL.md", true], ["run", "id", true]]);
-  assert.equal(started().length, 3, "a refused command never started");
+  assert.equal(started().length, 4, "a refused command never started");
+  // What a refusal keeps is cut short, so that refusals cannot cheaply push older entries out.
+  const long = `/${"x".repeat(9000)}`;
+  assert.throws(() => reader.readFile(long), /files not granted/);
+  assert.equal(entries.at(-1)!.target, `${long.slice(0, 512)}...`);
+  const many = Array.from({ length: 64 }, (_, index) => `VARIABLE_${index}_${"V".repeat(100)}`);
+  await assert.rejects(async () => { await reader.run("id", { env: Object.fromEntries(many.map((name) => [name, "value"])) }); }, /shell not granted/);
+  const { variables } = entries.at(-1)!;
+  assert.deepEqual([variables!.length < many.length, variables!.at(-1), many.slice(0, variables!.length - 1)], [true, "...", variables!.slice(0, -1)]);
 
   // An audit log that fails makes nothing else fail.
   const careless = as(["shell"], () => { throw new Error("disk full"); });

@@ -22,6 +22,8 @@ export interface AuditEntry {
    * with the same action, target and start; without one, it is still running or its daemon stopped.
    */
   phase?: "start";
+  /** Shared by a command's or terminal's start line and the line that ends it. */
+  id?: string;
   /** The device's name on this device, when it acted. */
   peer: string;
   /** The device's key fingerprint, which a rename does not change. */
@@ -35,6 +37,8 @@ export interface AuditEntry {
   command?: string;
   /** The mesh secrets a program got here, by name. */
   secrets?: string[];
+  /** The names of the variables the device gave a program, such as secrets cns run --secret opened there; never their values. */
+  variables?: string[];
   exitCode?: number | null;
   signal?: string;
   timedOut?: boolean;
@@ -45,8 +49,13 @@ export type AuditLog = (entry: AuditEntry) => void;
 
 /** Past this size the log moves to audit.log.1, replacing the one there, so the two take at most twice this. */
 export const AUDIT_MAX_BYTES = 10 * 1024 * 1024;
-/** Characters kept of one value; commands and paths are shorter. */
-const MAX_FIELD = 32_768;
+/** Characters kept of one value: as many as a command holds, so that a few long values cannot push the rest out. */
+const MAX_FIELD = 8192;
+
+/** `value` cut to `limit` characters, marked when it was cut. */
+export function clip(value: string, limit = MAX_FIELD): string {
+  return value.length > limit ? `${value.slice(0, limit)}...` : value;
+}
 
 export function auditPath(): string { return path.join(configDirectory(), "audit.log"); }
 
@@ -70,13 +79,13 @@ function cutShort(fd: number, size: number): boolean {
 /**
  * Append entries to the audit log at `file`, first moving it to FILE.1 when an entry would take it
  * past `maxBytes`. It never throws, so that no peer's action fails because its entry could not be
- * written: the first failure is reported, and later ones are only skipped.
+ * written: a failure is reported once, until a write works again.
  */
 export function auditLog({ file = auditPath(), maxBytes = AUDIT_MAX_BYTES, report = (message: string) => console.error(message) } = {}): AuditLog {
   let reported = false;
   return (entry) => {
     try {
-      const clipped = JSON.stringify(entry, (_key, value: unknown) => typeof value === "string" && value.length > MAX_FIELD ? `${value.slice(0, MAX_FIELD)}...` : value);
+      const clipped = JSON.stringify(entry, (_key, value: unknown) => typeof value === "string" ? clip(value) : value);
       const line = Buffer.from(`${clipped}\n`);
       let { fd, size } = openLog(file);
       try {
@@ -89,10 +98,11 @@ export function auditLog({ file = auditPath(), maxBytes = AUDIT_MAX_BYTES, repor
         // A line cut short ends here, so that it does not take this entry with it.
         writeSync(fd, cutShort(fd, size) ? Buffer.concat([Buffer.from("\n"), line]) : line);
       } finally { if (fd !== -1) closeSync(fd); }
+      reported = false;
     } catch (error) {
       if (reported) return;
       reported = true;
-      report(`Cannot write the audit log, so what paired devices do here goes unrecorded until it can be written (reported once): ${errorMessage(error)}`);
+      report(`Cannot write the audit log, so what paired devices do here goes unrecorded until it can be written (reported once until then): ${errorMessage(error)}`);
     }
   };
 }

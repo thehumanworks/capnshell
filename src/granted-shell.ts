@@ -1,6 +1,7 @@
+import { randomBytes } from "node:crypto";
 import { RpcTarget } from "capnweb";
 import { z } from "zod";
-import type { AuditEntry, AuditLog } from "./audit.js";
+import { clip, type AuditEntry, type AuditLog } from "./audit.js";
 import { errorMessage } from "./errors.js";
 import { describeGrants, type Permission } from "./peers.js";
 import { envSchema, MAX_ENV_VARIABLES } from "./platform.js";
@@ -38,15 +39,22 @@ const MAX_PARTS = 64;
 
 /** A value a peer sent, as the audit log keeps it. */
 const text = (value: unknown) => typeof value === "string" ? value : "(invalid)";
+/** The name of an environment variable, as envSchema allows it. */
+const variableName = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 /**
- * What the audit log keeps of a program's options: where it ran, the program a session runs and
- * the secrets it got here, by name. Never its variables, which can hold the caller's secrets.
+ * What the audit log keeps of a program's options: where it ran, the program a session runs, the
+ * mesh secrets it got here by name, and the names of the variables the caller gave it, which hold
+ * the secrets cns run --secret opened there. Never a variable's value.
  */
 function program(options: unknown): Partial<AuditEntry> {
   if (!options || typeof options !== "object") return {};
-  const { cwd, command, secrets } = options as { cwd?: unknown; command?: unknown; secrets?: unknown };
+  const { cwd, command, secrets, env } = options as { cwd?: unknown; command?: unknown; secrets?: unknown; env?: unknown };
   const names = secretNamesSchema.safeParse(secrets);
-  return { ...typeof cwd === "string" ? { cwd } : {}, ...typeof command === "string" ? { command } : {}, ...names.success ? { secrets: names.data } : {} };
+  const variables = env && typeof env === "object" ? Object.keys(env).filter((name) => variableName.test(name)).slice(0, MAX_ENV_VARIABLES) : [];
+  return {
+    ...typeof cwd === "string" ? { cwd } : {}, ...typeof command === "string" ? { command } : {},
+    ...names.success ? { secrets: names.data } : {}, ...variables.length ? { variables } : {},
+  };
 }
 /** How a command or a program ended, for its entry. */
 const ended = (exit: { exitCode: number | null; signal: string | null; timedOut: boolean }): Partial<AuditEntry> => ({
@@ -62,14 +70,32 @@ interface AuditedOptions<T> {
   starts?: boolean;
 }
 
+/** What a failure's entry keeps of a value: little, so that refusals cannot cheaply push older entries out. */
+const FAILED_FIELD = 512;
+/** As many of `names` as fit in FAILED_FIELD characters, with "..." after them when some did not. */
+function fewNames(names: string[]): string[] {
+  let length = 0;
+  const kept = names.filter((name) => (length += name.length + 2) <= FAILED_FIELD);
+  return kept.length < names.length ? [...kept, "..."] : kept;
+}
+
 /**
  * Do `call` and record `entry` once it has settled, with what `after` says of its result, or with
  * why it failed. A call that throws at once still throws at once, and recording never fails a call.
  */
-function audited<T>(record: Recorder, entry: Pick<AuditEntry, "action" | "target"> & Partial<AuditEntry>, call: () => T,
+function audited<T>(record: Recorder, given: Pick<AuditEntry, "action" | "target"> & Partial<AuditEntry>, call: () => T,
   { after = () => ({}), quiet = false, starts = false }: AuditedOptions<T> = {}): T {
   const start = new Date().toISOString();
-  const failed = (error: unknown) => record({ start, ...entry, error: errorMessage(error) });
+  // A start line and the line that ends it share an id, which pairs them.
+  const entry = starts ? { ...given, id: randomBytes(6).toString("base64url") } : given;
+  const failed = (error: unknown) => {
+    const { target, cwd, command, secrets, variables } = entry;
+    record({
+      start, ...entry, target: clip(target, FAILED_FIELD), ...cwd === undefined ? {} : { cwd: clip(cwd, FAILED_FIELD) },
+      ...command === undefined ? {} : { command: clip(command, FAILED_FIELD) }, ...secrets ? { secrets: fewNames(secrets) } : {},
+      ...variables ? { variables: fewNames(variables) } : {}, error: clip(errorMessage(error), FAILED_FIELD),
+    });
+  };
   const settled = (result: Awaited<T>) => {
     if (quiet) return;
     try {

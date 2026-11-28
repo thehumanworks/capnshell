@@ -32,27 +32,37 @@ function result(entry: AuditEntry): string {
   return Number.isNaN(took) ? exit : `${exit} after ${span(took)}`;
 }
 
-/** The target as people read it: a command with where it ran and the secrets it got, and why it failed. */
+/** The target as people read it: a command with where it ran, the secrets and variable names it got, and why it failed. */
 function target(entry: AuditEntry): string {
   const program = entry.action === "session.start" ? `${entry.target}: ${entry.command ?? "(login shell)"}` : entry.target;
-  const secrets = Array.isArray(entry.secrets) ? ` with secrets ${entry.secrets.join(", ")}` : "";
-  return `${program}${entry.cwd ? ` (in ${entry.cwd})` : ""}${secrets}${entry.error === undefined ? "" : `: ${entry.error}`}`;
+  const given = ([["secrets", entry.secrets], ["variables", entry.variables]] as const)
+    .flatMap(([label, names]) => Array.isArray(names) && names.length ? [`${label} ${names.join(", ")}`] : []);
+  return `${program}${entry.cwd ? ` (in ${entry.cwd})` : ""}${given.length ? ` with ${given.join(" and ")}` : ""}${entry.error === undefined ? "" : `: ${entry.error}`}`;
+}
+
+/**
+ * Text safe to print in the table: control characters, and the format and separator characters
+ * (such as bidi overrides and isolates) that would make a command or path read as something else.
+ * The shared printable() keeps format characters, so that other output still shows right-to-left
+ * text such as session titles; here a device chose every command and path.
+ */
+function tableSafe(text: string): string {
+  return printable(text).replace(/[\p{Cf}\p{Zl}\p{Zp}]/gu, "?");
 }
 
 /** Entries as a table, every value made safe to print: a device chose the commands and paths. */
 export function formatAudit(entries: readonly AuditEntry[]): string {
   const table = [["STARTED (UTC)", "PEER", "ACTION", "RESULT", "TARGET"], ...entries.map((entry) => [
     entry.start.slice(0, 19).replace("T", " "), entry.peer, entry.action, result(entry), target(entry),
-  ].map(printable))];
+  ].map(tableSafe))];
   const widths = table.reduce((max, row) => row.map((cell, index) => Math.max(cell.length, max[index] ?? 0)), [] as number[]);
   return table.map((row) => row.map((cell, index) => index === row.length - 1 ? cell : cell.padEnd(widths[index]!)).join("  ")).join("\n");
 }
 
-/** One entry per action: a command's or a terminal's start line is left out once the line that ends it is there. */
+/** One entry per action: a command's or a terminal's start line is left out once the line that ends it, with the same id, is there. */
 function oncePerAction(entries: readonly AuditEntry[]): AuditEntry[] {
-  const key = (entry: AuditEntry) => JSON.stringify([entry.start, entry.fingerprint, entry.action, entry.target]);
-  const ended = new Set(entries.filter((entry) => entry.phase !== "start").map(key));
-  return entries.filter((entry) => entry.phase !== "start" || !ended.has(key(entry)));
+  const ended = new Set(entries.flatMap((entry) => entry.phase !== "start" && typeof entry.id === "string" ? [entry.id] : []));
+  return entries.filter((entry) => entry.phase !== "start" || typeof entry.id !== "string" || !ended.has(entry.id));
 }
 
 /**

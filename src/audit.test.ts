@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
@@ -31,10 +31,13 @@ test("the audit log appends one JSON line per entry to a file only its owner can
   assert.deepEqual(readAuditLog(file).map((logged) => logged.action), ["run", "file.read"]);
   if (posix) assert.equal(statSync(file).mode & 0o777, 0o600);
   assert.deepEqual(reports, []);
+  // A value too long for a line is cut short, and marked.
+  write(entry({ target: "x".repeat(10_000) }));
+  assert.equal(readAuditLog(file).at(-1)!.target, `${"x".repeat(8192)}...`);
   // A line cut short, as by a crash while it was written, is skipped, and the next entry starts a line of its own.
   writeFileSync(file, '{"start":"2026', { flag: "a" });
   write(entry({ target: "after" }));
-  assert.deepEqual(readAuditLog(file).map((logged) => logged.target), ["make test", "/etc/hosts", "after"]);
+  assert.deepEqual(readAuditLog(file).map((logged) => logged.target), ["make test", "/etc/hosts", `${"x".repeat(8192)}...`, "after"]);
 });
 
 test("the audit log moves to audit.log.1 at its size cap, so the two never grow past twice it", (t) => {
@@ -53,13 +56,22 @@ test("the audit log moves to audit.log.1 at its size cap, so the two never grow 
   assert.deepEqual(kept, Array.from({ length: kept.length }, (_, index) => 40 - kept.length + index));
 });
 
-test("a log that cannot be written is reported once and never fails the caller", (t) => {
+test("a log that cannot be written is reported once until it can, and never fails the caller", (t) => {
   const dir = directory(t);
   const reports: string[] = [];
-  const missing = auditLog({ file: path.join(dir, "gone", "audit.log"), report: (message) => reports.push(message) });
+  const gone = path.join(dir, "gone");
+  const missing = auditLog({ file: path.join(gone, "audit.log"), report: (message) => reports.push(message) });
   for (let index = 0; index < 3; index++) missing(entry());
   assert.equal(reports.length, 1);
-  assert.match(reports[0]!, /^Cannot write the audit log, so what paired devices do here goes unrecorded until it can be written \(reported once\): /);
+  assert.match(reports[0]!, /^Cannot write the audit log, so what paired devices do here goes unrecorded until it can be written \(reported once until then\): /);
+  // Once a write works, the next failure is reported again.
+  mkdirSync(gone);
+  missing(entry());
+  assert.equal(reports.length, 1);
+  rmSync(gone, { recursive: true });
+  missing(entry());
+  missing(entry());
+  assert.equal(reports.length, 2);
   if (!posix) return;
   // Not to a file others can read, and not through a link.
   const shared = path.join(dir, "shared.log");
@@ -94,22 +106,24 @@ test("cns audit prints the newest entries first, filtered by peer and time, as a
   const hour = 3_600_000;
   const at = (ms: number) => new Date(Date.now() - ms).toISOString();
   const write = auditLog({ file: path.join(dir, "audit.log") });
-  const made = { start: at(3 * hour), cwd: "/srv/app", secrets: ["home:NPM_TOKEN"] };
+  // A command's start line and the one that ends it share an id; cns audit shows the end alone.
+  const made = { start: at(3 * hour), id: "made-run", cwd: "/srv/app", secrets: ["home:NPM_TOKEN"], variables: ["OPENAI_API_KEY"] };
   write(entry({ ...made, phase: "start" }));
   write(entry({ ...made, end: at(3 * hour - 2000), exitCode: 0 }));
   write(entry({ start: at(2 * hour), peer: "studio", fingerprint: "zzzz", action: "session.start", target: "build", command: "npm run dev" }));
   write(entry({ start: at(hour), action: "file.read", target: "/etc/shadow", error: "Permission denied: files not granted to laptop." }));
   // Still running, or its daemon stopped before it ended: only its start is there.
-  write(entry({ start: at(hour / 2), target: "sleep 9999", phase: "start" }));
-  write(entry({ start: at(1000), end: at(0), action: "terminal", target: "(login shell)\u001b]0;pwned\u0007", exitCode: null, signal: "SIGHUP" }));
+  write(entry({ start: at(hour / 2), id: "sleeping", target: "sleep 9999", phase: "start" }));
+  // A device chose the target: control, bidi and other format characters cannot make it read as something else.
+  write(entry({ start: at(1000), end: at(0), action: "terminal", target: "(login shell)\u001b]0;pwned\u0007 rm -rf \u202Etxt.sh\u2066\u200F\u2028", exitCode: null, signal: "SIGHUP" }));
 
   const table = run({}).split("\n");
   assert.match(table[0]!, /^STARTED \(UTC\) +PEER +ACTION +RESULT +TARGET$/);
-  assert.match(table[1]!, /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d +laptop +terminal +killed by SIGHUP after 1s +\(login shell\)\?\]0;pwned\?$/);
+  assert.match(table[1]!, /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d +laptop +terminal +killed by SIGHUP after 1s +\(login shell\)\?\]0;pwned\? rm -rf \?txt\.sh\?\?\?$/);
   assert.match(table[2]!, /laptop +run +no end recorded +sleep 9999$/);
   assert.match(table[3]!, /laptop +file\.read +failed +\/etc\/shadow: Permission denied: files not granted to laptop\.$/);
   assert.match(table[4]!, /studio +session\.start +ok +build: npm run dev$/);
-  assert.match(table[5]!, /laptop +run +exited 0 after 2s +make test \(in \/srv\/app\) with secrets home:NPM_TOKEN$/);
+  assert.match(table[5]!, /laptop +run +exited 0 after 2s +make test \(in \/srv\/app\) with secrets home:NPM_TOKEN and variables OPENAI_API_KEY$/);
   assert.equal(table.length, 6, "a command that ended is shown once");
 
   assert.deepEqual(JSON.parse(run({ json: true, peer: "studio" })).map((logged: AuditEntry) => logged.target), ["build"]);
