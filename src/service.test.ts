@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { installService, installedService, installedServiceRuns, launchdPlist, serviceEnvironment, serviceFailed, serviceFile, serviceOverrides, servicePath, systemdUnit, uninstallService, type Runner, type ServiceSpec } from "./service.js";
-import { launchCli, unusedPort } from "./test-support.js";
+import { fakeSystemctl, launchCli, unusedPort } from "./test-support.js";
 
 const spec: ServiceSpec = {
   program: { file: "/opt/cns & co/bin/cns", args: ["daemon", "--service", "--state", "/home/a b/.cns/daemon.json", "--relay-ish", "100%", "$HOME", "say \"hi\"\\"] },
@@ -79,8 +79,10 @@ test("installing writes a private file and starts the service; uninstalling stop
     assert.deepEqual(calls, kind === "systemd"
       ? ["systemctl --user daemon-reload", "systemctl --user enable cns.service", "systemctl --user restart cns.service"]
       : [`launchctl bootout gui/${process.getuid!()}/com.thehumanworks.cns`, `launchctl bootstrap gui/${process.getuid!()} ${file.path}`]);
-    // Installing again replaces the file.
-    await installService(file, runner);
+    // Installing again replaces the file. Without starting, a running daemon is left to the restart worker.
+    calls.length = 0;
+    await installService(file, runner, false);
+    assert.deepEqual(calls, kind === "systemd" ? ["systemctl --user daemon-reload", "systemctl --user enable cns.service"] : []);
     calls.length = 0;
     assert.equal(await uninstallService(kind, runner, home, {}), true);
     assert.equal(calls.length > 0, true);
@@ -91,29 +93,6 @@ test("installing writes a private file and starts the service; uninstalling stop
   await assert.rejects(installService(serviceFile("systemd", spec, home, {}), failing), /systemctl --user enable cns\.service failed: Failed to connect to bus/);
 });
 
-/** A stand-in for systemctl that runs the unit's ExecStart as systemd would, and stops it with cns stop. */
-const FAKE_SYSTEMCTL = String.raw`
-const { appendFileSync, readFileSync } = require("node:fs");
-const { spawn, spawnSync } = require("node:child_process");
-const args = process.argv.slice(2);
-appendFileSync(process.env.FAKE_LOG, args.join(" ") + "\n");
-const unitPath = process.env.XDG_CONFIG_HOME + "/systemd/user/cns.service";
-const unquote = (word) => word.slice(1, -1).replace(/\\(.)/g, "$1").replace(/%%/g, "%").replace(/\$\$/g, "$");
-function unit() {
-  const text = readFileSync(unitPath, "utf8");
-  const exec = text.match(/^ExecStart=(.*)$/m)[1].match(/"(?:[^"\\]|\\.)*"/g).map(unquote);
-  const env = {};
-  for (const [, line] of text.matchAll(/^Environment=("(?:[^"\\]|\\.)*")$/gm)) { const pair = unquote(line); env[pair.slice(0, pair.indexOf("="))] = pair.slice(pair.indexOf("=") + 1); }
-  return { exec, env };
-}
-const { exec, env } = (args.includes("restart") || args.includes("start") || args.includes("--now")) ? unit() : { exec: [], env: {} };
-const stop = () => spawnSync(exec[0], [...exec.slice(1, exec.indexOf("daemon")), "stop", "--state", exec[exec.indexOf("--state") + 1]], { stdio: "ignore" });
-if (args.includes("restart") || args.includes("start")) {
-  if (args.includes("restart")) stop();
-  spawn(exec[0], exec.slice(1), { detached: true, stdio: "ignore", env: { HOME: process.env.HOME, ...env } }).unref();
-}
-if (args.includes("--now")) stop();
-`;
 
 test("cns up --install runs the daemon from the unit; cns up starts it again after cns stop; --uninstall stops it", { skip: process.platform !== "linux", timeout: 90000 }, async (t) => {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-install-")));
@@ -121,9 +100,7 @@ test("cns up --install runs the daemon from the unit; cns up starts it again aft
   const bin = path.join(root, "bin");
   await mkdir(path.join(home, ".cns"), { recursive: true, mode: 0o700 });
   await mkdir(bin);
-  const systemctl = path.join(bin, "systemctl");
-  await writeFile(systemctl, `#!${process.execPath}\n${FAKE_SYSTEMCTL}`);
-  await chmod(systemctl, 0o755);
+  await fakeSystemctl(bin);
   const log = path.join(root, "systemctl.log");
   await writeFile(log, "");
   const env = { HOME: home, CNS_CONFIG_DIR: path.join(home, ".cns"), XDG_CONFIG_HOME: path.join(home, ".config"), PATH: `${bin}:${process.env.PATH}`, FAKE_LOG: log };
@@ -136,14 +113,14 @@ test("cns up --install runs the daemon from the unit; cns up starts it again aft
   t.after(async () => { await cli(["stop", "--state", state]); await rm(root, { recursive: true, force: true }); });
   const port = await unusedPort("127.0.0.1");
 
-  // A daemon cns up started is replaced by the service, which keeps its settings.
+  // A daemon cns up started is replaced by the service, which keeps its settings, through the restart's own process.
   const first = await cli(["up", "--bind", "127.0.0.1", "--port", port, "--state", state]);
   assert.equal(first.code, 0, first.stderr);
   const installed = await cli(["up", "--install", "--state", state]);
   assert.equal(installed.code, 0, installed.stderr);
-  assert.match(installed.stderr, /Stopped the running daemon; the service runs it from now on\./);
   assert.match(installed.stderr, /Installed a systemd user service at .*\/systemd\/user\/cns\.service/);
-  assert.match(installed.stdout, /^Running as \S+ \(cns [\d.]+, pid \d+, a systemd user service\), listening at ws:\/\/127\.0\.0\.1:\d+\./);
+  assert.match(installed.stdout, /^Restarted as \S+ \(cns [\d.]+, pid \d+, a systemd user service\), listening at ws:\/\/127\.0\.0\.1:\d+\./);
+  assert.notEqual(/pid (\d+)/.exec(installed.stdout)![1], /pid (\d+)/.exec(first.stdout)![1]);
   assert.ok(installed.stdout.includes(`ws://127.0.0.1:${port}`));
   const unit = await readFile(path.join(home, ".config", "systemd", "user", "cns.service"), "utf8");
   assert.match(unit, /"daemon" "--service" "--state"/);

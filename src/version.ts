@@ -125,3 +125,20 @@ export function restartAdvice(facts: RestartFacts): string {
   if (facts.service === undefined) return `Restart it: cns daemon restart, or restart the service that runs it. ${SESSIONS_END}`;
   return `Restart it: cns daemon restart. ${SESSIONS_END}`;
 }
+
+/**
+ * What cns peers says about the online devices that run an older cns than this one, or than the
+ * latest release when that is known and newer, and the command that upgrades them.
+ */
+export function behindHint(online: readonly { name: string; version?: string }[], latest?: string, own = CNS_VERSION): string[] {
+  const newest = latest !== undefined && compareVersions(latest, own) > 0 ? latest : own;
+  const behind = online.filter((device) => ["older", "unknown"].includes(versionOrder(device.version, newest)));
+  const lines: string[] = [];
+  if (behind.length) {
+    const than = newest === own ? `this device's ${own}` : `the latest release, ${newest}`;
+    const upgrades = behind.length === 1 ? `${behind[0]!.name} upgrades it` : "--all upgrades them";
+    lines.push(`Older cns than ${than}: ${behind.map((device) => `${device.name} (${device.version ?? "too old to report its version"})`).join(", ")}. cns upgrade ${upgrades}; add --dry-run to see how first.`);
+  }
+  if (newest !== own) lines.push(`This device runs cns ${own}, older than the latest release, ${newest}.`);
+  return lines;
+}

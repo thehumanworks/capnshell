@@ -1,6 +1,6 @@
 import { spawn, type SpawnOptionsWithoutStdio } from "node:child_process";
 import { EventEmitter, once } from "node:events";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -227,4 +227,39 @@ export function kittyKeyboard(screen: ModelTerminal, reply: (text: string) => vo
     /** Both screens: the flags in force and the depth, normal screen first. */
     get all() { return [modes.main.flags, modes.main.depth, modes.alternate.flags, modes.alternate.depth]; },
   };
+}
+
+/**
+ * A stand-in for systemctl --user that runs the unit's ExecStart as systemd would, and stops it
+ * with cns stop. It finds the unit as cns does, so it also works for the commands of the daemon
+ * it started, which has only HOME and the unit's environment. FAKE_LOG, when set, logs each call.
+ */
+const FAKE_SYSTEMCTL = String.raw`
+const { appendFileSync, readFileSync } = require("node:fs");
+const { spawn, spawnSync } = require("node:child_process");
+const args = process.argv.slice(2);
+if (process.env.FAKE_LOG) appendFileSync(process.env.FAKE_LOG, args.join(" ") + "\n");
+const unitPath = (process.env.XDG_CONFIG_HOME || process.env.HOME + "/.config") + "/systemd/user/cns.service";
+const unquote = (word) => word.slice(1, -1).replace(/\\(.)/g, "$1").replace(/%%/g, "%").replace(/\$\$/g, "$");
+function unit() {
+  const text = readFileSync(unitPath, "utf8");
+  const exec = text.match(/^ExecStart=(.*)$/m)[1].match(/"(?:[^"\\]|\\.)*"/g).map(unquote);
+  const env = {};
+  for (const [, line] of text.matchAll(/^Environment=("(?:[^"\\]|\\.)*")$/gm)) { const pair = unquote(line); env[pair.slice(0, pair.indexOf("="))] = pair.slice(pair.indexOf("=") + 1); }
+  return { exec, env };
+}
+const { exec, env } = (args.includes("restart") || args.includes("start") || args.includes("--now")) ? unit() : { exec: [], env: {} };
+const stop = () => spawnSync(exec[0], [...exec.slice(1, exec.indexOf("daemon")), "stop", "--state", exec[exec.indexOf("--state") + 1]], { stdio: "ignore" });
+if (args.includes("restart") || args.includes("start")) {
+  if (args.includes("restart")) stop();
+  spawn(exec[0], exec.slice(1), { detached: true, stdio: "ignore", env: { HOME: process.env.HOME, ...env } }).unref();
+}
+if (args.includes("--now")) stop();
+`;
+
+/** Put the stand-in for systemctl in `bin`, which goes first on the PATH of the processes that should use it. */
+export async function fakeSystemctl(bin: string): Promise<void> {
+  const file = path.join(bin, "systemctl");
+  await writeFile(file, `#!${process.execPath}\n${FAKE_SYSTEMCTL}`);
+  await chmod(file, 0o755);
 }

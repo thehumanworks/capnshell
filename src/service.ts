@@ -241,8 +241,12 @@ function must(runner: Runner, file: string, args: string[], next?: string): void
 
 const launchdDomain = () => `gui/${process.getuid?.() ?? 0}`;
 
-/** Write the service file, privately, and start the daemon through the service manager; a scheduled task is only registered, for runTask to run. */
-export async function installService(file: ServiceFile, runner: Runner = runCommand): Promise<void> {
+/**
+ * Write the service file, privately, and start the daemon through the service manager; a scheduled
+ * task is only registered, for runTask to run. With `start` false, the service manager only learns
+ * of the file, and a running daemon is left alone for the restart worker to replace.
+ */
+export async function installService(file: ServiceFile, runner: Runner = runCommand, start = true): Promise<void> {
   await mkdir(path.dirname(file.path), { recursive: true });
   // launchd opens the log itself, so its directory must exist first.
   await mkdir(configDirectory(), { recursive: true, mode: 0o700 });
@@ -254,14 +258,22 @@ export async function installService(file: ServiceFile, runner: Runner = runComm
   if (file.kind === "schtasks") {
     must(runner, schtasks(), ["/Create", "/TN", taskName(), "/XML", file.path, "/F"], "Run cns up to start the daemon without a service.");
   } else if (file.kind === "launchd") {
-    // Replace a loaded copy; bootout fails when none is loaded, which is fine.
-    runner("launchctl", ["bootout", `${launchdDomain()}/${SERVICE_LABEL}`]);
-    must(runner, "launchctl", ["bootstrap", launchdDomain(), file.path]);
+    if (start) loadLaunchAgent(file.path, runner);
   } else {
     must(runner, "systemctl", ["--user", "daemon-reload"]);
     must(runner, "systemctl", ["--user", "enable", SERVICE_UNIT]);
-    must(runner, "systemctl", ["--user", "restart", SERVICE_UNIT]);
+    if (start) must(runner, "systemctl", ["--user", "restart", SERVICE_UNIT]);
   }
+}
+
+/**
+ * Load the launchd agent's file, replacing a loaded copy, which starts its daemon. Unlike a
+ * kickstart, which runs the copy launchd loaded before, this runs what the file says now.
+ */
+export function loadLaunchAgent(file: string, runner: Runner = runCommand): void {
+  // bootout fails when none is loaded, which is fine.
+  runner("launchctl", ["bootout", `${launchdDomain()}/${SERVICE_LABEL}`]);
+  must(runner, "launchctl", ["bootstrap", launchdDomain(), file]);
 }
 
 /** Stop the daemon through the service manager and remove the service file. Returns whether one was installed. */

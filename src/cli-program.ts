@@ -420,6 +420,27 @@ export function createCli(): Command {
     .option("-S, --state <path>", "Local daemon state file")
     .addHelpText("after", "\nWith NAME: exit 0 when an address answered as the paired device, 3 when it answered as another device or refused the pairing, 5 when none answered or none is saved.\nWithout: exit 0 when paired devices can reach this device (warnings, such as only private addresses, do not change it), 3 when the daemon runs as another identity, 5 when there is no identity, no paired daemon or no address.")
     .action(async (name: string | undefined, { device, ...options }) => { const { doctor } = await import("./commands/pairing-cli.js"); await doctor(oneDevice("doctor", name, device), options); });
+  program.command("upgrade")
+    .description("Upgrade cns on a paired device, or on every one, to the latest release, and restart its daemon on it")
+    .argument("[device]", "A paired device's name; without one, --all")
+    .addOption(deviceOption("The paired device, in place of the DEVICE argument"))
+    .option("-a, --all", "Every paired device")
+    .option("-n, --dry-run", "Show what each device runs and what would run there, changing nothing")
+    .addHelpText("after", [
+      "",
+      "Each device is upgraded through the shell grant it gives this one, with the commands cns run would",
+      "run there. A cns that mise installed gets the release by its exact version (mise use -g",
+      "github:thehumanworks/capnshell@VERSION); then the new cns restarts the daemon in a process of its own,",
+      "as cns daemon restart does, or with cns up --install where a service still runs the old cns, so the",
+      "device keeps a daemon. Restarting ends the named sessions it holds. A device whose cns Nix manages, or",
+      "that was installed another way, is left as it is, and the report says what to run there.",
+      "The report has one line per device: upgraded, already current, needs a manual step, or unreachable,",
+      "with what to run later. Exit 1 when a device needs a manual step or did not answer.",
+    ].join("\n"))
+    .action(async (name: string | undefined, { device, ...options }: { device?: string; all?: boolean; dryRun?: boolean }) => {
+      const { upgrade } = await import("./commands/upgrade.js");
+      await upgrade(oneDevice("upgrade", name, device), options);
+    });
   program.command("identity")
     .description("Show this device's identity for pairing, creating it on first use")
     .option("-j, --json", "Print { publicKey, fingerprint, createdAt, path } as JSON")

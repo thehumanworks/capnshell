@@ -3,7 +3,7 @@ import test from "node:test";
 import manifest from "../package.json" with { type: "json" };
 import { infoSchema } from "./commands/connect-device.js";
 import { localShellInfo } from "./shell.js";
-import { CNS_VERSION, compareVersions, daemonDrift, describeVersion, reportedVersion, restartAdvice, versionOrder, type RestartFacts } from "./version.js";
+import { behindHint, CNS_VERSION, compareVersions, daemonDrift, describeVersion, reportedVersion, restartAdvice, versionOrder, type RestartFacts } from "./version.js";
 
 test("this cns's version is package.json's, and its handshake reports it", () => {
   assert.equal(CNS_VERSION, manifest.version);
@@ -82,4 +82,17 @@ test("the advice fits how the daemon runs", () => {
     for (const kind of ["systemd", "launchd"] as const) assert.doesNotMatch(advice({ service: true, installed: { kind, managedByNix: true, runsThis } }), /cns up --install/);
   }
   assert.equal(advice({ service: true }, "darwin"), `A service manager cns did not install runs it: update cns there and restart it. ${ends}`);
+});
+
+test("cns peers names the devices behind the latest release when it is known, else behind this cns, and never fails without it", () => {
+  const online = [{ name: "studio", version: "2.8.0" }, { name: "nas", version: "2.9.0" }, { name: "old" }];
+  assert.deepEqual(behindHint(online, "2.9.0", "2.8.0"), [
+    "Older cns than the latest release, 2.9.0: studio (2.8.0), old (too old to report its version). cns upgrade --all upgrades them; add --dry-run to see how first.",
+    "This device runs cns 2.8.0, older than the latest release, 2.9.0.",
+  ]);
+  // Offline, or GitHub did not answer: compared with this cns alone.
+  assert.deepEqual(behindHint(online, undefined, "2.8.0"), ["Older cns than this device's 2.8.0: old (too old to report its version). cns upgrade old upgrades it; add --dry-run to see how first."]);
+  // A release older than this cns, as for a build from source, changes nothing.
+  assert.deepEqual(behindHint([{ name: "studio", version: "2.9.0" }], "2.8.0", "2.9.0"), []);
+  assert.deepEqual(behindHint([], "2.9.0", "2.9.0"), []);
 });

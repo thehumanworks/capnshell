@@ -46,8 +46,9 @@ they print.
   (`command -v cns`, or `Get-Command cns` in PowerShell).
 - A daemon that stays old after a restart on Linux: `systemctl --user cat cns` shows a
   drop-in or another `ExecStart` that overrides the service.
-- `cns peers` and `cns doctor NAME` show which other devices run an older cns. The user
-  upgrades and restarts those on each device.
+- `cns peers` and `cns doctor NAME` show which other devices run an older cns.
+  `cns upgrade NAME --dry-run` shows how cns would upgrade one from here; with the user's
+  go-ahead, `cns upgrade NAME` (or `--all`) does it, and ends each daemon's named sessions.
 
 ## Never
 
