@@ -236,7 +236,8 @@ test("a daemon whose holders' socket paths would be too long keeps its named ses
     assert.equal(result.code, 0, `cns ${args.join(" ")}:\n${result.output}`);
     return result;
   };
-  assert.equal(JSON.parse((await cli(studio, ["status", "--json", "--state", studio.state])).stdout).daemon.keepsSessions, false);
+  const { daemon } = JSON.parse((await cli(studio, ["status", "--json", "--state", studio.state])).stdout) as { daemon: { pid: number; keepsSessions: boolean } };
+  assert.equal(daemon.keepsSessions, false);
   await cli(laptop, ["shell", "studio", "--name", "work", "--", program]);
   const [work] = JSON.parse((await cli(laptop, ["sessions", "studio", "--json"])).stdout) as Array<{ pid: number }>;
   assert.ok(!existsSync(holderDirectory(studio.state)), "no holder runs it");
@@ -246,4 +247,5 @@ test("a daemon whose holders' socket paths would be too long keeps its named ses
   const stopped = await cli(studio, ["stop", "--state", studio.state]);
   assert.equal(stopped.stdout, "Daemon stopped.\nNamed sessions ended with it: work. Their sockets' paths would be too long for them to outlive it: a shorter --state path keeps them running.\n");
   assert.ok(await processExited(work!.pid), "the session ended with the daemon");
+  assert.ok(await processExited(daemon.pid), "and the daemon has exited");
 });
