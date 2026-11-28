@@ -56,13 +56,18 @@ export function servicePath(kind: ServiceKind, home = os.homedir(), env: NodeJS.
   return path.posix.join(config, "systemd", "user", SERVICE_UNIT);
 }
 
+/**
+ * The variables of cns's own settings and its CA paths, which serviceEnvironment keeps. CA paths are
+ * trust configuration, not credentials. Without them a service can fail to reach the relay even
+ * though the same binary works in the login shell.
+ */
+export const SETTING_VARIABLES = ["CNS_CONFIG_DIR", "CNS_RELAY", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR"];
+
 /** The variables a daemon started from a login shell would have, which launchd and systemd do not pass on. */
 export function serviceEnvironment(env: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const kept: Record<string, string> = {};
-  // CA paths are trust configuration, not credentials. Without them a service can
-  // fail to reach the relay even though the same binary works in the login shell.
   // Never inherit TLS-verification bypasses or the rest of the shell's environment.
-  for (const name of ["PATH", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "CNS_CONFIG_DIR", "CNS_RELAY", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR"]) {
+  for (const name of ["PATH", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", ...SETTING_VARIABLES]) {
     const value = env[name];
     if (value) kept[name] = value;
   }
@@ -338,10 +343,9 @@ export function serviceOverrides(kind: ServiceKind, executable: string, runner: 
   });
 }
 
-/** Start an installed daemon that is not running, as after cns stop. */
-export function startService(kind: ServiceKind, runner: Runner = runCommand): void {
+/** Start an installed daemon that is not running, as after cns stop; runTask starts a scheduled task's. */
+export function startService(kind: "launchd" | "systemd", runner: Runner = runCommand): void {
   if (kind === "launchd") must(runner, "launchctl", ["kickstart", `${launchdDomain()}/${SERVICE_LABEL}`]);
-  else if (kind === "schtasks") must(runner, schtasks(), ["/Run", "/TN", taskName()], "Run cns up --install to register the task again.");
   else must(runner, "systemctl", ["--user", "start", SERVICE_UNIT]);
 }
 

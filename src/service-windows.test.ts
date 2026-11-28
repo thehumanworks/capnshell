@@ -9,7 +9,7 @@ import test from "node:test";
 import { connectControl } from "./commands/daemon.js";
 import {
   installedService, installedServiceRuns, installService, registeredTask, scheduledTask, schtasks, serviceFile, serviceKind, serviceLog, serviceName,
-  servicePath, runTask, startService, superviseDaemon, taskName, uninstallService, windowsQuote, type Runner, type ServiceSpec,
+  servicePath, runTask, superviseDaemon, taskName, uninstallService, windowsQuote, type Runner, type ServiceSpec,
 } from "./service.js";
 import { cliInvocation, launchCli, testDevices, unusedPort } from "./test-support.js";
 
@@ -175,12 +175,6 @@ test("the task's daemon is found by the --state its definition names, while Task
 test("starting the task runs it, and runs it again each second until a daemon answers, since Task Scheduler ignores a run while the last one ends", async () => {
   const name = taskName();
   const { calls, runner } = fakeSchtasks();
-  startService("schtasks", runner);
-  assert.deepEqual(calls, [step("/Run", "/TN", name)]);
-  assert.throws(() => startService("schtasks", fakeSchtasks(["/Run"], "ERROR: The system cannot find the file specified.").runner),
-    /^Error: .*schtasks\.exe \/Run \/TN \S+.* failed: ERROR: The system cannot find the file specified\. Run cns up --install to register the task again\.$/);
-
-  calls.length = 0;
   const sleeps: number[] = [];
   const sleep = async (ms: number) => { sleeps.push(ms); };
   let asked = 0;
@@ -245,7 +239,7 @@ test("the task's supervisor restarts a failed daemon 5 seconds later, detached a
 });
 
 // Registers a real task for this account, replacing the one cns up --install made: windows.yml sets CNS_TEST_TASK_SCHEDULER.
-test("on Windows, cns up --install runs a hidden daemon from the task, restarts it after a crash, restarts and reinstalls it through itself, and --uninstall removes it", { skip: process.platform !== "win32" || !process.env.CNS_TEST_TASK_SCHEDULER, timeout: 180000 }, async (t) => {
+test("on Windows, cns up --install runs a hidden daemon from the task, restarts it after a crash, restarts and reinstalls it through itself, and --uninstall removes it", { skip: process.platform !== "win32" || !process.env.CNS_TEST_TASK_SCHEDULER, timeout: 240000 }, async (t) => {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-task-")));
   const daemonState = path.join(root, "daemon.json");
   const cli = async (args: string[]) => {
@@ -316,22 +310,41 @@ test("on Windows, cns up --install runs a hidden daemon from the task, restarts 
   assert.equal((await status()).service, true, "started by the task");
 
   // Run through the daemon from a paired device, so inside the task's processes, as an upgrade of
-  // every device does: each returns first, and the daemon comes back through the task.
+  // every device does: each returns first, and the daemon comes back, through the task if it can.
   const devices = await testDevices(t, "cns-task-peer-");
   const laptop = await devices.device("laptop");
   await devices.up(laptop);
   await devices.pair({ name: "studio", dir: root, env: {}, state: daemonState }, laptop);
-  for (const args of [["daemon", "restart", "--state", daemonState], ["up", "--install", "--state", daemonState]]) {
+  /** Whether the task started the daemon that comes back after `args` runs through the daemon. */
+  const throughDaemon = async (args: string[]) => {
     const { file, args: rest } = cliInvocation(args);
     const old = await pid();
     const ran = await devices.cli(laptop, ["run", "studio", "--", `& ${[file, ...rest].map((word) => `'${word.replaceAll("'", "''")}'`).join(" ")}`]);
     assert.equal(ran.code, 0, ran.output);
     assert.match(ran.stdout, /Restarting the daemon through its scheduled task in a moment\./);
-    await until(`${args.join(" ")} through the daemon`, async () => (await pid()) !== old);
-    const log = await readFile(path.join(root, "restart.log"), "utf8");
-    assert.equal((await status()).service, true, `started by the task, not detached:\n${log}`);
-    assert.equal((await status()).port, Number(port));
-  }
+    await until(`${args.join(" ")} through the daemon`, async () => (await pid()) !== old, 45000);
+    const now = await status();
+    assert.equal(now.port, Number(port));
+    return { service: now.service, log: await readFile(path.join(root, "restart.log"), "utf8") };
+  };
+  const restart = ["daemon", "restart", "--state", daemonState];
+  let back = await throughDaemon(restart);
+  assert.equal(back.service, true, `started by the task, not detached:\n${back.log}`);
+  // A task that cannot run: the daemon comes back detached rather than not at all.
+  const disabled = spawnSync(schtasks(), ["/Change", "/TN", taskName(), "/DISABLE"], { encoding: "utf8" });
+  try {
+    assert.equal(disabled.status, 0, disabled.stdout + disabled.stderr);
+    back = await throughDaemon(restart);
+  } finally { spawnSync(schtasks(), ["/Change", "/TN", taskName(), "/ENABLE"], { encoding: "utf8" }); }
+  assert.equal(back.service, false, `started detached:\n${back.log}`);
+  // cns up --install puts the task's daemon in place of that one.
+  back = await throughDaemon(["up", "--install", "--state", daemonState]);
+  assert.equal(back.service, true, `started by the task, not detached:\n${back.log}`);
+
+  // One task per account: installing it for another state file while its daemon runs is refused.
+  const elsewhere = await cli(["up", "--install", "--state", path.join(root, "other", "daemon.json")]);
+  assert.notEqual(elsewhere.code, 0, elsewhere.stdout);
+  assert.match(elsewhere.stderr, /The scheduled task runs the daemon at .+, not .+\. Run cns up --uninstall first\./);
 
   const removed = await cli(["up", "--uninstall", "--state", daemonState]);
   assert.equal(removed.code, 0, removed.stderr);
