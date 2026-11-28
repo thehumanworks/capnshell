@@ -219,10 +219,11 @@ test("with only the port's grant, over its own link: other ports refused, one au
   assert.equal(await echoed(second, "again"), "again");
 
   // Revoked while forwarding: its connection closes, and the forward ends with 4.
+  const secondClosed = once(second, "close");
   const revoked = await devices.cli(studio, ["peer", "revoke", "laptop", `port:${echoPort}`, "--state", studio.state]);
   assert.equal(revoked.code, 0, revoked.output);
-  await once(second, "close");
-  assert.equal(await forward.exited, 4, forward.output);
+  await within(secondClosed, "the connection closing on revoke", () => forward.output);
+  assert.equal(await within(forward.exited, "the forward exiting on revoke", () => forward.output), 4, forward.output);
   assert.match(forward.stderr, new RegExp(`cns: studio no longer lets this device reach port ${echoPort}\\. To allow it, run on studio: cns peer grant laptop port:${echoPort}\\n`));
 
   // One entry for the forward, with what it carried, and one for each refusal; none per connection.
@@ -244,7 +245,7 @@ test("with only the port's grant, over its own link: other ports refused, one au
   const again = await forwarding(t, laptop, ["studio", String(echoPort), "--local", local]);
   const removed = await devices.cli(studio, ["peer", "remove", "laptop", "--state", studio.state]);
   assert.equal(removed.code, 0, removed.output);
-  assert.equal(await again.exited, 3, again.output);
+  assert.equal(await within(again.exited, "the forward exiting on unpairing", () => again.output), 3, again.output);
   assert.match(again.stderr, /cns: studio no longer accepts this device \(/);
 });
 
