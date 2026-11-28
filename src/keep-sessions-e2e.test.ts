@@ -191,6 +191,6 @@ test("a daemon whose holders' socket paths would be too long keeps its named ses
   const said = (await Promise.all(log.map((file) => readFile(path.join(deep, file), "utf8")))).join("");
   assert.match(said, /Named sessions run in this daemon and end when it stops or restarts: a socket of theirs, such as \S+\.sock, would be \d+ bytes long, over the 10[37] this system allows\. A shorter --state path lets them outlive the daemon\./);
   const stopped = await cli(studio, ["stop", "--state", studio.state]);
-  assert.doesNotMatch(stopped.stdout, /keep running/);
+  assert.equal(stopped.stdout, "Daemon stopped.\nNamed sessions ended with it: work. Their sockets' paths would be too long for them to outlive it: a shorter --state path keeps them running.\n");
   assert.ok(await processExited(work!.pid), "the session ended with the daemon");
 });

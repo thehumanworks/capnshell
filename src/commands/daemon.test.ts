@@ -272,7 +272,7 @@ async function stopDeletePending(t: TestContext, platform: NodeJS.Platform) {
   });
   const actual = process.platform;
   Object.defineProperty(process, "platform", { value: platform });
-  try { return { pid: await stopDaemon(statePath), pending }; }
+  try { return { pid: (await stopDaemon(statePath)).pid, pending }; }
   finally {
     Object.defineProperty(process, "platform", { value: actual });
     spy.mockRestore();

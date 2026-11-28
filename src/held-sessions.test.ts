@@ -5,7 +5,7 @@ import net from "node:net";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 import manifest from "../package.json" with { type: "json" };
-import { connectHolder, HeldSessions, HOLDERS, socketsTooLong } from "./held-sessions.js";
+import { connectHolder, HeldSessions, HOLDERS, keepsSessions, socketsTooLong } from "./held-sessions.js";
 import { HOLDER_CAPNWEB, HOLDER_PROTOCOL, holderRecordSchema, type HolderRecord } from "./holder.js";
 import { HandleScope, type PtyExit } from "./pty.js";
 import { OutputSink } from "./terminal.js";
@@ -30,6 +30,26 @@ test("holders run only where their sockets' paths fit: 103 bytes on macOS, 107 o
     `would be ${limit + 1} bytes long, over the ${limit} this system allows. A shorter --state path lets them outlive the daemon.`);
   // Bytes, not characters.
   assert.match(socketsTooLong(`/${"é".repeat(60)}`) ?? "", /would be 143 bytes long/);
+});
+
+test("holders outlive a daemon unless the systemd unit that runs it stops every process of its own", () => {
+  const asked: Array<[string, boolean]> = [];
+  const keeps = (service: boolean, cgroup: string | undefined, mode?: string, platform: NodeJS.Platform = "linux") =>
+    keepsSessions(service, { platform, cgroup: () => cgroup, killMode: (unit, user) => { asked.push([unit, user]); return mode; } });
+  const userUnit = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/cns.service\n";
+  assert.equal(keeps(true, userUnit, "process"), true);
+  assert.equal(keeps(true, userUnit, "control-group"), false, "a unit an older cns wrote");
+  assert.equal(keeps(true, userUnit, undefined), false, "a unit systemctl cannot tell of");
+  assert.equal(keeps(true, "0::/system.slice/cns.service\n", "mixed"), false, "the NixOS module's system service");
+  assert.deepEqual(asked, [["cns.service", true], ["cns.service", true], ["cns.service", true], ["cns.service", false]]);
+  // Only a daemon run as a service asks: one cns up started stops alone, whatever unit its shell is in.
+  asked.length = 0;
+  assert.equal(keeps(false, "0::/user.slice/user-1000.slice/user@1000.service/app.slice/tmux.service\n", "control-group"), true);
+  assert.equal(keeps(true, "0::/user.slice/user-1000.slice/session-2.scope\n", "control-group"), true, "a service outside systemd");
+  assert.equal(keeps(true, undefined, "control-group"), true);
+  assert.equal(keeps(true, userUnit, "control-group", "darwin"), true);
+  assert.deepEqual(asked, []);
+  assert.equal(keeps(false, undefined, undefined, "win32"), false);
 });
 
 async function until(check: () => boolean | Promise<boolean>, what: string, timeoutMs = 10000) {

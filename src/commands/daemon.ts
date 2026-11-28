@@ -7,7 +7,6 @@ import path from "node:path";
 import { newWebSocketRpcSession, type RpcStub } from "capnweb";
 import { z } from "zod";
 import { closeSocket, terminateSocket } from "../connect.js";
-import { printable } from "../errors.js";
 import { openConsole, type PeerController } from "../console.js";
 import { strictlyPrintable } from "../errors.js";
 import { selfInvocation } from "../runtime.js";
@@ -380,23 +379,22 @@ export async function attachDaemon(statePath?: string): Promise<void> {
   });
 }
 
-/** Stop the daemon and return its pid once it has removed its state. */
-export async function stopDaemon(statePath?: string): Promise<number> {
-  return (await stopDaemonKeeping(statePath)).pid;
-}
-
-/** Stop the daemon, as stopDaemon does, and say which named sessions keep running without it. */
-export async function stopDaemonKeeping(statePath?: string): Promise<{ pid: number; sessions: string[] }> {
+/**
+ * Stop the daemon once it has removed its state. Returns its pid, what it said of itself, and its
+ * named sessions whose program ran: those that keep running without it, and those that end with it.
+ */
+export async function stopDaemon(statePath?: string): Promise<{ pid: number; status: DaemonStatus; kept: string[]; ended: string[] }> {
   const file = daemonStatePath(statePath);
   const state = await readState(file);
   // Keep the authenticated target and cleanup ownership bound to the same snapshot.
   const connection = await connectToState(state);
-  let sessions: string[] = [];
+  let status: DaemonStatus;
   try {
-    // A daemon from before holders answers nothing: its sessions end with it.
-    const kept: unknown = await connection.remote.stop();
-    if (Array.isArray(kept)) sessions = kept.filter((name): name is string => typeof name === "string");
+    status = await connection.remote.status();
+    await connection.remote.stop();
   } finally { connection.close(); }
+  // Absent from a daemon too old to name them.
+  const sessions = Array.isArray(status.sessions) ? status.sessions.filter((name) => typeof name === "string").map(strictlyPrintable) : [];
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
     try {
@@ -414,5 +412,5 @@ export async function stopDaemonKeeping(statePath?: string): Promise<{ pid: numb
   } catch (error) {
     if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
   }
-  return { pid: state.pid, sessions: sessions.map(printable) };
+  return { pid: state.pid, status, kept: status.keepsSessions ? sessions : [], ended: status.keepsSessions ? [] : sessions };
 }

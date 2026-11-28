@@ -104,7 +104,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
   const holders = holderDir && !tooLong ? new HeldSessions(holderDir, announce) : undefined;
   const ptys: SessionHost & Disposable = holders ?? new PtyRegistry();
   /** Whether they outlive this daemon: not when systemd stops them with it (keepsSessions). */
-  const keeps = !!holders && keepsSessions();
+  const keeps = !!holders && keepsSessions(!!daemon?.service);
   let nextId = 1;
   let listener: Server<SocketData> | undefined;
   let controlCleanup: (() => Promise<void>) | undefined;
@@ -782,8 +782,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
       // the endpoint decides. A state file whose daemon answers is kept, and this start then fails.
       if (daemon.service) await removeStaleState(daemon.state, { ignorePid: true });
       controlCleanup = await serveControl(controller, () => { void stop(); }, daemon.state,
-        { url: daemon.url, bind: daemon.bind, port: daemon.port, remote: daemon.remote, service: daemon.service, keepsSessions: keeps, ...relay ? { relay } : {} }, pairing,
-        () => keeps ? holders?.running ?? [] : []);
+        { url: daemon.url, bind: daemon.bind, port: daemon.port, remote: daemon.remote, service: daemon.service, keepsSessions: keeps, ...relay ? { relay } : {} }, pairing);
       if (stopping) { await Promise.all([controlCleanup(), listener.stop(true)]); return; }
       process.send?.({ ready: true });
       if (process.connected) process.disconnect?.();

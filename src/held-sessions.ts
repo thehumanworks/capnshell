@@ -56,18 +56,29 @@ export function socketsTooLong(dir: string): string | undefined {
 }
 
 /**
- * Whether the daemon's sessions outlive it, as `cns status --json` reports in daemon.keepsSessions.
- * A systemd unit whose KillMode is not `process`, as cns 2.8.0 and older wrote, ends them with it.
+ * Whether the daemon's holders outlive it, as `cns status --json` reports in daemon.keepsSessions.
+ * A daemon `cns daemon --service` runs under a systemd unit whose KillMode is not `process`, as the
+ * units of older releases of cns and its Nix modules are, has them stopped with it. A daemon
+ * started any other way stops alone, whatever unit the shell that started it runs in.
  */
-export function keepsSessions(): boolean {
-  if (!HOLDERS) return false;
-  if (process.platform !== "linux") return true;
-  let cgroup = "";
-  try { cgroup = readFileSync("/proc/self/cgroup", "utf8"); } catch { return true; }
-  const unit = /\/([^/\n]+\.service)$/m.exec(cgroup)?.[1];
+export function keepsSessions(service: boolean, { platform = process.platform, cgroup = ownCgroup, killMode = unitKillMode }: {
+  platform?: NodeJS.Platform; cgroup?: () => string | undefined; killMode?: (unit: string, user: boolean) => string | undefined;
+} = {}): boolean {
+  if (platform === "win32") return false;
+  if (!service || platform !== "linux") return true;
+  const group = cgroup();
+  const unit = group && /\/([^/\n]+\.service)$/m.exec(group)?.[1];
   if (!unit) return true;
-  const shown = spawnSync("systemctl", [...cgroup.includes("/user@") ? ["--user"] : [], "show", unit, "--property=KillMode", "--value"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000 });
-  return shown.status === 0 && shown.stdout.trim() === "process";
+  return killMode(unit, group.includes("/user@")) === "process";
+}
+
+function ownCgroup(): string | undefined {
+  try { return readFileSync("/proc/self/cgroup", "utf8"); } catch { return undefined; }
+}
+
+function unitKillMode(unit: string, user: boolean): string | undefined {
+  const shown = spawnSync("systemctl", [...user ? ["--user"] : [], "show", unit, "--property=KillMode", "--value"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 5000 });
+  return shown.status === 0 ? shown.stdout.trim() : undefined;
 }
 
 interface Held {

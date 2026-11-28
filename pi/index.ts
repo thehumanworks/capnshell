@@ -6,7 +6,7 @@ import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import { Type, type TUnsafe } from "typebox";
 import { CONNECT_MS } from "../src/connect.js";
 import { errorMessage } from "../src/errors.js";
-import { stopDaemon } from "../src/commands/daemon.js";
+import { keptSessions, stopDaemon } from "../src/commands/daemon.js";
 import { findDaemon, up, upAtStartup, upSettings, type Listener } from "./daemon.js";
 import { cnsInvocation, type Invocation } from "./program.js";
 import { connectPeer, connectPaired, lostMessage, type Host } from "./host.js";
@@ -151,7 +151,8 @@ export function createCnsExtension(options: CnsOptions = {}) {
         current?.control.close();
         showStatus();
         try {
-          return `Stopped the cns daemon (pid ${await stopDaemon(options.statePath)}).`;
+          const { pid, kept } = await stopDaemon(options.statePath);
+          return `Stopped the cns daemon (pid ${pid}).${kept.length ? ` ${keptSessions(kept)}` : ""}`;
         } catch (error) {
           if (error instanceof Error && "code" in error && error.code === "ENOENT") return "No cns daemon is running.";
           throw error;

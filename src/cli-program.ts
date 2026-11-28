@@ -360,10 +360,14 @@ export function createCli(): Command {
   const stopCommand = (command: Command) => command
     .option("-S, --state <path>", "Local daemon state file")
     .action(async (options: { state?: string }) => {
-      const { keptSessions, stopDaemonKeeping } = await import("./commands/daemon.js");
-      const { sessions } = await stopDaemonKeeping(options.state);
+      const [{ daemonStatePath, keptSessions, stopDaemon }, { sessionFacts }, { sessionsHint }] = await Promise.all([import("./commands/daemon.js"), import("./commands/pairing-cli.js"), import("./version.js")]);
+      const { status, kept, ended } = await stopDaemon(options.state);
       console.log("Daemon stopped.");
-      if (sessions.length) console.log(keptSessions(sessions));
+      if (kept.length) console.log(keptSessions(kept));
+      if (ended.length) {
+        const hint = sessionsHint(sessionFacts(status, daemonStatePath(options.state)));
+        console.log(`Named sessions ended with it: ${ended.join(", ")}.${hint ? ` ${hint}` : ""}`);
+      }
     });
   startCommand(daemon.command("start").description("Run this device as a paired peer: start its daemon, or report the running one (also cns up)"));
   stopCommand(daemon.command("stop").description(`Stop the daemon and its peer connections${keeps}; a service starts it again at the next login or cns daemon start (also cns stop)`));
@@ -373,7 +377,7 @@ export function createCli(): Command {
     .addOption(new Option("--worker <ms>").hideHelp())
     // From cns up --install, which rewrote the service's file: launchd loads it again rather than start the copy it has.
     .addOption(new Option("--reload").hideHelp())
-    .addHelpText("after", "\nThe daemon comes back through its service when one runs it (systemd restarts it, launchd or Task\nScheduler starts it again), else detached with the same --bind and --port, running this cns. A paired device can run it:\n  cns run studio -- cns daemon restart\nIt then returns at once, the daemon restarts a second later, and the link comes back within seconds.\nNamed sessions keep running across the restart, in processes of their own; a reboot ends them, and\non Windows the restart does. A daemon that was not running is started.")
+    .addHelpText("after", "\nThe daemon comes back through its service when one runs it (systemd restarts it, launchd or Task\nScheduler starts it again), else detached with the same --bind and --port, running this cns. A paired device can run it:\n  cns run studio -- cns daemon restart\nIt then returns at once, the daemon restarts a second later, and the link comes back within seconds.\nNamed sessions keep running across the restart, in processes of their own; a reboot ends them, and\nso does the restart on Windows, or under a systemd unit an older cns wrote until cns up --install\nwrites it again. A daemon that was not running is started.")
     .action(async (options: { state?: string; worker?: string; reload?: boolean }) => { const { restart } = await import("./commands/pairing-cli.js"); await restart(options); });
   startCommand(program.command("up").description("Run this device as a paired peer: start its daemon, or report the running one (also cns daemon start)"));
   program.command("pair")
