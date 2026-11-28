@@ -109,8 +109,28 @@ The page then returns to Claude, and its tools reach the approved devices by nam
 with the gateway later as soon as the pairing is done, with no reconnect, and `cns gateway
 pair` names the connectors that reach it. Before 2.4.0 an approval kept only the devices
 paired at the time, so remove and add again a connector approved before you redeployed
-from 2.4.0. A device paired with one of yours, or in a mesh with one, is not reached until
-it is paired with the gateway itself. A connector keeps the tools it was approved for: when a cns release
+from 2.4.0. A device paired with one of yours is not reached until it is paired with the
+gateway itself, or is in a mesh with the gateway in it.
+
+### Meshes
+
+To let connectors reach every member of a mesh, now and later, add the gateway to the mesh
+on the device that runs it, which must be paired with the gateway:
+
+```sh
+hub $ cns mesh add home gateway --gateway       # gateway: hub's name for the gateway
+```
+
+Members then let the gateway use what they allow members, within its limit, which is what
+hub lets the gateway use unless you pass `--limit`. Members never dial the gateway, and they
+share no mesh secrets with it. The gateway picks up the list, and the members added later,
+the next time a connector lists devices (`list_peers`). `cns gateway status` shows the meshes
+it is in. Only connectors approved for all devices reach mesh members.
+
+Upgrade every member to 2.6.0 or newer first. A member on an older cns cannot read a list
+that names the gateway, and leaves the mesh: after upgrading it, run `cns mesh join` there
+again. `cns mesh remove home gateway` takes the gateway out.
+[ADR 0009](../docs/adr/0009-gateway-in-a-mesh.md) has the design. A connector keeps the tools it was approved for: when a cns release
 adds tools, such as the skill tools and `list_secrets` in 2.3.0, remove the connector and add it
 again to approve them. `--tools read` includes the skill tools. Other commands:
 

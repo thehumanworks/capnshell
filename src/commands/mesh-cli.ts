@@ -75,23 +75,36 @@ export async function createMesh(name: string, options: StateOption): Promise<vo
   console.log(`Created the mesh ${name}, run by this device. Add devices paired with this one: cns mesh add ${name} DEVICE.`);
 }
 
-/** `cns mesh add NAME DEVICE...`: put paired devices in the mesh, or change the limit of ones in it. */
-export async function addMembers(name: string, devices: string[], options: StateOption & { limit?: string }): Promise<void> {
+/**
+ * `cns mesh add NAME DEVICE...`: put paired devices in the mesh, or change the limit of ones in it.
+ * With --gateway, DEVICE is the cns gateway: members let it in and never dial it or share secrets
+ * with it, and unless --limit says otherwise it may use on them at most what it may use here.
+ */
+export async function addMembers(name: string, devices: string[], options: StateOption & { limit?: string; gateway?: boolean }): Promise<void> {
   const { identity } = ensureIdentity();
   const state = adminOf(name, identity.publicKey);
   const limit = options.limit === undefined ? undefined : grantsFrom(options.limit);
+  if (options.gateway && devices.length !== 1) throw new Error("Add the gateway on its own: cns mesh add NAME GATEWAY --gateway.");
   const added: Member[] = devices.map((device) => {
     const entry = getPeer(device);
     if (!entry) throw new Error(`No paired device is saved as ${device}. Pair with it first: cns pair.`);
     if (entry.mesh !== undefined) throw new Error(`${device} is here as a member of the mesh ${entry.mesh}. A mesh takes only devices paired with its admin directly, which they join through.`);
+    if (options.gateway) return { key: entry.publicKey, name: device, limit: limit ?? entry.grants.incoming, gateway: true };
+    // The gateway has no address and lets this device use nothing; as a plain member, members would dial it and share secrets with it.
+    if (!entry.addresses.length && !entry.grants.outgoing.length) console.error(`${device} has no address and lets this device use nothing, as the cns gateway does. If it is the gateway, add it with --gateway instead.`);
     return { key: entry.publicKey, name: device, ...entry.addresses.length ? { addresses: entry.addresses } : {}, ...limit ? { limit } : {} };
   });
   const keys = new Set(added.map((member) => member.key));
   const list = nextList(state.list, (members) => [...members.filter((member) => !keys.has(member.key)), ...added], Date.now());
   writeMesh({ ...state, signed: signList(list, identity) });
   const live = await settle(options, identity.publicKey);
-  console.log(`The mesh ${name} lists ${devices.join(", ")} (version ${list.version})${limit ? `, each limited to ${describeGrants(limit)} on other members` : ""}.`);
-  console.log(`On each, run: cns mesh join ${name} --via DEVICE, where DEVICE is its name for this device.`);
+  if (options.gateway) {
+    console.log(`The mesh ${name} lists the gateway as ${devices[0]} (version ${list.version}). It may use at most ${describeGrants(added[0]!.limit ?? [])} on each member, within what that member allows members.`);
+    console.log("Connectors approved for all devices reach the members once the gateway lists its devices again (list_peers). Members on a cns from before 2.6.0 cannot read this list and leave the mesh: upgrade them, then run cns mesh join there again.");
+  } else {
+    console.log(`The mesh ${name} lists ${devices.join(", ")} (version ${list.version})${limit ? `, each limited to ${describeGrants(limit)} on other members` : ""}.`);
+    console.log(`On each, run: cns mesh join ${name} --via DEVICE, where DEVICE is its name for this device.`);
+  }
   if (!live) console.log("Start this device's daemon so members get the new list: cns up.");
 }
 
@@ -374,6 +387,7 @@ export function listMeshesCommand(name: string | undefined, options: { json?: bo
       name: member.key === identity.publicKey ? "this device" : here.get(member.key) ?? member.name,
       fingerprint: fingerprint(member.key),
       admin: member.key === state.admin,
+      gateway: member.gateway === true,
       limit: member.limit ?? null,
     })),
   }));
@@ -382,7 +396,7 @@ export function listMeshesCommand(name: string | undefined, options: { json?: bo
   for (const row of rows) {
     console.log(`${row.name}: run by ${row.admin}, version ${row.version}${row.allow ? `; members may use here: ${describeGrants(row.allow)}` : ""}`);
     for (const member of row.members) {
-      console.log(`  ${member.name}${member.admin ? " (admin)" : ""}\t${member.fingerprint}${member.limit ? `\tlimited to ${describeGrants(member.limit)}` : ""}`);
+      console.log(`  ${member.name}${member.admin ? " (admin)" : member.gateway ? " (gateway)" : ""}\t${member.fingerprint}${member.limit ? `\tlimited to ${describeGrants(member.limit)}` : ""}`);
     }
   }
 }

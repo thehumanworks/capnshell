@@ -10,6 +10,7 @@ import { ed25519 } from "@noble/curves/ed25519.js";
 import { errorMessage } from "../src/errors.js";
 import { fingerprint, type Identity, type PublicKey } from "../src/identity.js";
 import { LegacySessions } from "../src/mcp/legacy-sessions.js";
+import { openList, openLists, type MemberList } from "../src/mesh.js";
 import { createMcpServer, TOOL_NAMES, type ToolCall, type ToolName } from "../src/mcp/server.js";
 import { decisionSchema, decodeInvite, type PairingApi } from "../src/pairing.js";
 import { expandGrants, type Permission } from "../src/peers.js";
@@ -77,12 +78,35 @@ const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 const base64url = (bytes: Uint8Array) => Buffer.from(bytes).toString("base64url");
 
 /**
- * The devices a connector reaches now, of those `paired` with the gateway: every one for an
- * approval for all devices, so a device paired later needs no new approval; otherwise those
- * whose keys it was approved for, so a device re-paired under the same name is not one of them.
+ * The devices a connector reaches now: for an approval for all devices, every one `paired`
+ * with the gateway and every member of the meshes that list it, so a device added later
+ * needs no new approval; otherwise the paired devices whose keys it was approved for, so a
+ * device re-paired under the same name is not one of them.
  */
-export function reachable(approved: GrantProps["devices"], paired: readonly DeviceRecord[]): DeviceRecord[] {
-  return approved === "all" ? [...paired] : paired.filter((device) => approved.includes(device.publicKey));
+export function reachable(approved: GrantProps["devices"], paired: readonly GatewayDevice[], members: readonly GatewayDevice[] = []): GatewayDevice[] {
+  return approved === "all" ? [...paired, ...members] : paired.filter((device) => approved.includes(device.publicKey));
+}
+
+/**
+ * The members of `meshes` the gateway reaches, as a member of each: not itself, not their
+ * admins or other devices it is paired with directly, each once, named as the admin names
+ * them or name-2 and so on when that name is taken.
+ */
+export function meshMembers(self: PublicKey, paired: readonly GatewayDevice[], meshes: readonly MemberList[]): GatewayDevice[] {
+  const keys = new Set(paired.map((device) => device.publicKey));
+  const taken = new Set(paired.map((device) => device.name));
+  const found: GatewayDevice[] = [];
+  for (const list of meshes) {
+    for (const member of list.members) {
+      if (member.key === self || keys.has(member.key)) continue;
+      keys.add(member.key);
+      let name = member.name;
+      for (let n = 2; taken.has(name); n++) name = `${member.name.slice(0, 60)}-${n}`;
+      taken.add(name);
+      found.push({ name, publicKey: member.key, addresses: member.addresses ?? [], mesh: list.mesh });
+    }
+  }
+  return found;
 }
 
 /** A short code a person can read off the consent page and type: two groups of four. */
@@ -106,6 +130,8 @@ export class Gateway extends DurableObject<Env> {
         loopback INTEGER NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, status TEXT NOT NULL, devices TEXT NOT NULL, tools TEXT NOT NULL, approved_by TEXT)`);
       sql.exec(`CREATE TABLE IF NOT EXISTS revoked (grant_id TEXT PRIMARY KEY, at INTEGER NOT NULL)`);
       sql.exec(`CREATE TABLE IF NOT EXISTS nonces (nonce TEXT PRIMARY KEY, until INTEGER NOT NULL)`);
+      // The member lists of meshes whose admins, devices paired with the gateway, list it as their gateway (mesh.ts).
+      sql.exec(`CREATE TABLE IF NOT EXISTS meshes (admin TEXT NOT NULL, name TEXT NOT NULL, list TEXT NOT NULL, PRIMARY KEY (admin, name))`);
       sql.exec(`CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT NOT NULL, grant_id TEXT NOT NULL, client TEXT NOT NULL, tool TEXT NOT NULL, peer TEXT, detail TEXT NOT NULL, ok INTEGER NOT NULL, elapsed_ms INTEGER NOT NULL)`);
       // The gateway's device key is made here once and never leaves this object.
       let stored = await ctx.storage.get<{ secret: string; createdAt: string }>("identity");
@@ -127,6 +153,38 @@ export class Gateway extends DurableObject<Env> {
       .map((row) => ({ name: row.name, publicKey: row.public_key, fingerprint: fingerprint(row.public_key), addresses: JSON.parse(row.addresses), granted: JSON.parse(row.granted), pairedAt: row.paired_at }));
   }
 
+  /** The lists of the meshes the gateway is in, run by devices paired with it now. */
+  #meshLists(paired: readonly DeviceRecord[]): MemberList[] {
+    return this.#sql.exec<{ admin: string; list: string }>("SELECT admin, list FROM meshes ORDER BY admin, name").toArray().flatMap((row) => {
+      if (!paired.some((device) => device.publicKey === row.admin)) return [];
+      try { return [openList(JSON.parse(row.list), row.admin)]; } catch { return []; }
+    });
+  }
+
+  /** Every device the gateway reaches: those paired with it, then the members of its meshes. */
+  #reachable(): { paired: DeviceRecord[]; members: GatewayDevice[] } {
+    const paired = this.#devices();
+    return { paired, members: meshMembers(this.#identity.publicKey, paired, this.#meshLists(paired)) };
+  }
+
+  /**
+   * Take the member lists a paired device offered: keep each newer one it signed as its admin
+   * that names the gateway as its gateway, and forget each mesh it runs and no longer offers,
+   * as one it took the gateway out of, or ended. A list naming the gateway as a plain member
+   * is not taken: members would share secrets with it and dial it.
+   */
+  takeLists(from: PublicKey, offered: unknown) {
+    const self = this.#identity.publicKey;
+    const lists = openLists(offered).filter(({ list }) => list.admin === from && list.members.some((member) => member.key === self && member.gateway));
+    const held = new Map(this.#sql.exec<{ name: string; list: string }>("SELECT name, list FROM meshes WHERE admin = ?", from).toArray().map((row) => [row.name, row.list]));
+    for (const name of held.keys()) if (!lists.some(({ list }) => list.mesh === name)) this.#sql.exec("DELETE FROM meshes WHERE admin = ? AND name = ?", from, name);
+    for (const { signed, list } of lists) {
+      const current = held.get(list.mesh);
+      if (current !== undefined && (JSON.parse(JSON.parse(current).text) as MemberList).version >= list.version) continue;
+      this.#sql.exec("INSERT OR REPLACE INTO meshes (admin, name, list) VALUES (?, ?, ?)", from, list.mesh, JSON.stringify(signed));
+    }
+  }
+
   #consent(code: string): (ConsentRecord & { handle: string }) | undefined {
     const row = this.#sql.exec<Record<string, string | number | null>>("SELECT * FROM consents WHERE code = ?", code.toUpperCase()).toArray()[0];
     if (!row) return undefined;
@@ -140,11 +198,17 @@ export class Gateway extends DurableObject<Env> {
 
   #pruneConsents() { this.#sql.exec("DELETE FROM consents WHERE expires_at < ?", Date.now()); }
 
-  /** The gateway's identity, devices and approvals waiting for an owner. */
+  /** The gateway's identity, devices, meshes and approvals waiting for an owner. */
   status() {
     this.#pruneConsents();
     const pending = this.#sql.exec<{ code: string }>("SELECT code FROM consents WHERE status = 'pending' ORDER BY created_at").toArray().map((row) => this.#public(this.#consent(row.code)!));
-    return { publicKey: this.#identity.publicKey, fingerprint: this.#identity.fingerprint, createdAt: this.#identity.createdAt, name: this.env.GATEWAY_NAME || "gateway", relay: this.#relay, devices: this.#devices(), pending };
+    const { paired, members } = this.#reachable();
+    const named = new Map([...paired, ...members].map((device) => [device.publicKey, device.name]));
+    const meshes = this.#meshLists(paired).map((list) => ({
+      name: list.mesh, admin: named.get(list.admin)!, version: list.version,
+      members: list.members.flatMap((member) => member.key === list.admin || !named.has(member.key) ? [] : [named.get(member.key)!]),
+    }));
+    return { publicKey: this.#identity.publicKey, fingerprint: this.#identity.fingerprint, createdAt: this.#identity.createdAt, name: this.env.GATEWAY_NAME || "gateway", relay: this.#relay, devices: paired, meshes, pending };
   }
 
   /** Remember an owner request's nonce; false when it was seen before. */
@@ -201,9 +265,11 @@ export class Gateway extends DurableObject<Env> {
 
   /** Forget a device. Connectors approved for it no longer reach it; on the device, cns peer remove ends the pairing there too. */
   removeDevice(name: string): boolean {
-    const found = this.#devices().some((device) => device.name === name);
+    const found = this.#devices().find((device) => device.name === name);
     this.#sql.exec("DELETE FROM devices WHERE name = ?", name);
-    return found;
+    // The meshes it runs go with it.
+    if (found) this.#sql.exec("DELETE FROM meshes WHERE admin = ?", found.publicKey);
+    return found !== undefined;
   }
 
   /** A connector's authorization request, waiting for an owner to run cns gateway approve CODE. */
@@ -291,6 +357,24 @@ export class Gateway extends DurableObject<Env> {
     this.#sql.exec("DELETE FROM audit WHERE id <= (SELECT MAX(id) FROM audit) - ?", MAX_AUDIT);
   }
 
+  /** The devices a connector approved for `approved` reaches now. */
+  connectorDevices(approved: GrantProps["devices"]): GatewayDevice[] {
+    const { paired, members } = this.#reachable();
+    return reachable(approved, paired, members);
+  }
+
+  /**
+   * Tools for a connector approved for `approved`. Devices are looked up for each call, so one
+   * removed from the gateway is gone at once, and one added later is there. Listing them asks
+   * each paired device for the lists of meshes it runs with the gateway in them.
+   */
+  connectorTarget(approved: GrantProps["devices"]) {
+    return gatewayTarget(() => this.connectorDevices(approved), this.#identity, this.#relay, {
+      asks: (device) => device.mesh === undefined,
+      take: (device, offered) => this.takeLists(device.publicKey, offered),
+    });
+  }
+
   /** An MCP request from a connector, with the GrantProps the Worker verified. */
   override async fetch(request: Request): Promise<Response> {
     const header = request.headers.get(GRANT_HEADER);
@@ -301,9 +385,8 @@ export class Gateway extends DurableObject<Env> {
     }
     let server = this.#servers.get(props.grant);
     if (!server) {
-      // Devices are looked up for each call, so a device removed from the gateway is gone at once, and one paired later is there.
-      const devices = () => reachable(props.devices, this.#devices());
-      const build = (): McpServer => createMcpServer(gatewayTarget(devices, this.#identity, this.#relay), {
+      const devices = () => this.connectorDevices(props.devices);
+      const build = (): McpServer => createMcpServer(this.connectorTarget(props.devices), {
         tools: props.tools, onCall: (call) => this.#record(props, devices, call),
       });
       const onerror = (error: Error) => console.error(`MCP: ${errorMessage(error)}`);

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mock, setSystemTime } from "bun:test";
-import { Database } from "bun:sqlite";
+import { setSystemTime } from "bun:test";
 import { TOOL_NAMES } from "../src/mcp/server.js";
+import { CONSENT_MS, gatewayObject, pairDevice as saveDevice, reachable, type GatewayObject } from "./test-object.js";
 
 /**
  * A connector's consent on the gateway (gateway/object.ts) is a state machine kept in the
@@ -12,44 +12,25 @@ import { TOOL_NAMES } from "../src/mcp/server.js";
  * check every state against every event.
  */
 
-// The Durable Object base class exists only in the Workers runtime.
-mock.module("cloudflare:workers", () => ({
-  DurableObject: class { ctx: unknown; env: unknown; constructor(ctx: unknown, env: unknown) { this.ctx = ctx; this.env = env; } },
-}));
-const { Gateway, CONSENT_MS, reachable } = await import("./object.js");
-
 const KEYS = { studio: "A".repeat(43), laptop: "B".repeat(43), nas: "C".repeat(43) };
 const PAGE = "the-consent-page-handle";
 const CLIENT = { handle: PAGE, clientId: "client", clientName: "Claude", redirectHost: "claude.ai", loopback: false };
+const execs = new WeakMap<GatewayObject, Parameters<typeof saveDevice>[0]>();
 
 /** A gateway with fresh storage, paired with `devices`. */
 async function gateway(devices: Array<keyof typeof KEYS> = ["studio", "laptop"]) {
-  const db = new Database(":memory:");
-  const sql = {
-    exec(query: string, ...bindings: unknown[]) {
-      const rows = db.query(query).all(...bindings as never[]) as Record<string, unknown>[];
-      return { toArray: () => rows, one: () => rows[0], [Symbol.iterator]: () => rows[Symbol.iterator]() };
-    },
-  };
-  const stored = new Map<string, unknown>();
-  let ready!: Promise<unknown>;
-  const ctx = {
-    storage: { sql, get: async (key: string) => stored.get(key), put: async (key: string, value: unknown) => { stored.set(key, value); } },
-    blockConcurrencyWhile: (setup: () => Promise<unknown>) => (ready = setup()),
-  };
-  const object = new Gateway(ctx as never, {} as never);
-  await ready;
+  const { object, exec } = await gatewayObject();
+  execs.set(object, exec);
   for (const name of devices) pairDevice(object, name);
   return object;
 }
 
 /** Pair `object` with a device, as Gateway.pair saves one once the device accepts. */
-function pairDevice(object: Object, name: keyof typeof KEYS, key = KEYS[name]) {
-  (object as unknown as { ctx: { storage: { sql: { exec(query: string, ...bindings: unknown[]): unknown } } } }).ctx.storage.sql
-    .exec("INSERT INTO devices (name, public_key, addresses, granted, paired_at) VALUES (?, ?, '[]', '[\"shell\"]', ?)", name, key, new Date().toISOString());
+function pairDevice(object: GatewayObject, name: keyof typeof KEYS, key = KEYS[name]) {
+  saveDevice(execs.get(object)!, name, key);
 }
 
-type Object = Awaited<ReturnType<typeof gateway>>;
+type Object = GatewayObject;
 type State = "pending" | "approved" | "denied" | "done" | "expired";
 
 /** A gateway holding one consent in `state`, and its code. */

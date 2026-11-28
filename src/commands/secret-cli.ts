@@ -36,8 +36,10 @@ function checkName(name: string): void {
 /** The member `name` names: this device's name for a device, or the admin's name for a member, as cns mesh list shows. */
 function memberKey(state: MeshState, name: string): PublicKey {
   const key = getPeer(name)?.publicKey ?? state.list.members.find((member) => member.name === name)?.key;
-  if (key === undefined || !state.list.members.some((member) => member.key === key)) throw new Error(`${name} is not a member of the mesh ${state.name}. cns mesh list ${state.name} shows its members.`);
-  return key;
+  const member = state.list.members.find((candidate) => candidate.key === key);
+  if (!member) throw new Error(`${name} is not a member of the mesh ${state.name}. cns mesh list ${state.name} shows its members.`);
+  if (member.gateway) throw new Error(`${name} is the mesh's gateway, which takes no part in mesh secrets.`);
+  return member.key;
 }
 
 /** What this device calls a member. */

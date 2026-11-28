@@ -126,6 +126,7 @@ export function createCli(): Command {
     .action(async (name: string, options) => { await (await meshCommands()).createMesh(name, options); });
   mesh.command("add <name> <devices...>").description("Put devices paired with this one in the mesh, or change the limit of ones in it")
     .option("-l, --limit <grants>", "The most each may use on other members, whatever they allow: shell, files, sessions, all, or permissions")
+    .option("-g, --gateway", "The device is the cns gateway: members let Claude's connectors in through it, never dial it or share secrets with it (default limit: what it may use here)")
     .option("-S, --state <path>", "Local daemon state file")
     .action(async (name: string, devices: string[], options) => { await (await meshCommands()).addMembers(name, devices, options); });
   mesh.command("token <name> <bot>").description("Print a token that makes a machine nobody sits at, such as a CI runner, a member of the mesh as BOT")

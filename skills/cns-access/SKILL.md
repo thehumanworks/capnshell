@@ -90,5 +90,7 @@ run `cns up --token-file ci.token` on the runner. `cns mesh remove home ci --unp
 ## Claude connectors through the gateway
 
 A connector gets nothing until the user approves its sign-in code on one of their devices:
-`cns gateway approve CODE --devices studio --tools read`. `cns gateway grants`,
+`cns gateway approve CODE --devices studio --tools read`. Approved for all devices, it also
+reaches devices paired with the gateway later, and the members of meshes whose admin added
+the gateway with `cns mesh add NAME gateway --gateway`. `cns gateway grants`,
 `cns gateway revoke ID` and `cns gateway log` list, stop and audit connectors.
