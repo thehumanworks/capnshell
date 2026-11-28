@@ -20,6 +20,13 @@ test("a daemon whose peer restarted after losing the link silently links again",
     child.child.stdin.end();
     return { code: await child.exited, stdout: child.stdout, stderr: child.stderr };
   };
+  const succeeds = async (dir: string, args: string[]) => {
+    const result = await cli(dir, args);
+    // A daemon that stops during startup says why only in the log cns up names, which the cleanup removes.
+    const log = result.code === 0 ? undefined : /See (\S+\.log)/.exec(result.stderr)?.[1];
+    const detail = log ? `${log}:\n${await readFile(log, "utf8").catch((error: Error) => error.message)}` : "";
+    assert.equal(result.code, 0, `cns ${args.join(" ")} exited ${result.code}:\n${result.stdout}${result.stderr}${detail}`);
+  };
   const device = async (name: string) => {
     const dir = path.join(root, name);
     await mkdir(dir, { mode: 0o700 });
@@ -67,8 +74,8 @@ test("a daemon whose peer restarted after losing the link silently links again",
     assert.fail(`Timed out: ${label}`);
   };
 
-  assert.equal((await cli(large.dir, ["up", "--bind", "127.0.0.1", "--port", largePort, "--state", large.state])).code, 0);
-  assert.equal((await cli(small.dir, ["up", "--bind", "127.0.0.1", "--port", smallPort, "--state", small.state])).code, 0);
+  await succeeds(large.dir, ["up", "--bind", "127.0.0.1", "--port", largePort, "--state", large.state]);
+  await succeeds(small.dir, ["up", "--bind", "127.0.0.1", "--port", smallPort, "--state", small.state]);
   await eventually(async () => await links(small) === 1 && await links(large) === 1, "the first link");
 
   // Large learns small's address, then loses its end of the link without small seeing a close.
@@ -76,11 +83,11 @@ test("a daemon whose peer restarted after losing the link silently links again",
   await writeFile(file, JSON.stringify({ ...JSON.parse(await readFile(file, "utf8")), addresses: [`ws://127.0.0.1:${smallPort}`] }), { mode: 0o600 });
   blackhole = true;
   for (const pair of pairs) pair.upstream.destroy();
-  assert.equal((await cli(large.dir, ["stop", "--state", large.state])).code, 0);
+  await succeeds(large.dir, ["stop", "--state", large.state]);
   assert.equal(await links(small), 1, "small still holds the dead link");
 
   // Large restarts and dials small directly; small replaces the link it can no longer use.
-  assert.equal((await cli(large.dir, ["up", "--bind", "127.0.0.1", "--port", largePort, "--state", large.state])).code, 0);
+  await succeeds(large.dir, ["up", "--bind", "127.0.0.1", "--port", largePort, "--state", large.state]);
   await eventually(async () => await links(large) === 1 && await links(small) === 1, "large links again");
   await new Promise((resolve) => setTimeout(resolve, 2000));
   assert.deepEqual([await links(small), await links(large)], [1, 1], "the new link stays single");
