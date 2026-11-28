@@ -1,6 +1,6 @@
 {
   "name": "capnweb-shell",
-  "version": "2.12.0",
+  "version": "2.12.1",
   "private": true,
   "type": "module",
   "description": "Bidirectional remote shells for Linux, macOS and Windows.",
