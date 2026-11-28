@@ -28,6 +28,7 @@ until a person on it paired with the other device, or joined a mesh, and chose w
 | `skills` | Read `~/.agents/skills` only, without hidden files. Not part of `all`. |
 | `sessions` | All of `sessions:list`, `sessions:create`, `sessions:view`, `sessions:control`, `sessions:kill` |
 | `all` | `shell`, `files` and `sessions` |
+| `port:N` | `cns forward` to port N on localhost only, such as `port:5432`. Not part of `all`, and given only once paired. `shell` reaches every port. |
 
 A device may always view, type into and kill the sessions it started.
 
@@ -48,7 +49,8 @@ cns audit --peer laptop --since 1h   # one device, the last hour
 cns run studio -- cns audit --json   # what devices did on studio
 ```
 
-Each entry names the device, the command line, path or session, and how it ended; a command
+Each entry names the device, the command line, path, session or forwarded port
+(`port.forward`, with its connections and bytes each way at its end), and how it ended; a command
 still running, or cut off by a daemon that stopped, shows as `no end recorded`. A program's
 entry names the mesh secrets it got there (`secrets`) and the variables the device gave it, such
 as a `--secret` (`variables`), but never their values; file contents and typed keys never appear.
@@ -68,8 +70,9 @@ denial by other means without their OK.
 
 ```sh
 cns peer grant laptop files            # on the granting device: allow more, at once
+cns peer grant laptop port:5432,port:8080   # cns forward to those ports, and nothing else
 cns peer revoke laptop shell           # allow less; work that used it ends now
-cns peer revoke laptop                 # nothing at all
+cns peer revoke laptop                 # nothing at all, port words too
 cns peer remove laptop                 # unpair
 cns peer remove phone --everywhere --dry-run   # lost or stolen: what would change
 cns peer remove phone --everywhere            # and change it
@@ -94,6 +97,10 @@ restored is `removed` in `cns peers`, and cns does not connect to it.
 
 A device that is in a mesh gets its grants from the mesh: `cns peer grant` refuses it, and
 `cns mesh allow MESH GRANTS` on the granting device sets what every member may use there.
+
+A port word cannot be given while pairing, in `--limit` or in a bot token, where an older cns
+would refuse the whole list: pair first, then grant it on the device that has the port, with
+`cns peer grant NAME port:N` or `cns mesh allow MESH port:N`.
 
 ## Pairing two devices (a person on each)
 
