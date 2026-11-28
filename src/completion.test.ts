@@ -175,7 +175,7 @@ test("names from another device that a shell or terminal would misread are dropp
   const { fake } = lookups(devices);
   const lines = await printed(["bash", "cp", "studio:"], fake);
   assert.equal(lines.length, MAX_CANDIDATES);
-  assert.ok(lines.every((line) => /^studio:(ok|f\d{4})$/.test(line)), lines.find((line) => !/^studio:(ok|f\d{4})$/.test(line)));
+  assert.deepEqual(lines.filter((line) => !/^studio:(ok|f\d{4})$/.test(line)), []);
 });
 
 /** What cns __complete prints, line by line, and that it prints nothing on stderr. */
