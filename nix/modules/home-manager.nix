@@ -85,6 +85,8 @@ in
           # cns stop ends the daemon with status 0; it stays stopped until cns up or the next login.
           Restart = "on-failure";
           RestartSec = 5;
+          # Stopping or restarting the unit ends the daemon alone: its named sessions' holders keep running, as with cns up --install.
+          KillMode = "process";
         };
         Install.WantedBy = [ "default.target" ];
       };
