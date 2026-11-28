@@ -41,8 +41,8 @@ test("a refusal says which grant is missing and the command that adds it on the 
 test("port words: one port each, never part of all, shown as ports, and refused where they would be sent", () => {
   expect(expandGrants(["port:8080", "shell", "port:5432", "port:5432"], { ports: true })).toEqual(["shell", "port:5432", "port:8080"]);
   expect(expandGrants(["all"], { ports: true }).some((grant) => grant.startsWith("port"))).toBe(false);
-  // Without ports, as for a pairing, a mesh's limit, a bot token or the gateway, a port word is refused with where to give it.
-  expect(() => expandGrants(["shell", "port:5432"])).toThrow("port:5432 is given only on the device that has the port, once paired: cns peer grant NAME port:5432, or cns mesh allow MESH port:5432.");
+  // Without ports, as for a pairing, a mesh, a bot token or the gateway, a port word is refused with where to give it.
+  expect(() => expandGrants(["shell", "port:5432"])).toThrow("port:5432 is given only on the device that has the port, to a device paired with it directly: cns peer grant NAME port:5432. A pairing, a mesh or a bot token cannot hold it, as a cns from before cns forward would refuse it whole; a mesh's members reach every port with shell.");
   // One port per word: no range, no list in one word, no bare ports.
   for (const bad of ["port:0", "port:65536", "port:05432", "port:", "port:22-80", "port:5432,8080", "ports", "ports:5432"]) expect(() => expandGrants([bad], { ports: true })).toThrow();
   expect(describeGrants(["shell", "port:5432", "port:8080"])).toBe("shell, ports 5432, 8080");
@@ -67,6 +67,11 @@ test.skipIf(process.platform === "win32")("a record that holds a port word needs
   // A port word that is not one is refused, never dropped.
   writeRecord("studio", { ...JSON.parse(readRecord("studio")), needs: ["ports"], grants: { incoming: ["port:99999"], outgoing: [] } });
   expect(() => getPeer("studio")).toThrow("not a valid paired-device record");
+
+  // A mesh gives no single port: a member denied one is told to allow shell there, or to pair directly.
+  savePairedPeer("desk", { publicKey: generateIdentity().publicKey, addresses: [], pairedAt: PAIRED_AT, grants: { incoming: [], outgoing: ["files"] }, mesh: "home" });
+  expect(explainDenial("Permission denied: port:5432 not granted to laptop.", "desk")).toBe("Permission denied: port:5432 not granted to laptop. desk gives members of the mesh home what cns mesh allow set there. " +
+    "To allow it, run on desk: cns mesh allow home shell,files, or pair the two devices directly and run there: cns peer grant laptop port:5432");
 });
 
 test.skipIf(process.platform === "win32")("paired devices are saved under a name and keyed by identity", () => {

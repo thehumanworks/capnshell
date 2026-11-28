@@ -24,7 +24,8 @@ export type Permission = typeof PERMISSIONS[number];
  * A port word, such as `port:5432`: cns forward may reach that one port on localhost here, as
  * `shell` may reach every port (docs/adr/0011-port-forwarding.md). It is never part of `all`,
  * and never sent where a cns from before it would refuse the whole proposal or list: a pairing,
- * a mesh's limit, a bot token (expandGrants refuses it there). A record holding one needs `ports`.
+ * anything of a mesh, a bot token (expandGrants refuses it there). Only a direct pairing's record
+ * holds one, which then needs `ports`.
  */
 export type PortGrant = `port:${number}`;
 /** What a device may hold here: permissions and port words. */
@@ -66,7 +67,7 @@ export function expandGrants(words: readonly string[], { ports = false }: { port
     const port = grantedPort(word);
     if (word === "none") continue;
     if (port !== undefined) {
-      if (!ports) throw new Error(`${word} is given only on the device that has the port, once paired: cns peer grant NAME ${word}, or cns mesh allow MESH ${word}. A pairing, a mesh's --limit or a bot token cannot hold it, as a cns from before cns forward would refuse it whole.`);
+      if (!ports) throw new Error(`${word} is given only on the device that has the port, to a device paired with it directly: cns peer grant NAME ${word}. A pairing, a mesh or a bot token cannot hold it, as a cns from before cns forward would refuse it whole; a mesh's members reach every port with shell.`);
       numbers.add(port);
     } else if (word in PRESETS) for (const permission of PRESETS[word as keyof typeof PRESETS]) set.add(permission);
     else set.add(permissionSchema.parse(word));
@@ -123,7 +124,13 @@ export function allowHint(message: string, device?: string): string | undefined 
   // A mesh member gets what the device lets every member of the mesh use, so that is what to widen there.
   let entry: PeerEntry | undefined;
   try { entry = device ? getPeer(device) : undefined; } catch { entry = undefined; }
-  if (entry?.mesh) return `${device} gives members of the mesh ${entry.mesh} what cns mesh allow set there. To allow it, run ${where}: cns mesh allow ${entry.mesh} ${grantWords(expandGrants([...entry.grants.outgoing, ...missing], { ports: true }))}`;
+  if (entry?.mesh) {
+    // A mesh gives no single port: shell reaches every one, or a direct pairing gets the port's word.
+    const ports = missing.filter((grant) => grantedPort(grant) !== undefined);
+    const widened = grantWords(expandGrants([...permissionsOf(entry.grants.outgoing), ...permissionsOf(missing), ...ports.length ? ["shell"] : []]));
+    const or = ports.length ? `, or pair the two devices directly and run there: cns peer grant ${match[2]} ${grantWords(ports)}` : "";
+    return `${device} gives members of the mesh ${entry.mesh} what cns mesh allow set there. To allow it, run ${where}: cns mesh allow ${entry.mesh} ${widened}${or}`;
+  }
   return `To allow it, run ${where}: cns peer grant ${match[2]} ${grantWords(missing)}`;
 }
 

@@ -48,10 +48,6 @@ test("a member's grants are what the device allows members, within the member's 
   assert.deepEqual(memberGrants(["shell", "files"]), ["shell", "files"]);
   assert.deepEqual(memberGrants(["shell", "files"], ["files", "sessions:view"]), ["files"]);
   assert.deepEqual(memberGrants([], ["shell"]), []);
-  // A limit never holds a port word, which a member's older cns could not read: a port is within a limit that holds shell.
-  assert.deepEqual(memberGrants(["files", "port:5432"]), ["files", "port:5432"]);
-  assert.deepEqual(memberGrants(["files", "port:5432"], ["shell"]), ["port:5432"]);
-  assert.deepEqual(memberGrants(["files", "port:5432"], ["files"]), ["files"]);
 });
 
 test("a member's records follow the list: created, renamed when taken, regranted and removed, never over a direct pairing", () => {

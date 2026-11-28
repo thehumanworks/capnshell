@@ -28,7 +28,7 @@ until a person on it paired with the other device, or joined a mesh, and chose w
 | `skills` | Read `~/.agents/skills` only, without hidden files. Not part of `all`. |
 | `sessions` | All of `sessions:list`, `sessions:create`, `sessions:view`, `sessions:control`, `sessions:kill` |
 | `all` | `shell`, `files` and `sessions` |
-| `port:N` | `cns forward` to port N on localhost only, such as `port:5432`. Not part of `all`, and given only once paired. `shell` reaches every port. |
+| `port:N` | `cns forward` to port N on localhost only, such as `port:5432`. Not part of `all`, and given only on a direct pairing, never to a mesh. `shell` reaches every port. |
 
 A device may always view, type into and kill the sessions it started.
 
@@ -50,7 +50,7 @@ cns run studio -- cns audit --json   # what devices did on studio
 ```
 
 Each entry names the device, the command line, path, session or forwarded port
-(`port.forward`, with its connections and bytes each way at its end), and how it ended; a command
+(`port.forward`, with its connections and bytes each way in `--json`), and how it ended; a command
 still running, or cut off by a daemon that stopped, shows as `no end recorded`. A program's
 entry names the mesh secrets it got there (`secrets`) and the variables the device gave it, such
 as a `--secret` (`variables`), but never their values; file contents and typed keys never appear.
@@ -98,9 +98,9 @@ restored is `removed` in `cns peers`, and cns does not connect to it.
 A device that is in a mesh gets its grants from the mesh: `cns peer grant` refuses it, and
 `cns mesh allow MESH GRANTS` on the granting device sets what every member may use there.
 
-A port word cannot be given while pairing, in `--limit` or in a bot token, where an older cns
-would refuse the whole list: pair first, then grant it on the device that has the port, with
-`cns peer grant NAME port:N` or `cns mesh allow MESH port:N`.
+A port word cannot be given while pairing, to a mesh or in a bot token, where an older cns
+would refuse the whole list: pair directly first, then grant it on the device that has the port,
+with `cns peer grant NAME port:N`. A mesh's members forward with `shell`.
 
 ## Pairing two devices (a person on each)
 

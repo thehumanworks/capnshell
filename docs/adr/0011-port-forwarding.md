@@ -35,13 +35,15 @@ What the code had to work with:
   auth, which add up to as much as `shell`.
   - A port word names one port, `port:N` with N from 1 to 65535 written without leading zeros.
     Grant lists split on commas, so several are `port:5432,port:8080`. A device holds at most 64.
-  - It is never part of `all`, and never sent where an older cns would refuse the whole
-    proposal or list: `cns pair --grant` and `--request`, `cns mesh add --limit`, bot tokens and
-    `cns gateway pair --request` refuse it, saying to give it on the device that has the port,
-    once paired, with `cns peer grant NAME port:N` or `cns mesh allow MESH port:N`.
-    `expandGrants` refuses port words unless the caller asks for them (`{ ports: true }`), so a
-    new place that sends grants cannot send one by mistake. The wire schema `grantsSchema` holds
-    no port word; `heldGrantsSchema` (records, the mesh file's `allow`, `granted()`) does.
+  - It is never part of `all`, and lives only in a direct pairing's record, given on the
+    device that has the port with `cns peer grant NAME port:N`. It is never sent where an older
+    cns would refuse the whole proposal or list: `cns pair --grant` and `--request`, bot tokens
+    and `cns gateway pair --request` refuse it, and so does everything of a mesh, `cns mesh
+    allow`, `cns mesh join --allow` and `cns mesh add --limit`, saying to grant the port on a
+    direct pairing or to allow members `shell`. `expandGrants` refuses port words unless the
+    caller asks for them (`{ ports: true }`), so a new place that takes grants cannot take one by
+    mistake. The wire schema `grantsSchema` holds no port word; `heldGrantsSchema` (records and
+    `granted()`) does.
   - A record that holds one, in either direction, gets `needs: ["ports"]`, so a downgraded cns
     2.5.0 or later leaves that device out and says to update, rather than reading it without
     the word. cns 2.4.0 and earlier refuse the field, which fails closed too.
@@ -49,8 +51,8 @@ What the code had to work with:
     with every permission. `describeGrants` shows them as `ports 5432, 8080` after the
     permissions, and `explainDenial` gives the command for a missing one:
     `To allow it, run on studio: cns peer grant laptop port:5432`.
-  - In a mesh, `cns mesh allow MESH port:N` (and `cns mesh join --allow`) lets members reach it.
-    A member's limit can hold no port word, so a port word is within a limit that holds `shell`.
+  - A mesh's members forward with `shell`, as allowed there. A denied member is told to allow
+    `shell` with `cns mesh allow`, or to pair the two devices directly and grant the port.
 - **The RPC.** `shell.forward(port)` checks the grant, counts toward the limits, writes the audit
   start line and returns a handle. `handle.connect(sink)` checks the grant again, so a revoked
   grant stops new connections even on a link that lives on. It dials the port and returns a
@@ -101,8 +103,9 @@ What the code had to work with:
   `shell` reached every port already, and `port:N` is strictly less than `shell`.
 - A device that should reach one service, and run nothing, gets one word given on the device
   that has the service. It cannot be asked for while pairing, which costs a step after pairing.
-- A mesh file whose `allow` holds a port word cannot be read by a cns from before this feature,
-  which then refuses that mesh's file. That fails closed.
+- A mesh cannot give one port. A port word in a mesh file's `allow` would make a cns from before
+  this feature fail to read its meshes at all, which stops lists and secrets for every mesh
+  there, so meshes take none.
 - With 512 KiB in flight per forward, a keystroke on the same link waits at most about 0.4 s at
   10 Mbit/s, and a forward still moves about 10 MB/s with 50 ms between the devices. On loopback
   in a Linux container, 50 MiB each way took about 1.5 s, and a call on the same link took a
@@ -132,8 +135,6 @@ What the code had to work with:
   to listen elsewhere, so other machines cannot.
 - A forward ends only on a refusal or a signal: a device that stays unreachable is retried
   forever, at most every 15 seconds.
-- A port word given to a mesh's members reaches every member that holds `shell` in its limit,
-  or has no limit.
 - UDP is not carried.
 
 ## Alternatives considered

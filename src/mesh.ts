@@ -2,7 +2,7 @@ import { z } from "zod";
 import { errorMessage } from "./errors.js";
 import { fingerprint, verify, type Identity, type PublicKey } from "./identity.js";
 import { endedMeshFiles, meshFiles, peerNamePattern, removePeerFile, validatePeerUrl } from "./peer-files.js";
-import { expandGrants, grantedPort, grantsSchema, heldGrantsSchema, listPeers, publicKeySchema, revokedDevices, savePairedPeer, UnreadablePeer, updatePairedPeer, type PairedPeer, type Grant, type PeerEntry, type Permission } from "./peers.js";
+import { expandGrants, grantsSchema, listPeers, publicKeySchema, revokedDevices, savePairedPeer, UnreadablePeer, updatePairedPeer, type PairedPeer, type PeerEntry, type Permission } from "./peers.js";
 import { pruneSecrets } from "./secrets.js";
 
 /**
@@ -95,11 +95,11 @@ export interface MeshState {
   /** The admin's key, fixed when this device made or joined the mesh. */
   admin: PublicKey;
   /** What members may use here. The admin's is empty: members reach it through their pairings with it, as they joined. */
-  allow: Grant[];
+  allow: Permission[];
   signed: SignedList;
   list: MemberList;
 }
-const meshFileSchema = z.strictObject({ version: z.literal(1), admin: publicKeySchema, allow: heldGrantsSchema, list: signedListSchema });
+const meshFileSchema = z.strictObject({ version: z.literal(1), admin: publicKeySchema, allow: grantsSchema, list: signedListSchema });
 
 /**
  * The first list of a new mesh, with only its admin in it. `after` is the last version of
@@ -117,20 +117,16 @@ export function nextList(list: MemberList, change: (members: Member[]) => Member
   return listSchema.parse({ ...list, v: members.some((member) => member.gateway) ? 2 : 1, version: list.version + 1, issuedAt: new Date(now).toISOString(), members });
 }
 
-/**
- * What a member may use here: what this device allows members, within that member's limit. A
- * limit holds no port word, which a member's older cns could not read: a port word is within a
- * limit that holds `shell`, which reaches every port.
- */
-export function memberGrants(allow: readonly Grant[], limit?: readonly Permission[]): Grant[] {
-  const allowed = expandGrants(allow, { ports: true });
-  return limit ? allowed.filter((grant) => limit.includes(grantedPort(grant) === undefined ? grant as Permission : "shell")) : allowed;
+/** What a member may use here: what this device allows members, within that member's limit. */
+export function memberGrants(allow: readonly Permission[], limit?: readonly Permission[]): Permission[] {
+  const allowed = expandGrants(allow);
+  return limit ? allowed.filter((permission) => limit.includes(permission)) : allowed;
 }
 
 /** The changes that bring this device's paired-device records in line with a mesh's member list. */
 export interface MeshPlan {
   create: Array<{ name: string; record: Omit<PairedPeer, "version"> }>;
-  update: Array<{ name: string; incoming: Grant[] }>;
+  update: Array<{ name: string; incoming: Permission[] }>;
   remove: Array<{ name: string; publicKey: PublicKey }>;
 }
 
@@ -148,7 +144,7 @@ export interface SavedKey { name: string; publicKey?: PublicKey }
  * stay taken, and a member one of them names gets no record beside it. A device removed here
  * (`revoked`, by fingerprint: revokeDevice) gets none, and loses the one it had.
  */
-export function planMesh({ self, mesh, allow, list, records, unreadable = [], revoked = new Set(), now }: { self: PublicKey; mesh: string; allow: readonly Grant[]; list: MemberList; records: readonly PeerEntry[]; unreadable?: readonly SavedKey[]; revoked?: ReadonlySet<string>; now: number }): MeshPlan {
+export function planMesh({ self, mesh, allow, list, records, unreadable = [], revoked = new Set(), now }: { self: PublicKey; mesh: string; allow: readonly Permission[]; list: MemberList; records: readonly PeerEntry[]; unreadable?: readonly SavedKey[]; revoked?: ReadonlySet<string>; now: number }): MeshPlan {
   const plan: MeshPlan = { create: [], update: [], remove: [] };
   // Every member is paired with the admin directly, as it joined through that pairing, so the
   // admin keeps no records for its mesh and nobody keeps one for the admin. A device the list
@@ -248,7 +244,7 @@ export function listMeshes(): MeshState[] {
 
 /** Save this device's state for a mesh, replacing what it had. */
 export function writeMesh(state: Pick<MeshState, "name" | "admin" | "allow" | "signed">): void {
-  const content = JSON.stringify(meshFileSchema.parse({ version: 1, admin: state.admin, allow: expandGrants(state.allow, { ports: true }), list: state.signed }), null, 2) + "\n";
+  const content = JSON.stringify(meshFileSchema.parse({ version: 1, admin: state.admin, allow: expandGrants(state.allow), list: state.signed }), null, 2) + "\n";
   if (meshFiles.exists(state.name)) meshFiles.rewrite(state.name, content);
   else meshFiles.create(state.name, content);
 }

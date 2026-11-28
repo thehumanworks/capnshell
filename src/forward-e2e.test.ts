@@ -228,7 +228,13 @@ test("with only the port's grant, over its own link: other ports refused, one au
   // Port words never travel in a pairing.
   const pairing = await devices.cli(studio, ["pair", "--yes", "--grant", `files,port:${echoPort}`, "--state", studio.state]);
   assert.equal(pairing.code, 1, pairing.output);
-  assert.match(pairing.stderr, new RegExp(`port:${echoPort} is given only on the device that has the port, once paired: cns peer grant NAME port:${echoPort}`));
+  assert.match(pairing.stderr, new RegExp(`port:${echoPort} is given only on the device that has the port, to a device paired with it directly: cns peer grant NAME port:${echoPort}\\.`));
+  // Nor anything of a mesh: its members reach every port with shell.
+  for (const args of [["mesh", "allow", "home", `port:${echoPort}`], ["mesh", "join", "home", "--via", "studio", "--allow", `files,port:${echoPort}`]]) {
+    const meshed = await devices.cli(laptop, args);
+    assert.equal(meshed.code, 1, meshed.output);
+    assert.match(meshed.stderr, new RegExp(`port:${echoPort} is given only on the device that has the port, to a device paired with it directly: cns peer grant NAME port:${echoPort}\\..*a mesh's members reach every port with shell\\.`));
+  }
 
   const refused = await devices.cli(laptop, ["forward", "studio", String(echoPort), "--local", local]);
   assert.equal(refused.code, 4, refused.output);
