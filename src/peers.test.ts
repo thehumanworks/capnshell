@@ -68,10 +68,13 @@ test.skipIf(process.platform === "win32")("a record that holds a port word needs
   writeRecord("studio", { ...JSON.parse(readRecord("studio")), needs: ["ports"], grants: { incoming: ["port:99999"], outgoing: [] } });
   expect(() => getPeer("studio")).toThrow("not a valid paired-device record");
 
-  // A mesh gives no single port: a member denied one is told to allow shell there, or to pair directly.
+  // A mesh gives no single port: a member denied one is told to pair directly first, the narrower way, or to allow shell there.
   savePairedPeer("desk", { publicKey: generateIdentity().publicKey, addresses: [], pairedAt: PAIRED_AT, grants: { incoming: [], outgoing: ["files"] }, mesh: "home" });
-  expect(explainDenial("Permission denied: port:5432 not granted to laptop.", "desk")).toBe("Permission denied: port:5432 not granted to laptop. desk gives members of the mesh home what cns mesh allow set there. " +
-    "To allow it, run on desk: cns mesh allow home shell,files, or pair the two devices directly and run there: cns peer grant laptop port:5432");
+  expect(explainDenial("Permission denied: port:5432 not granted to laptop.", "desk")).toBe("Permission denied: port:5432 not granted to laptop. desk gives members of the mesh home no single port. " +
+    "To allow it, pair the two devices directly and run on desk: cns peer grant laptop port:5432; or run on desk: cns mesh allow home shell,files, which reaches every port");
+  // Without a port, a member is told to widen what the mesh allows, as before.
+  expect(explainDenial("Permission denied: shell not granted to laptop.", "desk")).toBe("Permission denied: shell not granted to laptop. desk gives members of the mesh home what cns mesh allow set there. " +
+    "To allow it, run on desk: cns mesh allow home shell,files");
 });
 
 test.skipIf(process.platform === "win32")("paired devices are saved under a name and keyed by identity", () => {

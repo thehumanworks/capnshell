@@ -125,11 +125,11 @@ export function allowHint(message: string, device?: string): string | undefined 
   let entry: PeerEntry | undefined;
   try { entry = device ? getPeer(device) : undefined; } catch { entry = undefined; }
   if (entry?.mesh) {
-    // A mesh gives no single port: shell reaches every one, or a direct pairing gets the port's word.
-    const ports = missing.filter((grant) => grantedPort(grant) !== undefined);
-    const widened = grantWords(expandGrants([...permissionsOf(entry.grants.outgoing), ...permissionsOf(missing), ...ports.length ? ["shell"] : []]));
-    const or = ports.length ? `, or pair the two devices directly and run there: cns peer grant ${match[2]} ${grantWords(ports)}` : "";
-    return `${device} gives members of the mesh ${entry.mesh} what cns mesh allow set there. To allow it, run ${where}: cns mesh allow ${entry.mesh} ${widened}${or}`;
+    const ports = missing.some((grant) => grantedPort(grant) !== undefined);
+    const widened = grantWords(expandGrants([...permissionsOf(entry.grants.outgoing), ...permissionsOf(missing), ...ports ? ["shell"] : []]));
+    // A mesh gives no single port. The narrower way first: a direct pairing gets the port's word; else shell reaches every port.
+    if (ports) return `${device} gives members of the mesh ${entry.mesh} no single port. To allow it, pair the two devices directly and run ${where}: cns peer grant ${match[2]} ${grantWords(missing)}; or run ${where}: cns mesh allow ${entry.mesh} ${widened}, which reaches every port`;
+    return `${device} gives members of the mesh ${entry.mesh} what cns mesh allow set there. To allow it, run ${where}: cns mesh allow ${entry.mesh} ${widened}`;
   }
   return `To allow it, run ${where}: cns peer grant ${match[2]} ${grantWords(missing)}`;
 }

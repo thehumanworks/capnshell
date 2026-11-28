@@ -51,8 +51,9 @@ What the code had to work with:
     with every permission. `describeGrants` shows them as `ports 5432, 8080` after the
     permissions, and `explainDenial` gives the command for a missing one:
     `To allow it, run on studio: cns peer grant laptop port:5432`.
-  - A mesh's members forward with `shell`, as allowed there. A denied member is told to allow
-    `shell` with `cns mesh allow`, or to pair the two devices directly and grant the port.
+  - A mesh's members forward with `shell`, as allowed there. A denied member is told the
+    narrower way first, to pair the two devices directly and grant the port, then to allow
+    `shell` with `cns mesh allow`.
 - **The RPC.** `shell.forward(port)` checks the grant, counts toward the limits, writes the audit
   start line and returns a handle. `handle.connect(sink)` checks the grant again, so a revoked
   grant stops new connections even on a link that lives on. It dials the port and returns a
