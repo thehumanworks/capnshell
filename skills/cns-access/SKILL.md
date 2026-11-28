@@ -35,7 +35,7 @@ A device may always view, type into and kill the sessions it started.
 
 ```sh
 cns peers               # ACCESS: what this device may use on each one
-cns peers --json        # access (there) and grants (what it may use here), mesh
+cns peers --json        # access (there) and grants (what it may use here), mesh, revoked
 cns doctor studio       # asks studio what it grants now, and saves it
 cns mesh list           # meshes, members and limits
 ```
@@ -80,13 +80,17 @@ pairing here, the meshes this device runs, the gateway `CNS_GATEWAY` names if th
 owner, and each paired device that lets this one run commands, by that device's own
 `cns peer remove --fingerprint FINGERPRINT --meshes`. Each place says what became of it and what
 to run there or later; pass those on to the user. It exits 4 while a place still needs something
-run there, and 1 while one was unreachable or failed. Running it again is harmless; once the
-device is gone here, name it by the fingerprint `cns peers` shows on another device:
+run there, and 1 while one was unreachable or failed. Running it again is safe, but narrows
+again a mesh allowed again since; once the device is gone here, name it by the fingerprint
+`cns peers` shows on another device:
 `cns peer remove --fingerprint FINGERPRINT --everywhere`. A removed device's key goes on the
 device's revoked list, so no mesh gives it a record there again; pairing with it directly again
 is the only way back. A mesh the removed device runs is narrowed there: its members may use
 nothing on that device until the user leaves it (`cns mesh leave MESH`, the step the report
-gives) or allows them again (`cns mesh allow MESH GRANTS`).
+gives, which also drops the secrets taken from it) or allows them again
+(`cns mesh allow MESH GRANTS`), only once `cns mesh list MESH` shows no device the user does not
+know: whoever has the removed key may have added one. A record of a removed device left or
+restored is `removed` in `cns peers`, and cns does not connect to it.
 
 A device that is in a mesh gets its grants from the mesh: `cns peer grant` refuses it, and
 `cns mesh allow MESH GRANTS` on the granting device sets what every member may use there.

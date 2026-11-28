@@ -46,7 +46,11 @@ Reviews found these ways that removing something could still give the lost devic
     still in the records, so gets no new one, or already on the list.
   - The daemon lets no record of it in: `authorize`, `offerTo` and the dial loop refuse its key,
     so a record left behind, or restored, does not let it in. That is one look at the revoked
-    directory per connection.
+    directory per connection. A revoked directory that is not private fails closed: the daemon
+    lets nothing in, and `cns peers` and `cns run` here name the directory and the `chmod` to run.
+  - `cns run`, `cns cp`, `cns shell` and the other commands that dial a device by name
+    (`resolvePeer`) refuse such a record, as what they send would go to whoever has the key.
+    `cns peers` marks it `removed` (`revoked` in `--json`), with the command that deletes it.
   - `newerLists` takes no list it signs. A mesh it runs stays at the last list this device took.
   - `secretsFor` seals nothing to it. A secret version it set, or one set for it, is not kept or
     read, even when another member passes it on (`meshOf`), and `pruneSecrets` deletes it.
@@ -56,7 +60,11 @@ Reviews found these ways that removing something could still give the lost devic
 - **The key is read loosely, for this only.** To find the key of a record that fails the
   private-file check, `savedKey` reads it anyway, through a link too, from a regular file of at
   most 64 KiB. Putting a key on the revoked list only narrows, so a file anyone could have written
-  is safe to read for it. Nothing else reads a record that way.
+  is safe to read for it. Nothing else reads a record that way. Whoever may write that file, or
+  where it links, chose the key, so the report gives its fingerprint and says the file was not
+  private, and `--everywhere` refuses such a key unless `--fingerprint` names it. Every record
+  that names the key goes, those read loosely first, so that a link goes before the record it
+  points to; each is named.
 - **Pairing directly is the way back.** Saving a direct pairing (`savePairedPeer` with no mesh)
   deletes the entry. That covers `cns pair` and a pairing the daemon accepts. A mesh record does
   not, and neither does a bot token, which is refused first. The entry is looked up before the
@@ -69,17 +77,24 @@ Reviews found these ways that removing something could still give the lost devic
   gets `allow` set to no grants here, so its members may use nothing here, whoever its last
   list names, and `secretsFor` and `takeSecrets` pass none of its secrets. It is reported as
   `narrowed` (`not permitted` when it allowed nothing already), with `cns mesh leave NAME` to
-  finish and `cns mesh allow NAME GRANTS` to undo the narrowing, and the command exits 4 until
-  it is left. Leaving stays that device's person's call, because it drops the other members'
-  records there. A device reached through `cns run` is given `cns run DEVICE -- cns mesh leave
+  finish, and the command exits 4 until it is left. `cns mesh allow NAME GRANTS` undoes the
+  narrowing, which the report offers only once `cns mesh list NAME` shows no device the person
+  does not know; `cns mesh allow` warns while the mesh's admin is on the revoked list, and a
+  removal run again narrows it again. Secrets this device already took from that mesh stay
+  readable here: a device the thief added may have set them, so the report says so when there
+  are any, and that `cns mesh leave NAME` drops them. Leaving stays that device's person's call,
+  because it drops the other members' records there. A device reached through `cns run` is given `cns run DEVICE -- cns mesh leave
   NAME`, built from the mesh name its answer gave, which must match a mesh name's pattern.
 - **One path.** Plain `cns peer remove NAME` is `removeHere` without `--meshes`, printed in
-  short: `Removed NAME.`, then a line for each mesh here that it runs (frozen at its last version
-  and narrowed, with the commands above), each mesh here that lists it (it gets no record from
-  that mesh until this device pairs with it directly), and each step that failed. It brings the
+  short: `Removed NAME.` (each record that named the key, when there were more), then a line for
+  each mesh here that it runs (frozen at its last version and narrowed, with the commands
+  above), each mesh here that lists it (it gets no record from that mesh until this device
+  pairs with it directly), and each step that failed. A pairing step that fails says which
+  records went before it, and the other lines follow all the same. It brings the
   records in line with the lists every time, after the entry is written, so a record a running
   daemon saved meanwhile goes too. `unpair` checks the key saved under the name before it
-  changes anything. That is the one key check.
+  changes anything. That is the one key check; when the name names another key, or none, it
+  is left as it is, and the report says so.
 - **The gateway.**
   - It is asked only when `CNS_GATEWAY` is set. Otherwise it is reported as `not used`, with
     `cns gateway status` and `cns gateway remove NAME` for an owner to run.
@@ -104,7 +119,8 @@ Reviews found these ways that removing something could still give the lost devic
   - Nothing a device says is quoted. When its answer cannot be read, or its command fails, the
     line says so and gives the command that shows it there.
   - Text from elsewhere that is kept, an error the gateway sent or a local error, is made
-    `strictlyPrintable` where the place is made: control, format and line or paragraph separator
+    `strictlyPrintable` where the place is made, and the gateway's words are quoted as its own
+    (`The gateway answered 401 and said: "..."`): control, format and line or paragraph separator
     characters are replaced, so neither the report nor `--json` carries one. The shared
     `printable` keeps format characters for other output, such as right-to-left session titles.
   - A paired record this cns cannot read is reported as `failed`, with what to run on it, and is
@@ -152,7 +168,7 @@ Reviews found these ways that removing something could still give the lost devic
   cns, or one not reached, still takes its lists and passes them on. The report names each such
   device.
 - A record file that names no key is deleted without a revoked entry, because there is no key to
-  keep out.
+  keep out, and the removal says so.
 - A device whose configuration directory is new, such as a CI runner that starts a bot from a
   token each time, has no revoked list, so it takes the token. Stop using the token.
 
