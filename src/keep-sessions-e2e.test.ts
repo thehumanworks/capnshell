@@ -102,9 +102,12 @@ test("the daemon adopts its holders before it accepts links, leaves the ones it 
   await record("newer", newer.pid!, path.join(dir, "newer.sock"), 99);
   // One whose pid runs, maybe as another process by now, but whose socket nobody listens at: it is gone.
   await record("silent", newer.pid!, path.join(dir, "silent.sock"), 99);
-  // A record whose socket is elsewhere is ignored, and nothing there is touched.
+  // A record whose socket is elsewhere has it looked for in the directory: whatever listens elsewhere is never reached nor removed.
   const elsewhere = path.join(studio.dir, "elsewhere.sock");
-  await writeFile(elsewhere, "");
+  let reachedElsewhere = false;
+  const outside = net.createServer((connection) => { reachedElsewhere = true; connection.destroy(); });
+  await new Promise<void>((resolve) => outside.listen(elsewhere, resolve));
+  t.after(() => { outside.close(); });
   await record("elsewhere", exited.pid!, elsewhere);
   // A holder that takes its time: while the daemon waits for it, nothing may reach the daemon yet.
   let reached: boolean | undefined;
@@ -133,20 +136,20 @@ test("the daemon adopts its holders before it accepts links, leaves the ones it 
   assert.ok(existsSync(path.join(dir, "newer.json")) && alive(newer.pid!), "a newer holder is left running");
   assert.ok(!existsSync(path.join(dir, "silent.json")), "a newer record whose socket nobody listens at is removed");
   assert.ok(existsSync(path.join(dir, "hung.json")));
-  assert.ok(existsSync(elsewhere) && existsSync(path.join(dir, "elsewhere.json")), "a record never removes a file outside the directory");
+  assert.ok(existsSync(elsewhere) && !reachedElsewhere, "a record never makes the daemon reach or remove a socket outside the directory");
+  assert.ok(!existsSync(path.join(dir, "elsewhere.json")), "nothing listens at its socket in the directory, so it is a gone holder's record");
   const log = (await readdir(studio.dir)).filter((file) => file.startsWith("daemon.json.") && file.endsWith(".log"));
   const said = (await Promise.all(log.map((file) => readFile(path.join(studio.dir, file), "utf8")))).join("");
   assert.match(said, /The session newer runs in a holder \(pid \d+\) of another cns, protocol 99, which cns \S+ cannot reach: run the daemon from that cns to reach it\. It keeps running; kill \d+ ends it\./);
   assert.match(said, /Cannot reach the holder of the session hung \(pid \d+\): The session's holder did not answer\. It keeps running; kill \d+ ends it\./);
-  assert.match(said, /Ignored \S+elsewhere\.json: its socket is not in \S+\./);
-  assert.doesNotMatch(said, /silent/);
+  assert.doesNotMatch(said, /silent|elsewhere/);
   // Their names stay taken, and only the session the daemon reaches is listed.
   const taken = await devices.cli(laptop, ["shell", "studio", "--name", "newer", "--", "true"]);
   assert.notEqual(taken.code, 0);
   assert.match(taken.output, /A PTY session named newer already exists/);
   assert.deepEqual(JSON.parse((await ok(laptop, ["sessions", "studio", "--json"])).stdout).map((session: { name: string }) => session.name), ["work"]);
-  // work's own record, by its holder's id, and the three planted ones the daemon leaves.
-  assert.deepEqual((await records()).map((file) => file.replace(/^[a-f0-9]{16}\.json$/, "work")).sort(), ["elsewhere.json", "hung.json", "newer.json", "work"]);
+  // work's own record, by its holder's id, and the two planted ones the daemon leaves.
+  assert.deepEqual((await records()).map((file) => file.replace(/^[a-f0-9]{16}\.json$/, "work")).sort(), ["hung.json", "newer.json", "work"]);
 });
 
 test("a device that may only start sessions is refused, with exit 4, the ones it did not start, also one no paired device started", { skip: !HOLDERS, timeout: 120000 }, async (t) => {

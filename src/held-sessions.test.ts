@@ -5,7 +5,9 @@ import net from "node:net";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 import manifest from "../package.json" with { type: "json" };
-import { connectHolder, HeldSessions, HOLDERS, keepsSessions, socketsTooLong } from "./held-sessions.js";
+import { RpcTarget } from "capnweb";
+import { processExited } from "./commands/daemon.js";
+import { connectHolder, HeldSessions, HOLDERS, keepsSessions, socketsTooLong, startHolder } from "./held-sessions.js";
 import { HOLDER_CAPNWEB, HOLDER_PROTOCOL, holderRecordSchema, type HolderRecord } from "./holder.js";
 import { HandleScope, type PtyExit } from "./pty.js";
 import { OutputSink } from "./terminal.js";
@@ -60,18 +62,22 @@ async function until(check: () => boolean | Promise<boolean>, what: string, time
   }
 }
 
-/** A daemon's sessions in a directory of their own; hooks end every holder still running. */
-async function holders(t: TestContext, finishedMs?: number) {
+/** A daemon's sessions in a directory of their own; hooks end every holder still running, a stopped one too. */
+async function holders(t: TestContext, options: ConstructorParameters<typeof HeldSessions>[2] = {}) {
   const dir = path.join(await realpath(await mkdtemp(path.join(TEST_TMP, "cns-held-"))), "daemon-sessions");
-  const sessions = new HeldSessions(dir, () => {}, finishedMs ? { finishedMs } : {});
+  const sessions = new HeldSessions(dir, () => {}, options);
   await sessions.adopt();
   const records = async () => {
     const files = existsSync(dir) ? (await readdir(dir)).filter((file) => file.endsWith(".json")) : [];
-    return await Promise.all(files.map(async (file) => holderRecordSchema.parse(JSON.parse(await readFile(path.join(dir, file), "utf8")))));
+    // Only holders' own records: a planted one, of another protocol, names no holder to end. A holder
+    // that is ending may remove its record between the listing and the read.
+    const read = (file: string) => readFile(path.join(dir, file), "utf8").catch(() => "null");
+    const parsed = await Promise.all(files.map(async (file) => holderRecordSchema.safeParse(JSON.parse(await read(file)))));
+    return parsed.flatMap((record) => record.success ? [record.data] : []);
   };
   t.after(async () => {
     sessions[Symbol.dispose]();
-    for (const record of await records()) { try { process.kill(record.pid, "SIGTERM"); } catch { /* Gone. */ } }
+    for (const record of await records()) { for (const signal of ["SIGTERM", "SIGCONT"] as const) { try { process.kill(record.pid, signal); } catch { /* Gone. */ } } }
     await until(async () => !(await records()).some((record) => running(record.pid)), "the holders to end");
     await rm(path.dirname(dir), { recursive: true, force: true });
   });
@@ -79,7 +85,7 @@ async function holders(t: TestContext, finishedMs?: number) {
 }
 
 test("a holder runs the session, forwards to it until its shell closes, and ends once the finished session is removed", { skip: !HOLDERS, timeout: 30000 }, async (t) => {
-  const { sessions, records } = await holders(t, 500);
+  const { sessions, records } = await holders(t, { finishedMs: 500 });
   const scope = new HandleScope();
   const handle = await sessions.startSession("work", { command: "printf READY; while IFS= read -r line; do printf 'got:%s\\n' \"$line\"; done" }, "laptop-fingerprint", scope);
   const [record] = await records();
@@ -136,6 +142,135 @@ test("killing a held session ends its holder, and its name can be used again at 
   await assert.rejects(async () => { await first.capture(); }, /PTY session work no longer exists/);
   await assert.rejects(async () => { await first.kill(); }, /PTY session work no longer exists/);
   assert.equal((await again.info()).running, true);
+});
+
+/** A viewer that never acknowledges the end of the program, so that it stays attached to a finished session. */
+class StayingSink extends RpcTarget {
+  output() {}
+  exit() { return new Promise<void>(() => {}); }
+  detached() {}
+}
+
+test("starts at the cap each make room by killing a finished session of their own, the one that ended first with nobody attached, and are refused once none is left", { skip: !HOLDERS, timeout: 60000 }, async (t) => {
+  const { sessions } = await holders(t, { max: 3 });
+  const finished = async (name: string) => {
+    const handle = await sessions.startSession(name, { command: "true" }, null, new HandleScope());
+    await until(async () => !(await handle.info()).running, `${name} to end`);
+    return handle;
+  };
+  // watched ended first, but somebody is attached to it.
+  const watched = await finished("watched");
+  await watched.attach(new StayingSink() as never);
+  await until(async () => (await watched.info()).viewers === 1, "the viewer to attach");
+  await finished("a");
+  await finished("b");
+  // Two starts at once, at the cap: each kills a finished session of its own, rather than both the same one.
+  await Promise.all(["c", "d"].map((name) => sessions.startSession(name, { command: "sleep 60" }, null, new HandleScope())));
+  assert.deepEqual(sessions.names, ["c", "d", "watched"]);
+  await assert.rejects(sessions.startSession("e", { command: "sleep 60" }, null, new HandleScope()),
+    /^Error: Too many named PTY sessions: all 3 are running or in use\. Kill one first\.$/);
+  assert.deepEqual(sessions.names, ["c", "d", "watched"]);
+});
+
+test("a full daemon names the sessions whose holders it cannot reach", { skip: !HOLDERS, timeout: 30000 }, async (t) => {
+  const { dir, sessions } = await holders(t);
+  // The holder of a newer cns: something listens at its socket, but this cns does not speak its protocol.
+  const listener = net.createServer((connection) => { connection.on("error", () => {}); });
+  await new Promise<void>((resolve) => listener.listen(path.join(dir, "newer.sock"), resolve));
+  t.after(() => { listener.close(); });
+  await writeFile(path.join(dir, "newer.json"), JSON.stringify({ protocol: 99, name: "newer", pid: process.pid, socket: path.join(dir, "newer.sock") }), { mode: 0o600 });
+  const full = new HeldSessions(dir, () => {}, { max: 2 });
+  t.after(() => full[Symbol.dispose]());
+  await full.adopt();
+  await full.startSession("work", { command: "sleep 60" }, null, new HandleScope());
+  await assert.rejects(full.startSession("more", { command: "sleep 60" }, null, new HandleScope()),
+    /^Error: Too many named PTY sessions: all 2 are running or in use, 1 of them in holders this daemon cannot reach \(newer\), as its log says\. Kill one first\.$/);
+  sessions[Symbol.dispose]();
+});
+
+test("a stopped holder holds up neither the list nor a kill, which kills the holder, and its name stays taken until it has gone", { skip: !HOLDERS, timeout: 30000 }, async (t) => {
+  const { sessions, records } = await holders(t, { killMs: 1000 });
+  const stuck = await sessions.startSession("stuck", { command: "sleep 60" }, null, new HandleScope());
+  await sessions.startSession("fine", { command: "sleep 60" }, null, new HandleScope());
+  const { pid } = (await records()).find((record) => record.name === "stuck")!;
+  process.kill(pid, "SIGSTOP");
+  let started = Date.now();
+  assert.deepEqual((await sessions.list(500)).map((info) => info.name), ["fine"]);
+  assert.ok(Date.now() - started < 2000, "the list does not wait for the stopped holder");
+
+  started = Date.now();
+  const killing = stuck.kill();
+  await until(() => !sessions.names.includes("stuck"), "the kill to start");
+  assert.throws(() => sessions.openSession("stuck", new HandleScope()), /^Error: No PTY session named stuck\.$/);
+  await assert.rejects(sessions.startSession("stuck", { command: "true" }, null, new HandleScope()), /^Error: The PTY session stuck is still ending\. Start it again once it has\.$/);
+  const exit = await killing;
+  assert.ok(Date.now() - started >= 1000, "the holder had killMs to answer");
+  assert.deepEqual([exit.exitCode, exit.signal, exit.error], [null, null, `The session's holder (pid ${pid}) did not answer, so the daemon killed it.`]);
+  assert.ok(await processExited(pid), "SIGKILL ends even a stopped holder");
+  await sessions.startSession("stuck", { command: "sleep 60" }, null, new HandleScope());
+  assert.deepEqual(sessions.names, ["fine", "stuck"]);
+});
+
+test("a holder that starts wrong is killed, not left running", { skip: !HOLDERS, timeout: 30000 }, async (t) => {
+  const dir = await mkdtemp(path.join(TEST_TMP, "cns-held-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const pidFile = path.join(dir, "pid");
+  // A holder that sends no record and would otherwise run on.
+  const script = `require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); process.on("message", () => process.send({ ready: {} })); setInterval(() => {}, 1000);`;
+  const start = { dir, name: "work", options: {}, owner: null, finishedMs: 1000 };
+  await assert.rejects(startHolder(start, 10_000, { file: process.execPath, args: ["-e", script] }), /^Error: The session's holder sent no record\.$/);
+  const pid = Number(await readFile(pidFile, "utf8"));
+  t.after(() => { try { process.kill(pid, "SIGKILL"); } catch { /* Gone. */ } });
+  assert.ok(await processExited(pid, 3000), "the holder was killed");
+});
+
+test("connectHolder refuses a holder that answers with another protocol, and says so in printable text", { skip: !HOLDERS, timeout: 30000 }, async (t) => {
+  const dir = await mkdtemp(path.join(TEST_TMP, "cns-held-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const socket = path.join(dir, "holder.sock");
+  let reply = "";
+  const server = net.createServer((connection) => { connection.on("error", () => {}); connection.once("data", () => connection.write(reply)); });
+  await new Promise<void>((resolve) => server.listen(socket, resolve));
+  t.after(() => { server.close(); });
+  reply = '{"protocol":2}\n';
+  await assert.rejects(connectHolder({ socket, token: "a".repeat(64) }), /^Error: The session's holder answered with protocol 2, not 1\.$/);
+  reply = '{"protocol":"\\u202e1"}\n';
+  await assert.rejects(connectHolder({ socket, token: "a".repeat(64) }), /^Error: The session's holder answered with protocol \?1, not 1\.$/);
+});
+
+test("a holder another cns runs is named with the pid that ends it only when its socket answers", { skip: !HOLDERS, timeout: 30000 }, async (t) => {
+  const { dir, sessions } = await holders(t);
+  sessions[Symbol.dispose]();
+  const listener = net.createServer((connection) => { connection.on("error", () => {}); });
+  await new Promise<void>((resolve) => listener.listen(path.join(dir, "answers.sock"), resolve));
+  t.after(() => { listener.close(); });
+  // Both pids run; only one socket answers. The other's path is too long to connect to, so whether anything listens cannot be told.
+  const record = (name: string, socket: string) => writeFile(path.join(dir, `${name}.json`), JSON.stringify({ protocol: 99, name, pid: process.pid, socket: path.join(dir, socket) }), { mode: 0o600 });
+  await record("answers", "answers.sock");
+  await record("unknown", `${"x".repeat(120)}.sock`);
+  const said: string[] = [];
+  const next = new HeldSessions(dir, (message) => said.push(message));
+  t.after(() => next[Symbol.dispose]());
+  await next.adopt();
+  assert.deepEqual(next.names, ["answers", "unknown"]);
+  const about = (name: string) => said.find((message) => message.startsWith(`The session ${name} `)) ?? "";
+  assert.match(about("answers"), new RegExp(`It keeps running; kill ${process.pid} ends it\\.$`));
+  assert.match(about("unknown"), /Its name stays taken while its record, \S+unknown\.json, is there\.$/);
+});
+
+test("a daemon hears of the end of only the sessions it adopts while their program runs", { skip: !HOLDERS, timeout: 30000 }, async (t) => {
+  const { dir, sessions } = await holders(t);
+  const done = await sessions.startSession("done", { command: "true" }, "laptop-fingerprint", new HandleScope());
+  await until(async () => !(await done.info()).running, "done to end");
+  await sessions.startSession("live", { command: "sleep 60" }, "laptop-fingerprint", new HandleScope());
+  sessions[Symbol.dispose]();
+  const adopted: string[] = [];
+  const next = new HeldSessions(dir, () => {}, { adopted: (record) => adopted.push(record.name) });
+  t.after(() => next[Symbol.dispose]());
+  await next.adopt();
+  assert.deepEqual(next.names, ["done", "live"]);
+  // The daemon that ran done when it ended heard of it.
+  assert.deepEqual(adopted, ["live"]);
 });
 
 test("a start the daemon gives up on leaves no holder behind", { skip: !HOLDERS, timeout: 30000 }, async (t) => {
