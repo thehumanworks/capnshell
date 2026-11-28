@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -175,4 +176,42 @@ test("a standing link through the relay gives way to a direct one that one of th
   assert.deepEqual([await links(studio, wsl), await links(wsl, studio)], [["direct"], ["direct"]], "one direct link stays");
   const run = await cli(studio, ["run", "wsl", "--", "printf upgraded"]);
   assert.deepEqual([run.code, run.stdout], [0, "upgraded"], run.stderr);
+});
+
+test("a borrowed link is given up when the signal fires while connecting to the daemon, and waitMs after asking it", { skip: !posix, timeout: 60000 }, async (t) => {
+  // The default state path follows the home, which a process reads once: each case runs in a process of its own.
+  const home = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-borrow-")));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const script = path.join(home, "borrow.ts");
+  await writeFile(script, `import { mkdirSync, writeFileSync } from "node:fs";
+import { borrowDeviceLink } from ${JSON.stringify(path.join(import.meta.dir, "device-link.ts"))};
+import { generateIdentity } from ${JSON.stringify(path.join(import.meta.dir, "identity.ts"))};
+const slow = process.argv[2] === "slow";
+// A daemon that never answers lend, and with slow, takes 300 ms to accept the connection.
+const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request, server) {
+  if (slow) await Bun.sleep(300);
+  return server.upgrade(request) ? undefined : new Response("", { status: 400 });
+}, websocket: { message() {} } });
+mkdirSync(${JSON.stringify(path.join(home, ".cns"))}, { mode: 0o700, recursive: true });
+writeFileSync(${JSON.stringify(path.join(home, ".cns", "daemon.json"))}, JSON.stringify({ version: 2, pid: process.pid, port: server.port, host: "127.0.0.1", token: "0".repeat(64) }), { mode: 0o600 });
+const started = performance.now();
+let outcome;
+try { outcome = await borrowDeviceLink({ name: "studio", publicKey: generateIdentity().publicKey, addresses: [] }, generateIdentity(), slow ? AbortSignal.timeout(50) : new AbortController().signal, slow ? 5000 : 200) ? "link" : "none"; }
+catch (error) { outcome = error.name; }
+console.log(JSON.stringify({ outcome, ms: performance.now() - started }));
+process.exit(0);
+`);
+  const borrow = (mode: string) => {
+    const run = spawnSync(process.execPath, [script, mode], { encoding: "utf8", env: { ...process.env, HOME: home } });
+    assert.equal(run.status, 0, run.stderr);
+    return JSON.parse(run.stdout) as { outcome: string; ms: number };
+  };
+  // The signal fired while connecting: given up once connected, not when waitMs pass.
+  const slow = borrow("slow");
+  assert.equal(slow.outcome, "TimeoutError");
+  assert.ok(slow.ms < 2000, `gave up after ${Math.round(slow.ms)} ms`);
+  // A daemon that does not answer is given up after waitMs, not LEND_MS.
+  const silent = borrow("silent");
+  assert.equal(silent.outcome, "none");
+  assert.ok(silent.ms >= 150 && silent.ms < 1500, `gave up after ${Math.round(silent.ms)} ms`);
 });

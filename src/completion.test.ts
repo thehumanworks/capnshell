@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -10,6 +10,7 @@ import { makePrivateDirectory } from "./config.js";
 import type { FileKind } from "./files.js";
 import { fingerprint, generateIdentity } from "./identity.js";
 import { PERMISSIONS, revokeDevice, savePairedPeer, type Permission } from "./peers.js";
+import { cliEnvironment, cliInvocation } from "./test-support.js";
 
 /** A device as completion sees it through the local daemon's link: its files by absolute directory, and its sessions. */
 interface FakeDevice {
@@ -104,6 +105,11 @@ test("a device's named sessions complete through its link, when it lets this dev
   assert.deepEqual(await at(["ui", "-D", "studio", "-s", ""]), ["build", "work"]);
   // The keys after the session are not looked up.
   assert.deepEqual(await at(["keys", "studio", "build", ""]), []);
+  // The link is closed once the lookup is done, for sessions and for paths.
+  const done = lookups({ studio });
+  await complete(program, ["screen", "studio", ""], done.fake);
+  await complete(program, ["cp", "studio:"], done.fake);
+  assert.deepEqual(done.closed, ["studio", "studio"]);
   // stash grants no sessions:list, so it is not asked; an unknown device neither.
   const { fake, borrowed } = lookups({ studio, stash: { outgoing: ["shell"], sessions: ["secret"] } });
   assert.deepEqual(await complete(program, ["screen", "stash", ""], fake), []);
@@ -221,6 +227,18 @@ test("device names are the records here, without removed devices, and a bad reco
   process.stderr.write = (() => { throw new Error("completion wrote to stderr"); }) as typeof process.stderr.write;
   try { assert.deepEqual(localLookups().devices(), [{ name: "studio", outgoing: ["files"] }]); }
   finally { process.stderr.write = error; }
+});
+
+test("cns __complete only reads what is here: a mesh bot token in CNS_TOKEN is left alone", (t) => {
+  const home = realpathSync(mkdtempSync(path.join(os.tmpdir(), "cns-complete-token-")));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const config = path.join(home, "config");
+  makePrivateDirectory(config);
+  const { file, args } = cliInvocation(["__complete", "bash", "run", ""]);
+  const run = spawnSync(file, args, { encoding: "utf8", env: cliEnvironment({ CNS_CONFIG_DIR: config, HOME: home, CNS_TOKEN: "garbage", CNS_RELAY: "off" }) });
+  assert.deepEqual([run.status, run.stderr], [0, ""]);
+  // Acting on a token writes the bot's identity, peers and meshes.
+  assert.deepEqual(readdirSync(config), []);
 });
 
 test("quoting for bash and PowerShell reads back as the name it quotes", () => {
