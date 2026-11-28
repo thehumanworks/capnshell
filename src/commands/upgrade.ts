@@ -231,9 +231,11 @@ async function miseTool(name: string, target: string, platform: NodeJS.Platform,
   if (!listing) return { result: "failed", reason: "cns cannot read what mise ls --installed --json printed there", next: byHand };
   const tools = miseToolsHolding(listing, executable, platform);
   if (!tools.length) return { result: "manual", reason: `cns cannot tell how cns was installed there: its daemon runs ${printable(executable)}, which no tool that mise lists there holds`, next: install };
-  if (tools.length > 1) return { result: "manual", reason: `its daemon runs ${printable(executable)}, which mise there lists under several tools: ${tools.map(printable).join(", ")}`, next: byHand };
+  // Names the device chose, which no pattern has checked yet.
+  const shown = (named: string) => printable(named).slice(0, 200);
+  if (tools.length > 1) return { result: "manual", reason: `its daemon runs ${printable(executable)}, which mise there lists under several tools: ${tools.map(shown).join(", ")}`, next: byHand };
   const tool = toolName(tools[0]!);
-  if (!tool) return { result: "failed", reason: `mise there names the tool that installed cns ${printable(tools[0]!)}, which cns does not put on a command line`, next: byHand };
+  if (!tool) return { result: "failed", reason: `mise there names the tool that installed cns ${shown(tools[0]!)}, which cns does not put on a command line`, next: byHand };
   // Through a tool alias, as mise reads its config there: [tool_alias], or [alias] before it.
   const backendOf = async (named: string): Promise<{ backend: string } | Refusal> => {
     const described = await run("mise", ["tool", word(named), "--json"], MISE_MS);

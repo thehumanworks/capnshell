@@ -37,8 +37,24 @@ test("mise's listing says which tool installed the daemon's cns, by the name its
   for (const executable of [`${windows}\\installs\\cns\\2.7.0\\cns.exe`, "c:\\users\\A\\appdata\\local\\MISE\\installs\\cns\\2.7.0\\cns.exe", "C:/Users/a/AppData/Local/mise/installs/cns/2.7.0/cns.exe", `\\\\?\\${windows}\\installs\\cns\\2.7.0\\cns.exe`]) {
     assert.deepEqual(miseToolsHolding(listed, executable, "win32"), ["cns"], executable);
   }
-  // There the identity layout keeps installations in mise\i, and a daemon started through the version link, a junction, names the link.
+  // There the identity layout keeps installations in mise\i, out of the fallback's reach: the same, as the installation itself holds it.
+  for (const [installation, executable] of [
+    [`${windows}\\i\\capnshell-x`, `${windows}\\i\\capnshell-x\\cns.exe`],
+    [`${windows}\\i\\capnshell-x`, "c:\\USERS\\a\\appdata\\local\\Mise\\I\\CAPNSHELL-X\\cns.exe"],
+    [`${windows}\\i\\capnshell-x`, `\\\\?\\${windows}\\i\\capnshell-x\\cns.exe`],
+    [`\\\\?\\${windows}\\i\\capnshell-x`, `${windows}\\i\\capnshell-x\\cns.exe`],
+    [`${windows}\\i\\capnshell-x`, "C:/Users/a/AppData/Local/mise/i/capnshell-x/cns.exe"],
+    [`${windows}\\i\\capnshell-x\\`, `${windows}\\i\\capnshell-x\\cns.exe`],
+  ]) {
+    assert.deepEqual(miseToolsHolding(at("cns", installation!), executable!, "win32"), ["cns"], `${installation} holds ${executable}`);
+  }
+  assert.deepEqual(miseToolsHolding(at("cns", `${windows}\\i\\capnshell-x`), `${windows}\\i\\capnshell-xy\\cns.exe`, "win32"), []);
+  assert.deepEqual(miseToolsHolding(at("cns", `${linux}/capnshell-x/`), `${linux}/capnshell-x/cns`, "linux"), ["cns"]);
+  // And a daemon started through the version link, a junction, names the link.
   assert.deepEqual(miseToolsHolding(at("cns", `${windows}\\i\\capnshell-on3c2hgh`), `${windows}\\installs\\cns\\2.7.0\\cns.exe`, "win32"), ["cns"]);
+  // The installation holds it from the root down, not somewhere along its path.
+  assert.deepEqual(miseToolsHolding(at("cns", "/opt/store/capnshell-x"), "/tmp/fake/opt/store/capnshell-x/cns", "linux"), []);
+  assert.deepEqual(miseToolsHolding(at("cns", "/opt/store/capnshell-x"), "/opt/store/capnshell-x/cns", "linux"), ["cns"]);
   // A version mise has removed since the daemon started; and MISE_TOOL's own directory, which mise no longer lists.
   assert.deepEqual(miseToolsHolding(at("cns", `${linux}/cns/2.9.0`), `${linux}/cns/2.7.0/cns`, "linux"), ["cns"]);
   assert.deepEqual(miseToolsHolding({}, `${linux}/github-thehumanworks-capnshell/2.7.0/cns`, "linux"), [MISE_TOOL]);
@@ -46,6 +62,10 @@ test("mise's listing says which tool installed the daemon's cns, by the name its
   assert.deepEqual(miseToolsHolding(at("cns", `${linux}/cns/2.7.0`), "/usr/local/bin/cns", "linux"), []);
   assert.deepEqual(miseToolsHolding(at("cns", `${linux}/cns/2.7.0`), `${linux}/CNS/2.7.0/cns`, "linux"), []);
   assert.deepEqual(miseToolsHolding(at("Cns", "/opt/tools/c"), "/opt/tools/cns/cns", "linux"), []);
+  // The fallback takes the tool's whole directory, not one that begins like it, and guesses none for a name with capitals, where mise's kebab case splits words.
+  assert.deepEqual(miseToolsHolding(at("cns", `${linux}/cns/2.7.0`), `${linux}/cns-old/2.7.0/cns`, "linux"), []);
+  assert.deepEqual(miseToolsHolding(at("cNs", "/opt/elsewhere/c"), `${linux}/c-s/2.7.0/cns`, "linux"), []);
+  assert.deepEqual(miseToolsHolding(at("my_cns", "/opt/elsewhere/c"), `${linux}/my-cns/2.7.0/cns`, "linux"), ["my_cns"]);
   assert.deepEqual(miseToolsHolding(at("cns", "/", "/opt"), "/opt/cns", "linux"), []);
   assert.deepEqual(miseToolsHolding(at("cns", "C:\\", "C:\\Tools"), "C:\\Tools\\cns.exe", "win32"), []);
   // Another backend is named as mise lists it, for mise tool to tell; two that hold it are both named.
@@ -55,7 +75,7 @@ test("mise's listing says which tool installed the daemon's cns, by the name its
 
 test("only a tool name with no shell or option characters is taken from mise", () => {
   for (const name of ["cns", MISE_TOOL, "my_cns.2", "aqua:a/b", "C-N-S"]) assert.equal(toolName(name), name);
-  for (const name of ["", "-g", "--cd=/tmp", "cns@2.9.0", "a b", "a;b", "$(id)", "`id`", "'cns'", "\"cns\"", "c\nns", "c\u202ens", "cns\\x", "%PATH%", "a&b", "a|b", "~", "é", "x".repeat(201)]) {
+  for (const name of ["", "-g", "--cd=/tmp", "cns@2.9.0", "a b", "a;b", "$(id)", "`id`", "'cns'", "\"cns\"", "c\nns", "c\u202ens", "cns\\x", "%PATH%", "a%PATH%", "a!b", "a[b", "a]b", "cns[bin=cns]", "a&b", "a|b", "a>b", "a*", "~", "é", "x".repeat(201)]) {
     assert.equal(toolName(name), undefined, JSON.stringify(name));
   }
 });
@@ -171,6 +191,8 @@ test("a cns from a tool that no config asks for any more, as after a move to a t
   const moved = device({ listing, configured: `${installs}/cns/2.8.0/cns` });
   assert.equal(reportLine(await upgradeDevice("studio", "2.9.0", moved.reach, quick)), "studio: upgraded from 2.7.0 to 2.9.0");
   assert.deepEqual(moved.state.commands.slice(0, 8), [...asks(), "mise which cns", "mise tool 'cns' --json", "mise use -g 'cns@2.9.0'", "mise which cns --tool 'cns@2.9.0'"]);
+  // mise which cns may install what the config asks for, so it gets mise's limit, as mise tool and mise use do.
+  assert.deepEqual(moved.state.timeouts.slice(0, 8), [15_000, 15_000, 15_000, 180_000, 180_000, 180_000, 180_000, 15_000]);
   assert.match(reportLine(await upgradeDevice("studio", "2.9.0", device({ listing, configured: `${installs}/cns/2.8.0/cns` }).reach, { ...quick, dryRun: true })), /: mise use -g cns@2\.9\.0, which pins/);
   // The alias the config names now comes from elsewhere: the tool that installed the daemon's cns is upgraded, as before.
   const fork = device({ listing, configured: `${installs}/cns/2.8.0/cns`, backends: { cns: "github:someone-else/capnshell" } });
@@ -200,6 +222,8 @@ test("a device that runs a cns from mise is upgraded with the exact version, the
     `'${studio.fresh}' status --json`,
     `'${studio.fresh}' daemon restart`,
   ]);
+  // mise tool may install a plugin, and mise use downloads the release: both get mise's limit.
+  assert.deepEqual(studio.state.timeouts, [15_000, 15_000, 15_000, 180_000, 180_000, 15_000, 15_000, 15_000]);
 });
 
 test("a cns that mise installed under a tool alias is upgraded by the alias, which moves the alias's version", async () => {
@@ -284,6 +308,11 @@ test("a tool name from mise reaches the command line only when it holds no shell
   const both = device({ answers: { "mise ls": { code: 0, stdout: JSON.stringify({ cns: held, [MISE_TOOL]: held }) } } });
   assert.match(reportLine(await upgradeDevice("studio", "2.9.0", both.reach, quick)), /: its daemon runs \S+, which mise there lists under several tools: cns, github:thehumanworks\/capnshell\. There, run mise use -g /);
   assert.equal(both.state.commands.length, 3);
+  // A name the device chose is cut to 200 characters in the report.
+  const long = device({ answers: { "mise ls": { code: 0, stdout: JSON.stringify({ ["x".repeat(300)]: held }) } } });
+  assert.match(reportLine(await upgradeDevice("studio", "2.9.0", long.reach, quick)), new RegExp(`: mise there names the tool that installed cns ${"x".repeat(200)}, which cns does not put on a command line\\. `));
+  const many = device({ answers: { "mise ls": { code: 0, stdout: JSON.stringify({ ["y".repeat(300)]: held, cns: held }) } } });
+  assert.match(reportLine(await upgradeDevice("studio", "2.9.0", many.reach, quick)), new RegExp(`, which mise there lists under several tools: ${"y".repeat(200)}, cns\\. `));
 });
 
 test("a service that runs the old cns is pointed at the new one with cns up --install, which restarts through the worker", async () => {
