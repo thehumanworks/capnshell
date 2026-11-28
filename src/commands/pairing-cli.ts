@@ -26,7 +26,7 @@ import { RefusingShell } from "../refusing-shell.js";
 import { connectControl, daemonStatePath, processExited, removeStaleState, runsUnder, startDaemon, stopDaemon, type ControlConnection, type DaemonStatus } from "./daemon.js";
 import { selfInvocation, selfPath } from "../runtime.js";
 import { CNS_VERSION, daemonDrift, describeVersion, reportedVersion, restartAdvice, versionOrder } from "../version.js";
-import { describeService, installService, installedService, installedServiceRuns, lingering, registeredTask, restartService, serviceEnvironment, serviceFailed, serviceFile, serviceKind, serviceLog, serviceName, serviceOverrides, startService, taskName, uninstallService, type ServiceKind } from "../service.js";
+import { describeService, installService, installedService, installedServiceRuns, lingering, registeredTask, restartService, runTask, serviceEnvironment, serviceFailed, serviceFile, serviceKind, serviceLog, serviceName, serviceOverrides, startService, taskName, uninstallService, type ServiceKind } from "../service.js";
 import { windowsUserSid } from "../config.js";
 
 /** How long the invited device waits for the inviting person to decide. */
@@ -173,7 +173,7 @@ async function pairedDaemon(options: { bind?: string; port?: string; state?: str
 export async function up(options: UpOptions): Promise<void> {
   if (options.install && options.uninstall) throw new Error("Use either --install or --uninstall, not both.");
   if (options.uninstall) { await uninstall(options); return; }
-  if (options.install) await install(options);
+  if (options.install && await install(options)) return;
   const { control, started } = await pairedDaemon(options, true);
   await report(control, started ? "Started" : "Running", options.state);
 }
@@ -288,15 +288,14 @@ async function keepHandlesHere(): Promise<void> {
 }
 
 /**
- * The daemon, started through the scheduled task, a second time if it does not answer; undefined
- * if it still does not, and the caller starts it detached: a restart from another device must not
- * leave this one without a daemon.
+ * The daemon, started through the scheduled task; undefined if the task does not start it, and the
+ * caller starts it detached: a restart or install from another device must not leave this one without a daemon.
  */
 async function startTask(state: string): Promise<ControlConnection | undefined> {
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    try { startService("schtasks"); return await awaitControl(state); }
-    catch (error) { console.error(`The scheduled task did not start the daemon: ${errorMessage(error)} ${attempt === 1 ? "Trying again." : "Starting it without the task."}`); }
-  }
+  let failure = "no daemon answered within 15 seconds";
+  try { if (await runTask(state)) return await awaitControl(state); }
+  catch (error) { failure = errorMessage(error); }
+  console.error(`The scheduled task did not start the daemon (${failure}); starting it without the task. See ${serviceLog("schtasks", state)}.`);
   return undefined;
 }
 
@@ -374,8 +373,12 @@ function requireServiceKind() {
 /** The variables serviceEnvironment keeps that a scheduled task does not get from this shell, since it passes none. */
 const TASK_UNSEEN = ["CNS_CONFIG_DIR", "CNS_RELAY", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR"];
 
-/** `cns up --install`: run the daemon as a launchd agent, systemd user service or scheduled task, so it starts at login and restarts after a crash. */
-async function install(options: UpOptions): Promise<void> {
+/**
+ * `cns up --install`: run the daemon as a launchd agent, systemd user service or scheduled task, so
+ * it starts at login and restarts after a crash. Returns whether a restart in the background took
+ * over, which reports for it.
+ */
+async function install(options: UpOptions): Promise<boolean> {
   const kind = requireServiceKind();
   const { created } = ensureIdentity();
   if (created) console.error(`Created this device's identity at ${identityPath()}. Keep the file private; losing it means pairing again.`);
@@ -402,7 +405,7 @@ async function install(options: UpOptions): Promise<void> {
     log: path.join(path.dirname(state), "service.log"),
     ...kind === "schtasks" ? { user: taskUser() } : {},
   });
-  if (running) {
+  if (running && kind !== "schtasks") {
     await stopDaemon(state);
     console.error("Stopped the running daemon; the service runs it from now on.");
   }
@@ -418,12 +421,13 @@ async function install(options: UpOptions): Promise<void> {
     console.error(`The task's daemon gets your account's environment, not this shell's. If ${unseen.join(", ")} ${unseen.length === 1 ? "is" : "are"} set only here, set ${unseen.length === 1 ? "it" : "each"} for your account with setx NAME VALUE, then run cns daemon restart.`);
   }
   console.error("Run cns up --install again after moving or upgrading cns to a new path, or to change --bind or --port.");
-  try { (await awaitControl(options.state, undefined, serviceFailure(kind, state))).close(); }
-  catch (error) {
-    // Task Scheduler cannot say why its task's daemon did not start; the log can.
-    if (kind !== "schtasks") throw error;
-    throw new Error(`${errorMessage(error)} See ${serviceLog(kind, state)}. cns up --uninstall removes the task; cns up then starts the daemon without it.`, { cause: error });
-  }
+  if (kind !== "schtasks") { (await awaitControl(options.state, undefined, serviceFailure(kind, state))).close(); return false; }
+  // Stopping the daemon ends what runs through it, as this may from a paired device, so a restart's own process does it.
+  if (running) { await restart({ state }); return true; }
+  const started = await startTask(state);
+  if (started) { started.close(); return false; }
+  const daemon = await startDaemon({ bind: settings.bind, port: settings.port, url: endpointUrl(settings.bind, settings.port), state });
+  throw new Error(`The daemon runs without the task for now (pid ${daemon.pid}). cns up --install tries the task again; cns up --uninstall removes it.`);
 }
 
 /** The SID the scheduled task runs as, and whose sign-in starts it. */
@@ -436,14 +440,16 @@ function taskUser(): string {
 async function uninstall(options: UpOptions): Promise<void> {
   if (options.bind !== undefined || options.port !== undefined) throw new Error("--uninstall takes no --bind or --port.");
   const kind = requireServiceKind();
-  // Ending a scheduled task ends its supervisor, not the daemon, so stop the daemon at the state file the task names.
+  // The task goes first, then the daemon at the state file it names: its supervisor then does not
+  // start the daemon again, and this command, if a paired device runs it through that daemon, has
+  // removed the task before stopping the daemon ends it.
   const task = kind === "schtasks" ? registeredTask() : undefined;
   const state = task && (task.state ?? daemonStatePath(options.state));
+  if (!(await uninstallService(kind))) { console.log(`No ${serviceName(kind)} is installed.`); return; }
   if (state && await serviceDaemonAt(state)) {
     try { await stopDaemon(state); } catch (error) { console.error(`Stopping the daemon: ${errorMessage(error)}`); }
+    if (await serviceDaemonAt(state)) throw new Error(`Removed the ${serviceName(kind)}, but its daemon still runs. Stop it with cns stop --state "${state}".`);
   }
-  if (!(await uninstallService(kind))) { console.log(`No ${serviceName(kind)} is installed.`); return; }
-  if (state && await serviceDaemonAt(state)) throw new Error(`Removed the ${serviceName(kind)}, but its daemon still runs. Stop it with cns stop --state "${state}".`);
   console.log(`Removed the ${serviceName(kind)}; the daemon is stopped. Run cns up to start it without the service.`);
 }
 

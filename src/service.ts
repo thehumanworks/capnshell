@@ -236,7 +236,7 @@ function must(runner: Runner, file: string, args: string[], next?: string): void
 
 const launchdDomain = () => `gui/${process.getuid?.() ?? 0}`;
 
-/** Write the service file, privately, and start the daemon through the service manager. */
+/** Write the service file, privately, and start the daemon through the service manager; a scheduled task is only registered, for runTask to run. */
 export async function installService(file: ServiceFile, runner: Runner = runCommand): Promise<void> {
   await mkdir(path.dirname(file.path), { recursive: true });
   // launchd opens the log itself, so its directory must exist first.
@@ -248,7 +248,6 @@ export async function installService(file: ServiceFile, runner: Runner = runComm
   await rename(temporary, file.path);
   if (file.kind === "schtasks") {
     must(runner, schtasks(), ["/Create", "/TN", taskName(), "/XML", file.path, "/F"], "Run cns up to start the daemon without a service.");
-    runTask(runner, "The task starts the daemon at your next sign-in; run cns up to start it now.");
   } else if (file.kind === "launchd") {
     // Replace a loaded copy; bootout fails when none is loaded, which is fine.
     runner("launchctl", ["bootout", `${launchdDomain()}/${SERVICE_LABEL}`]);
@@ -266,8 +265,7 @@ export async function uninstallService(kind: ServiceKind, runner: Runner = runCo
   if (kind === "schtasks") {
     const name = taskName();
     if (runner(schtasks(), ["/Query", "/TN", name]).code !== 0) return false;
-    // Ending the task ends its supervisor, not the daemon, which the caller stops first.
-    runner(schtasks(), ["/End", "/TN", name]);
+    // Never /End (see runTask). The caller stops the daemon next, and with the task gone its supervisor does not start it again.
     must(runner, schtasks(), ["/Delete", "/TN", name, "/F"], `Delete ${name} in Task Scheduler, or run schtasks /Delete /TN "${name}" /F.`);
     if (existsSync(file)) await unlink(file);
     return true;
@@ -343,18 +341,25 @@ export function serviceOverrides(kind: ServiceKind, executable: string, runner: 
 /** Start an installed daemon that is not running, as after cns stop. */
 export function startService(kind: ServiceKind, runner: Runner = runCommand): void {
   if (kind === "launchd") must(runner, "launchctl", ["kickstart", `${launchdDomain()}/${SERVICE_LABEL}`]);
-  else if (kind === "schtasks") runTask(runner, "Run cns up --install to register the task again.");
+  else if (kind === "schtasks") must(runner, schtasks(), ["/Run", "/TN", taskName()], "Run cns up --install to register the task again.");
   else must(runner, "systemctl", ["--user", "start", SERVICE_UNIT]);
 }
 
 /**
- * Run the scheduled task. Task Scheduler ignores a run while it counts an earlier one as running,
- * which may be ending, or supervising an old command, and schtasks /Run still reports success. So
- * end that one first; /End fails when none runs, which is fine.
+ * Run the scheduled task until a daemon answers at `state`, for up to 15 seconds; false if none
+ * does. Task Scheduler ignores a run while it counts an earlier one as running, as for a moment
+ * after its daemon stops, and schtasks /Run still succeeds, so run it each second. Never /End: it
+ * ends every process the task started, and so a cns daemon restart or cns up --install that a
+ * paired device runs through the daemon.
  */
-function runTask(runner: Runner, next: string): void {
-  runner(schtasks(), ["/End", "/TN", taskName()]);
-  must(runner, schtasks(), ["/Run", "/TN", taskName()], next);
+export async function runTask(state: string, supervision: Supervision = {}): Promise<boolean> {
+  const { sleep = wait, runner = runCommand, answers = daemonAnswers } = supervision;
+  for (let second = 0; second < 15; second++) {
+    must(runner, schtasks(), ["/Run", "/TN", taskName()]);
+    await sleep(1000);
+    if (await answers(state)) return true;
+  }
+  return false;
 }
 
 /** Restart the systemd service's daemon, or start it if it is not running, with the command the unit and its drop-ins give it now. */
@@ -394,7 +399,9 @@ export function describeService(kind: ServiceKind): string {
   return `a ${serviceName(kind)}`;
 }
 
-/** What superviseDaemon uses to run and check the daemon; tests replace them. */
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** What superviseDaemon and runTask use to run and check the daemon; tests replace them. */
 export interface Supervision {
   launch?: typeof spawn;
   sleep?: (ms: number) => Promise<unknown>;
@@ -417,7 +424,7 @@ async function daemonAnswers(state: string): Promise<boolean> {
  * exits with status 0, as after cns stop.
  */
 export async function superviseDaemon(daemon: { state: string; bind: string; port: number }, supervision: Supervision = {}): Promise<void> {
-  const { launch = spawn, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), runner = runCommand, answers = daemonAnswers } = supervision;
+  const { launch = spawn, sleep = wait, runner = runCommand, answers = daemonAnswers } = supervision;
   const program = selfInvocation(["daemon", "--service", "--state", daemon.state, "--bind", daemon.bind, "--port", String(daemon.port)]);
   const log = serviceLog("schtasks", daemon.state);
   await mkdir(path.dirname(log), { recursive: true, mode: 0o700 });
