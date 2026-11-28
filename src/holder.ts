@@ -22,11 +22,16 @@ import { HandleScope, PtyRegistry, sessionNameSchema, type NamedPty, type PtyExi
 import { CNS_VERSION } from "./version.js";
 
 /**
- * The holder protocol: the record below and HolderApi. A daemon speaks every version up to its
- * own, so that an upgraded daemon adopts the sessions of the release before it, and leaves a
- * holder of a newer version running. A Cap'n Web upgrade that changes its messages needs a new one.
+ * The holder protocol: the token hello, the record below, and over Cap'n Web HolderApi with the
+ * methods of NamedPty, PtyAttachment and PtySink (pty.ts) that a daemon calls, as Cap'n Web
+ * HOLDER_CAPNWEB sends them. A daemon speaks every version up to its own, so that an upgraded
+ * daemon adopts the sessions of the release before it, and leaves a holder of a newer version
+ * running. Changing any of those method sets, or a Cap'n Web upgrade that changes its messages,
+ * needs a new one.
  */
 export const HOLDER_PROTOCOL = 1;
+/** The Cap'n Web release protocol 1 was defined with; held-sessions.test.ts fails when package.json moves on, so that this is decided. */
+export const HOLDER_CAPNWEB = "0.12.0";
 
 export const holderRecordSchema = z.object({
   protocol: z.literal(HOLDER_PROTOCOL),

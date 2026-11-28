@@ -5,12 +5,21 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
+import manifest from "../package.json" with { type: "json" };
 import { connectHolder, HeldSessions, HOLDERS } from "./held-sessions.js";
-import { holderRecordSchema, type HolderRecord } from "./holder.js";
+import { HOLDER_CAPNWEB, HOLDER_PROTOCOL, holderRecordSchema, type HolderRecord } from "./holder.js";
 import { HandleScope, type PtyExit } from "./pty.js";
 import { OutputSink } from "./terminal.js";
+import { PROJECT_ROOT } from "./test-support.js";
 
 const running = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+
+test("holder protocol 1 is pinned to the Cap'n Web release it was defined with", async () => {
+  const installed = JSON.parse(await readFile(path.join(PROJECT_ROOT, "node_modules", "capnweb", "package.json"), "utf8")) as { version: string };
+  // A daemon and the holders of the release before it may run different Cap'n Webs. Before moving it,
+  // check that its messages are unchanged, or give the holder a new protocol (holder.ts).
+  assert.deepEqual([HOLDER_PROTOCOL, manifest.dependencies.capnweb, installed.version], [1, HOLDER_CAPNWEB, HOLDER_CAPNWEB]);
+});
 
 async function until(check: () => boolean | Promise<boolean>, what: string, timeoutMs = 10000) {
   const deadline = Date.now() + timeoutMs;
