@@ -35,6 +35,8 @@ afterEach(async () => {
     if (value === undefined) delete process.env[name]; else process.env[name] = value;
   }
   await rm(dir, { recursive: true, force: true });
+  // Only the CLI sets the exit status: one set here would fail the whole run after every test passed.
+  assert.ok(!process.exitCode, `a test left process.exitCode at ${process.exitCode}`);
 });
 
 const hub = generateIdentity();
@@ -272,24 +274,21 @@ test("each record that names the device is named as it goes, and a removal that 
   pair("hub", hub, ["shell"]);
   // old-phone is a link to hub's record: removing it takes hub, and says so, and that the file was read loosely.
   symlinkSync(path.join(dir, "peers", "hub"), path.join(dir, "peers", "old-phone"));
-  assert.equal((await quietly(() => removePeer("old-phone", { state }))).out, `The file saved as old-phone is not a private file, or is a link, so the key in it was read anyway: fingerprint ${hub.fingerprint}.\nRemoved old-phone and hub, which name the same device.\n`);
+  assert.deepEqual(await quietly(() => removePeer("old-phone", { state })), { value: 0, out: `The file saved as old-phone is not a private file, or is a link, so the key in it was read anyway: fingerprint ${hub.fingerprint}.\nRemoved old-phone and hub, which name the same device.\n` });
   assert.ok(revoked(hub) && !existsSync(path.join(dir, "peers", "hub")) && !existsSync(path.join(dir, "peers", "old-phone")));
-  assert.equal(process.exitCode, undefined);
   // b is a link to a, a loose record of phone: once a goes, b names nothing, and is left. phone's mesh is narrowed all the same.
   pair("phone", phone);
   mesh("work", phone, [], ["shell"]);
   removePeerFile("phone");
   writeFileSync(path.join(dir, "peers", "a"), JSON.stringify({ publicKey: phone.publicKey }), { mode: 0o644 });
   symlinkSync(path.join(dir, "peers", "a"), path.join(dir, "peers", "b"));
-  try {
-    const { out } = await quietly(() => removePeer("a", { state }));
-    assert.equal(out, [
-      `The file saved as a is not a private file, or is a link, so the key in it was read anyway: fingerprint ${phone.fingerprint}.`,
-      `Could not finish removing a here: a was removed, and its key is on the revoked list; b now names another device, or none, so it was left as it is. Check cns peers. Later, run: cns peer remove --fingerprint ${phone.fingerprint} --meshes.`,
-      "a runs the mesh work, which this device is in. It stays at its last list here, version 2, which whoever has a's key may have added devices to, so its members may now use nothing here. To finish, leave it: cns mesh leave work. To let its members use shell here again, only once cns mesh list work shows no device you do not know: cns mesh allow work shell.",
-    ].join("\n") + "\n");
-    assert.equal(process.exitCode, 1);
-  } finally { process.exitCode = undefined; }
+  const { value: status, out } = await quietly(() => removePeer("a", { state }));
+  assert.equal(status, 1);
+  assert.equal(out, [
+    `The file saved as a is not a private file, or is a link, so the key in it was read anyway: fingerprint ${phone.fingerprint}.`,
+    `Could not finish removing a here: a was removed, and its key is on the revoked list; b now names another device, or none, so it was left as it is. Check cns peers. Later, run: cns peer remove --fingerprint ${phone.fingerprint} --meshes.`,
+    "a runs the mesh work, which this device is in. It stays at its last list here, version 2, which whoever has a's key may have added devices to, so its members may now use nothing here. To finish, leave it: cns mesh leave work. To let its members use shell here again, only once cns mesh list work shows no device you do not know: cns mesh allow work shell.",
+  ].join("\n") + "\n");
   assert.ok(revoked(phone) && lstatSync(path.join(dir, "peers", "b")).isSymbolicLink(), "b is left");
   assert.deepEqual(readMesh("work")?.allow, []);
 });

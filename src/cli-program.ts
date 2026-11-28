@@ -106,8 +106,8 @@ export function createCli(): Command {
       const chosen = options.fingerprint === undefined ? paired("peer remove", "NAME", [name], given) : undefined;
       if (chosen) once("peer remove", "NAME", chosen.after);
       const { removeCommand, removePeer } = await import("./commands/remove-everywhere.js");
-      if (chosen && !options.everywhere && !options.meshes && !options.dryRun && !options.json) await removePeer(chosen.device, options);
-      else process.exitCode = await removeCommand(chosen?.device, options);
+      process.exitCode = chosen && !options.everywhere && !options.meshes && !options.dryRun && !options.json
+        ? await removePeer(chosen.device, options) : await removeCommand(chosen?.device, options);
     });
   alias.command("grant").usage("[options] <name> <grants...>").argument("[name]", pairedDevice).argument("[grants...]").description("Let a paired device use more of this device: shell, files, skills, sessions, all or permissions")
     .addOption(deviceOption("The paired device, in place of the NAME argument"))

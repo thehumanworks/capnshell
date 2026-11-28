@@ -69,12 +69,15 @@ const join = (...parts: Array<string | undefined>) => parts.filter(Boolean).join
 /** What is said of a key read from a file that is not private or is a link: whoever may write it, or where it links, chose that key. */
 const looselyRead = (name: string, fp: string) => `The file saved as ${name} is not a private file, or is a link, so the key in it was read anyway: fingerprint ${fp}.`;
 
-/** `cns peer remove NAME`: removeHere, reported in short, with what the device may still change here. */
-export async function removePeer(name: string, options: { state?: string }): Promise<void> {
+/**
+ * `cns peer remove NAME`: removeHere, reported in short, with what the device may still change
+ * here. Returns the exit status: 1 when a place failed, else 0.
+ */
+export async function removePeer(name: string, options: { state?: string }): Promise<number> {
   if (!peerFileExists(name)) throw new Error(`No paired device is saved as ${name}. cns peers shows them.`);
   const key = savedKey(name);
   // A damaged file that names no key: there is no device to keep out, so it only goes.
-  if (key === undefined) { removePeerFile(name); console.log(`Removed ${name}. It named no device, so nothing was put on the revoked list.`); return; }
+  if (key === undefined) { removePeerFile(name); console.log(`Removed ${name}. It named no device, so nothing was put on the revoked list.`); return 0; }
   const fp = fingerprint(key.publicKey);
   const records = recordsWithKey(fp).map((record) => record.name);
   const [pairing, ...rest] = await removeHere(fp, { state: options.state });
@@ -86,7 +89,7 @@ export async function removePeer(name: string, options: { state?: string }): Pro
       : gone.length > 1 ? `Removed ${and(gone)}, which name the same device.` : gone.length ? `Removed ${gone[0]}.` : `${name} was not paired here any more.`,
     ...hints(name, key.publicKey, rest),
   ].join("\n"));
-  if ([pairing!, ...rest].some((place) => place.outcome === "failed")) process.exitCode = 1;
+  return [pairing!, ...rest].some((place) => place.outcome === "failed") ? 1 : 0;
 }
 
 /**
