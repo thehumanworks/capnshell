@@ -608,8 +608,10 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
       socket.addEventListener("message", (event: MessageEvent) => {
         lastHeard = Date.now();
         if (typeof event.data !== "string") return;
-        let message: { t?: string; nonce?: string; id?: string };
+        let message: { t?: string; nonce?: string; id?: string } | null;
         try { message = JSON.parse(event.data); } catch { return; }
+        // JSON that is not an object, such as null, would throw below.
+        if (typeof message !== "object" || message === null) return;
         if (message.t === "challenge" && typeof message.nonce === "string" && /^[A-Za-z0-9_-]{22}$/.test(message.nonce)) {
           void challengeBytes(host, identity.publicKey, message.nonce).then((bytes) => {
             socket.send(JSON.stringify({ t: "proof", sig: Buffer.from(identity.sign(bytes)).toString("base64url") }));
