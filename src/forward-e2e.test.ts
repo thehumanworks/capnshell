@@ -157,11 +157,12 @@ test("over the daemon's link: 50 MiB each way by hash while the link still answe
   assert.equal(await echoed(replacement, "again"), "again");
   for (const each of open) each.destroy();
 
+  let sixForward: Awaited<ReturnType<typeof forwarding>> | undefined;
   if (ipv6) {
     // A service on ::1 alone, as Node dev servers often are.
     const six = await service(t, (each) => each.end("from ::1"), "::1");
     const sixLocal = await unusedPort("127.0.0.1");
-    await forwarding(t, laptop, ["studio", String(six), "--local", sixLocal]);
+    sixForward = await forwarding(t, laptop, ["studio", String(six), "--local", sixLocal]);
     assert.equal(String(await readAll(await dial(sixLocal))), "from ::1");
   } else t.diagnostic("no IPv6 loopback here: the ::1 service was not tested");
 
@@ -179,6 +180,30 @@ test("over the daemon's link: 50 MiB each way by hash while the link still answe
   assert.equal(await echoed(after, "back"), "back");
   after.destroy();
   assert.equal(echoes.closed, false);
+
+  // A forward whose process is killed is released there with its link: eight more fit, then none.
+  echoes.child.kill("SIGKILL");
+  await echoes.exited;
+  for (const each of [forward, sixForward]) {
+    if (!each) continue;
+    each.child.kill("SIGTERM");
+    assert.equal(await each.exited, 143, each.output);
+  }
+  // The daemon hung up the control connection that borrowed the link the restart ended.
+  const control2 = await connectControl(laptop.state);
+  t.after(() => control2.close());
+  await settledLink(control2, "studio");
+  const borrowed = await control2.remote.lend(studioKey);
+  assert.ok(borrowed);
+  const shared = borrowed.shell as unknown as { forward(port: number): Promise<{ [Symbol.dispose](): void }> };
+  const held: Array<{ [Symbol.dispose](): void }> = [];
+  for (let tries = 0; held.length < 8; tries++) {
+    try { held.push(await shared.forward(echoPort)); }
+    catch (error) { if (tries > 50) throw error; await new Promise((resolve) => setTimeout(resolve, 100)); }
+  }
+  await assert.rejects(async () => { await shared.forward(echoPort); }, /A device holds at most 8 forwards here at once/);
+  for (const each of held) each[Symbol.dispose]();
+  borrowed.shell[Symbol.dispose]();
 });
 
 test("with only the port's grant, over its own link: other ports refused, one audit entry, and a revoked grant ends it with 4 and unpairing with 3",
