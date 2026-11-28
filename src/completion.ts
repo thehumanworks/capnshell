@@ -209,7 +209,7 @@ export function unquote(shell: Shell, word: string): string {
     if (quote === "'") {
       if (!SINGLE_QUOTES.includes(char)) out += char;
       // PowerShell writes a quote inside single quotes twice.
-      else if (shell === "pwsh" && SINGLE_QUOTES.includes(word[at + 1] ?? "")) out += word[++at];
+      else if (shell === "pwsh" && at + 1 < word.length && SINGLE_QUOTES.includes(word[at + 1]!)) out += word[++at];
       else quote = undefined;
     } else if (char === escape && at + 1 < word.length) {
       const next = word[++at]!;
@@ -268,6 +268,9 @@ _cns() {
   local -a found
   found=(\${(f)"$(cns __complete zsh "\${(@Q)words[2,CURRENT-1]}" "\${(Q)PREFIX}" 2>/dev/null)"})
   (( $#found )) || { _files; return }
+  # As with files: the word up to its last / or : stays as typed, and only the rest is listed.
+  compset -P '*[/:]'
+  found=(\${found#\${(Q)IPREFIX}})
   compadd -S '' -- \${(M)found:#*[/:\\\\]}
   compadd -- \${found:#*[/:\\\\]}
 }
