@@ -100,7 +100,7 @@ export async function addMembers(name: string, devices: string[], options: State
   const live = await settle(options, identity.publicKey);
   if (options.gateway) {
     console.log(`The mesh ${name} lists the gateway as ${devices[0]} (version ${list.version}). It may use at most ${describeGrants(added[0]!.limit ?? [])} on each member, within what that member allows members.`);
-    console.log("Connectors approved for all devices reach the members once the gateway lists its devices again (list_peers). Members on a cns from before 2.5.0 cannot read this list and leave the mesh: upgrade them, then run cns mesh join there again.");
+    console.log("Connectors approved for all devices reach the members once the gateway lists its devices again (list_peers). Members on a cns from before 2.6.0 cannot read this list and leave the mesh: upgrade them, then run cns mesh join there again.");
   } else {
     console.log(`The mesh ${name} lists ${devices.join(", ")} (version ${list.version})${limit ? `, each limited to ${describeGrants(limit)} on other members` : ""}.`);
     console.log(`On each, run: cns mesh join ${name} --via DEVICE, where DEVICE is its name for this device.`);

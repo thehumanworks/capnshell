@@ -127,7 +127,7 @@ share no mesh secrets with it. The gateway picks up the list, and the members ad
 the next time a connector lists devices (`list_peers`). `cns gateway status` shows the meshes
 it is in. Only connectors approved for all devices reach mesh members.
 
-Upgrade every member to 2.5.0 or newer first. A member on an older cns cannot read a list
+Upgrade every member to 2.6.0 or newer first. A member on an older cns cannot read a list
 that names the gateway, and leaves the mesh: after upgrading it, run `cns mesh join` there
 again. `cns mesh remove home gateway` takes the gateway out.
 [ADR 0009](../docs/adr/0009-gateway-in-a-mesh.md) has the design. A connector keeps the tools it was approved for: when a cns release

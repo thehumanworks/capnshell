@@ -108,7 +108,7 @@ const knownFeatures: ReadonlySet<string> = new Set<string>(FEATURES);
  */
 type FieldKind = "base" | "informational" | Feature;
 export const PEER_FIELDS = {
-  record: { version: "base", needs: "base", publicKey: "base", addresses: "base", pairedAt: "base", grants: "base", mesh: "base" },
+  record: { version: "base", needs: "base", publicKey: "base", addresses: "base", pairedAt: "base", grants: "base", mesh: "base", gateway: "informational" },
   grants: { incoming: "base", outgoing: "base" },
 } as const satisfies { record: Record<keyof PairedPeer, FieldKind>; grants: Record<keyof PairedPeer["grants"], FieldKind> };
 
@@ -134,7 +134,11 @@ export const pairedPeerSchema = z.object({
    * which knows meshes, refuse mesh records.
    */
   mesh: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/).optional(),
-  /** Set on a mesh's record for the cns gateway, which dials this device and is never dialed (mesh.ts). */
+  /**
+   * Set on a mesh's record for the cns gateway, which dials this device and is never dialed
+   * (mesh.ts). Informational: it changes only whether this device dials the gateway, not what
+   * the gateway may do here, so a cns that ignores it only knocks on the relay for nothing.
+   */
   gateway: z.literal(true).optional(),
 });
 export type PairedPeer = z.infer<typeof pairedPeerSchema>;

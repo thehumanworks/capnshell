@@ -61,7 +61,7 @@ interface Consent { code: string; clientName: string; clientDomain: string | nul
 interface Grant { id: string; client: string; devices: string[]; tools: string[]; createdAt: number; expiresAt?: number }
 
 interface GatewayMesh { name: string; admin: string; version: number; members: string[] }
-/** `meshes` is absent from a gateway deployed before 2.5.0. */
+/** `meshes` is absent from a gateway deployed before 2.6.0. */
 interface GatewayStatus { fingerprint: string; name: string; relay: string; devices: Device[]; meshes?: GatewayMesh[]; pending: Consent[]; grants: Grant[]; owner: string; version?: unknown; tools?: unknown }
 
 /**

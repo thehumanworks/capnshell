@@ -27,11 +27,13 @@ could read secrets on devices that grant it nothing.
   Unless `--limit` says otherwise, its limit is what the admin lets the gateway use. Each member
   then lets it use what that member allows members, within that limit.
 - **A list that names a gateway is `v: 2`.** A list without a gateway stays `v: 1`. A cns from
-  before 2.5.0 cannot read a `v: 2` list, so that member leaves the mesh (`droppedBy`). It does
+  before 2.6.0 cannot read a `v: 2` list, so that member leaves the mesh (`droppedBy`). It does
   not let the gateway in as a plain member. After an upgrade, `cns mesh join` brings it back.
 - **Members save it as a gateway.** Its record is marked `gateway: true`. Members do not dial
   it (`worthDialing`), and it is no member for secrets: no secret is sealed to it, set by it,
-  or set for it (`isMember` in secrets.ts). `cns secret set --device` refuses it.
+  or set for it (`isMember` in secrets.ts). `cns secret set --device` refuses it. The record's
+  `gateway` field is informational (`PEER_FIELDS` in peers.ts): it decides only whether a
+  member dials the gateway, so a cns that ignores it only dials it for nothing.
 - **The gateway asks for lists while listing devices.** `list_peers` already opens a link to
   each paired device. On that link it calls `meshes([])`. A device answers with the lists of
   the meshes that list the caller. The gateway keeps a list only when it was signed by the
@@ -45,7 +47,7 @@ could read secrets on devices that grant it nothing.
 
 - One command on the admin brings a mesh to Claude, and members added later are reached
   without any step at the gateway, a reconnect, or a pairing with the gateway.
-- Every member must run 2.5.0 or newer before the gateway is added, or it leaves the mesh.
+- Every member must run 2.6.0 or newer before the gateway is added, or it leaves the mesh.
 - The gateway learns of a new member only at its next `list_peers`. Until then a call that
   names the member fails with `Unknown peer`, and the error says so.
 - The gateway can reach members of a mesh that a non-owner device runs, if that device is paired

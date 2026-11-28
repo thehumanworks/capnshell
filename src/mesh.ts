@@ -47,7 +47,7 @@ const memberSchema = z.strictObject({
   gateway: z.literal(true).optional(),
 });
 export type Member = z.infer<typeof memberSchema>;
-// A list naming the gateway is v 2, which a cns from before 2.5.0 cannot read: such a member leaves the mesh, rather than let the gateway in as a member like any other.
+// A list naming the gateway is v 2, which a cns from before 2.6.0 cannot read: such a member leaves the mesh, rather than let the gateway in as a member like any other.
 const listSchema = z.strictObject({
   v: z.union([z.literal(1), z.literal(2)]),
   mesh: nameSchema,
