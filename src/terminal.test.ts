@@ -134,3 +134,47 @@ test("a key typed at a session's screen before its attach call returns goes to t
   assert.equal(await child.exited, 7, output);
   assert.match(output, /keys "\\u0003"/);
 });
+
+// A session that shows its screen and then fails its attach call. The process carries on and
+// reads a line, as cns shell does before it tries the session again.
+const FAILED_ATTACH = String.raw`
+import { attachTerminal } from ${JSON.stringify(path.join(import.meta.dirname, "terminal.ts"))};
+try {
+  await attachTerminal(async (sink) => {
+    await sink.output(Buffer.from("the session's screen\r\n"), 22);
+    throw new Error("the attach failed");
+  }, {}, { normalScreen: true });
+} catch (error) {
+  process.stdout.write("caught: " + (error as Error).message + "\n");
+}
+process.stdin.once("data", (data) => { process.stdout.write("read " + JSON.stringify(String(data)) + "\n"); process.exit(0); });
+process.stdin.resume();
+`;
+
+// The first output makes the terminal raw. Left raw after a failed attach, the terminal shows
+// nothing that is typed, and Enter no longer ends a line.
+test("an attach that fails after the session's first output gives the terminal its own mode back", { skip: !posix }, async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "cns-terminal-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const script = path.join(dir, "failed-attach.ts");
+  await writeFile(script, FAILED_ATTACH);
+  let output = "";
+  let caught!: () => void;
+  const failed = new Promise<void>((resolve) => { caught = resolve; });
+  const child = Bun.spawn([process.execPath, script], {
+    terminal: {
+      cols: 80, rows: 10, name: "xterm-256color",
+      data: (_terminal, data) => {
+        output += Buffer.from(data).toString("latin1");
+        if (output.includes("caught: the attach failed")) caught();
+      },
+    },
+  });
+  t.after(() => { if (child.exitCode === null) child.kill(); });
+  await failed;
+  const typed = output.length;
+  child.terminal!.write("typed\r");
+  assert.equal(await child.exited, 0, output);
+  // Cooked again: the terminal echoes the line, and hands it over at Enter as a line.
+  assert.match(output.slice(typed), /typed\r\n[^]*read "typed\\n"/);
+});
