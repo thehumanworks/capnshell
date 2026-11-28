@@ -140,25 +140,30 @@ test("the PowerShell script hands the words before the cursor to cns and offers 
   const file = cns.file("pwsh");
   cns.reply(["'studio:My Docs/'", "studio:Mx.txt"]);
   const lines = ["cns cp studio:M", "cns ", "cns.exe cp 'studio:My D'", "cns run studio -- l"];
-  const runner = path.join(cns.dir, "run.ps1");
-  writeFileSync(runner, [
-    `. ${JSON.stringify(file)}`,
-    `foreach ($line in @(${lines.map((line) => `'${line.replaceAll("'", "''")}'`).join(", ")})) {`,
-    "  $r = TabExpansion2 -inputScript $line -cursorColumn $line.Length",
-    "  [pscustomobject]@{ start = $r.ReplacementIndex; length = $r.ReplacementLength; matches = @($r.CompletionMatches | ForEach-Object CompletionText) } | ConvertTo-Json -Compress",
-    "}",
-  ].join("\n"));
-  const run = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", runner], { encoding: "utf8", env: cns.env });
-  assert.equal(run.status, 0, run.stderr);
-  const results = run.stdout.split("\n").filter((line) => line.startsWith("{")).map((line) => JSON.parse(line) as { start: number; length: number; matches: string[] });
-  assert.deepEqual(results[0], { start: 7, length: 8, matches: ["'studio:My Docs/'", "studio:Mx.txt"] });
-  assert.deepEqual(results[2], { start: 11, length: 13, matches: ["'studio:My Docs/'", "studio:Mx.txt"] });
-  assert.deepEqual(cns.asked(), [
-    ["__complete", "pwsh", "cp", "studio:M"],
-    ["__complete", "pwsh", ""],
-    ["__complete", "pwsh", "cp", "'studio:My D'"],
-    ["__complete", "pwsh", "run", "studio", "--", "l"],
-  ]);
+  // Legacy is how Windows PowerShell 5.1 and PowerShell 7.2 pass arguments: they drop an empty one.
+  for (const [index, passing] of ["Standard", "Legacy"].entries()) {
+    const runner = path.join(cns.dir, "run.ps1");
+    writeFileSync(runner, [
+      `$PSNativeCommandArgumentPassing = '${passing}'`,
+      `. ${JSON.stringify(file)}`,
+      `foreach ($line in @(${lines.map((line) => `'${line.replaceAll("'", "''")}'`).join(", ")})) {`,
+      "  $r = TabExpansion2 -inputScript $line -cursorColumn $line.Length",
+      "  [pscustomobject]@{ start = $r.ReplacementIndex; length = $r.ReplacementLength; matches = @($r.CompletionMatches | ForEach-Object CompletionText) } | ConvertTo-Json -Compress",
+      "}",
+    ].join("\n"));
+    const run = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", runner], { encoding: "utf8", env: cns.env });
+    assert.equal(run.status, 0, run.stderr);
+    const results = run.stdout.split("\n").filter((line) => line.startsWith("{")).map((line) => JSON.parse(line) as { start: number; length: number; matches: string[] });
+    assert.deepEqual(results[0], { start: 7, length: 8, matches: ["'studio:My Docs/'", "studio:Mx.txt"] }, passing);
+    assert.deepEqual(results[2], { start: 11, length: 13, matches: ["'studio:My Docs/'", "studio:Mx.txt"] }, passing);
+    // The word not yet typed goes as '', which cns reads as an empty word.
+    assert.deepEqual(cns.asked().slice(index * lines.length), [
+      ["__complete", "pwsh", "cp", "studio:M"],
+      ["__complete", "pwsh", "''"],
+      ["__complete", "pwsh", "cp", "'studio:My D'"],
+      ["__complete", "pwsh", "run", "studio", "--", "l"],
+    ], passing);
+  }
 });
 
 /** A shell at a terminal, whose output collects in `screen`. */

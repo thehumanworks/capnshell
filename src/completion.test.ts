@@ -203,6 +203,8 @@ test("cns __complete quotes for the shell, takes the words as the shell gives th
   for (const word of ["'studio:My D", "\"studio:My D", "studio:'it", "studio:My\\ D\""]) assert.deepEqual(await printed(["bash", "cp", word], fake), [], word);
   assert.deepEqual(await printed(["pwsh", "cp", "studio:"], fake), ["'studio:My Docs/'", "'studio:it''s $(id).txt'"]);
   assert.deepEqual(await printed(["pwsh", "cp", "'studio:My D'"], fake), ["'studio:My Docs/'"]);
+  // The PowerShell script writes the word not yet typed as ''.
+  assert.deepEqual(await printed(["pwsh", "cp", "''"], fake), ["studio:"]);
   assert.deepEqual(await printed(["zsh", "cp", "studio:"], fake), ["studio:My Docs/", "studio:it's $(id).txt"]);
   assert.deepEqual(await printed(["fish", "cp", "studio:it"], fake), ["studio:it's $(id).txt"]);
   assert.deepEqual(await printed(["bash"], fake), (await complete(program, [""], fake)));

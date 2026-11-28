@@ -297,11 +297,12 @@ function __cns_complete
 end
 complete -c cns -n __cns_complete -f -a '$__cns_found'
 `,
-  pwsh: `# cns tab completion for PowerShell 7. In $PROFILE: cns completion pwsh | Out-String | Invoke-Expression
+  pwsh: `# cns tab completion for PowerShell 5.1 and later. In $PROFILE: cns completion pwsh | Out-String | Invoke-Expression
 Register-ArgumentCompleter -Native -CommandName cns, cns.exe -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
     $words = @($commandAst.CommandElements | Where-Object { $_.Extent.StartOffset -lt $cursorPosition } | Select-Object -Skip 1 | ForEach-Object { $_.Extent.Text })
-    if ($wordToComplete -eq '') { $words += '' }
+    # The word not yet typed, written as PowerShell writes an empty one: Windows PowerShell and PowerShell 7.2 drop an empty argument.
+    if ($wordToComplete -eq '') { $words += "''" }
     # cns writes UTF-8, which Windows does not read by default.
     $encoding = [Console]::OutputEncoding
     try {
