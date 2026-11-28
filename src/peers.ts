@@ -87,7 +87,8 @@ export function explainDenial(message: string, device?: string): string {
  * know, rather than ignore the field and let the device do more than it should; any other
  * field it does not know, at the top or in `grants`, it ignores. None yet: a feature is
  * named here and its fields marked with it in PEER_FIELDS, and recordText then lists it in
- * `needs` of every record that holds one of them.
+ * `needs` of every record that holds one of them. PEER_FIELDS has the rules a new field
+ * keeps.
  */
 const FEATURES = [] as const;
 type Feature = typeof FEATURES[number];
@@ -100,6 +101,10 @@ const knownFeatures: ReadonlySet<string> = new Set<string>(FEATURES);
  * - `informational`: ignores it and keeps it when it rewrites the record, so the field must
  *   be safe to ignore and to go stale, as a label or a last-seen time is.
  * - a feature: refuses the record, which lists that feature in `needs` (neededFeatures).
+ * Since a cns keeps the fields it does not know when it rewrites a record, three rules hold:
+ * a field's name is never reused with a new meaning; a released feature never gains fields,
+ * as a new field means a new feature; and a field in `grants` that widens access is a
+ * feature, never informational, since an older cns keeps it through `cns peer revoke`.
  */
 type FieldKind = "base" | "informational" | Feature;
 export const PEER_FIELDS = {
@@ -114,7 +119,7 @@ const needsSchema = z.array(z.string().regex(/^[a-z][a-z0-9-]{0,31}$/)).max(16);
 /** Fields this cns does not know are dropped when it reads a record; see FEATURES. */
 export const pairedPeerSchema = z.object({
   version: z.literal(2),
-  /** The features the record needs (FEATURES). Written only when there is one, so 2.4.0 and older, which refuse it, still read every other record. */
+  /** The features the record needs (FEATURES). Written only when there is one, so 2.4.0 and older, which refuse any field they do not know, still read every record that has no field newer than them. */
   needs: needsSchema.refine((needs) => needs.every((feature) => knownFeatures.has(feature)), "The record needs a feature this cns does not know.").optional(),
   publicKey: publicKeySchema,
   /** Where this device has reached the peer; tried in order. */
@@ -149,7 +154,7 @@ function entryFor(name: string, content: string): PeerEntry {
   try { parsed = JSON.parse(content); } catch { throw new UnreadablePeer(`Saved peer ${name} is not a paired-device record. Remove it with cns peer remove ${name}, then pair again.`); }
   const record = parsed as { publicKey?: unknown; needs?: unknown } | null;
   const key = publicKeySchema.safeParse(record?.publicKey).data;
-  const missing = needsSchema.safeParse(record?.needs ?? []).data?.filter((feature) => !knownFeatures.has(feature)) ?? [];
+  const missing = [...new Set(needsSchema.safeParse(record?.needs ?? []).data?.filter((feature) => !knownFeatures.has(feature)))];
   if (missing.length) {
     const which = process.platform === "win32" ? "Get-Command cns" : "command -v cns";
     throw new UnreadablePeer(`Saved peer ${name} needs ${missing.length === 1 ? "the feature" : "the features"} ${missing.join(", ")}, which this cns (${CNS_VERSION}) does not have, so it leaves ${name} out: a newer cns saved it. ` +

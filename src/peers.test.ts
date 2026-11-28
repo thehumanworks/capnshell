@@ -155,6 +155,9 @@ test.skipIf(process.platform === "win32")("a record that needs a feature this cn
   // The feature is what it names first, even when other fields are ones this cns cannot read either.
   writeRecord("studio", { ...record, needs: ["labels", "expiry"], grants: { incoming: ["ports"], outgoing: [] } });
   expect(() => getPeer("studio")).toThrow("Saved peer studio needs the features labels, expiry, which this cns");
+  // A feature listed twice is named once.
+  writeRecord("studio", { ...record, needs: ["expiry", "expiry"] });
+  expect(() => getPeer("studio")).toThrow("Saved peer studio needs the feature expiry, which this cns");
   // A needs list that is not one is refused too.
   for (const needs of ["expiry", ["Expiry"], ["$(rm -rf ~)"], Array.from({ length: 17 }, (_, index) => `f${index}`)]) {
     writeRecord("studio", { ...record, needs });
@@ -173,13 +176,25 @@ test("every field of a record says what a cns that does not know it does with it
   const base = (fields: Record<string, string>) => Object.keys(fields).filter((key) => fields[key] === "base").sort();
   expect(base(PEER_FIELDS.record)).toEqual(["addresses", "grants", "mesh", "needs", "pairedAt", "publicKey", "version"]);
   expect(base(PEER_FIELDS.grants)).toEqual(["incoming", "outgoing"]);
-  // grants is the only object inside a record; another one needs a table of its own.
-  const objects = (schema: z.ZodObject, at = ""): string[] => Object.entries(schema.shape).flatMap(([key, field]) => {
-    let inner = field as z.ZodType;
-    while (inner instanceof z.ZodOptional || inner instanceof z.ZodArray) inner = inner instanceof z.ZodOptional ? inner.unwrap() as z.ZodType : inner.element as z.ZodType;
-    return inner instanceof z.ZodObject ? [at + key, ...objects(inner, `${at}${key}.`)] : [];
-  });
-  expect(objects(pairedPeerSchema)).toEqual(["grants"]);
+  // grants is the only object inside a record; another one needs a table of its own. The walk
+  // looks through every wrapper, and stops at a kind of schema it does not know.
+  type Def = { type: string; shape?: Record<string, z.core.$ZodType>; innerType?: z.core.$ZodType; element?: z.core.$ZodType; options?: z.core.$ZodType[]; in?: z.core.$ZodType; out?: z.core.$ZodType };
+  const objects = (schema: z.core.$ZodType, at: string): string[] => {
+    const def = schema._zod.def as Def;
+    switch (def.type) {
+      case "object": return [at, ...Object.entries(def.shape!).flatMap(([key, field]) => objects(field, `${at}.${key}`))];
+      case "optional": case "nullable": case "default": case "prefault": case "readonly": case "catch": case "nonoptional": return objects(def.innerType!, at);
+      case "array": return objects(def.element!, at);
+      case "union": return def.options!.flatMap((option) => objects(option, at));
+      case "pipe": return [...objects(def.in!, at), ...objects(def.out!, at)];
+      case "string": case "literal": case "enum": case "number": case "boolean": return [];
+      default: throw new Error(`${at} is a ${def.type} schema; teach this test to look inside it.`);
+    }
+  };
+  expect(objects(pairedPeerSchema, "record")).toEqual(["record", "record.grants"]);
+  // The walk itself finds objects behind wrappers and refuses what it cannot see into.
+  expect(objects(z.object({ a: z.object({}).nullable().optional(), b: z.union([z.string(), z.array(z.object({}))]), c: z.string().pipe(z.string()) }), "x")).toEqual(["x", "x.a", "x.b"]);
+  expect(() => objects(z.object({ m: z.map(z.string(), z.object({})) }), "x")).toThrow("x.m is a map schema");
 });
 
 test("a device's advertised addresses replace the ones it advertised before, keeping what a person or a dial added", () => {
