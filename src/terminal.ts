@@ -159,6 +159,10 @@ export async function attachTerminal(open: OpenPty, options: PtyOptions, { signa
   const print = (data: Uint8Array | string) => new Promise((resolve) => process.stdout.write(data, resolve));
   let closed = false;
   let drawn = false;
+  let ended = false;
+  const wasRaw = input.isTTY ? input.isRaw : false;
+  // A terminal that has closed (EIO) has no mode left to restore.
+  const restore = () => { try { if (interactive) input.setRawMode(wasRaw); } catch {} };
   const write = async (data: Uint8Array, end: number | undefined) => {
     const shown = terminal ? terminal.queries.filter(data) : data;
     const translated = local ? await local.translate(shown) : shown;
@@ -166,6 +170,9 @@ export async function attachTerminal(open: OpenPty, options: PtyOptions, { signa
     if (closed) return;
     if (!drawn) {
       drawn = true;
+      // Keys typed at the session's screen are the session's, even before the attach call
+      // returns: raw, the terminal keeps them for the session rather than taking Ctrl-C itself.
+      if (interactive && !ended) input.setRawMode(true);
       onFirstOutput?.(end);
       // The terminal's own height: --rows sets the session's, not what this terminal shows.
       if (inline) await print(NormalScreen.scrollAway(process.stdout.rows || size().rows));
@@ -191,22 +198,6 @@ export async function attachTerminal(open: OpenPty, options: PtyOptions, { signa
     const sequence = release();
     if (sequence) await print(sequence);
   };
-  let pty: RemotePty;
-  try {
-    pty = await open(sink, { ...remote, ...options, ...size() });
-  } catch (error) {
-    signal?.removeEventListener("abort", abort);
-    await leave();
-    local?.dispose();
-    throw error;
-  }
-  // Input handed to the peer whose acknowledgement has not come back yet.
-  let inFlight = 0;
-  pty.onRpcBroken?.((error) => failed(new ConnectionLost(`PTY connection lost: ${error instanceof Error ? error.message : String(error)}`, inFlight)));
-
-  const wasRaw = input.isTTY ? input.isRaw : false;
-  // A terminal that has closed (EIO) has no mode left to restore.
-  const restore = () => { try { if (interactive) input.setRawMode(wasRaw); } catch {} };
   // Never leave the user's terminal raw, on the program's alternate screen or reporting the
   // mouse, even if the process exits abruptly, as on an error nothing caught. Nothing
   // asynchronous runs from here, so the reset is written at once.
@@ -218,6 +209,21 @@ export async function attachTerminal(open: OpenPty, options: PtyOptions, { signa
     restore();
   };
   process.once("exit", onExit);
+  let pty: RemotePty;
+  try {
+    pty = await open(sink, { ...remote, ...options, ...size() });
+  } catch (error) {
+    signal?.removeEventListener("abort", abort);
+    await leave();
+    local?.dispose();
+    ended = true;
+    restore();
+    process.off("exit", onExit);
+    throw error;
+  }
+  // Input handed to the peer whose acknowledgement has not come back yet.
+  let inFlight = 0;
+  pty.onRpcBroken?.((error) => failed(new ConnectionLost(`PTY connection lost: ${error instanceof Error ? error.message : String(error)}`, inFlight)));
   let writing = Promise.resolve();
   const send = (data: Uint8Array) => {
     writing = writing.then(async () => {
@@ -258,7 +264,6 @@ export async function attachTerminal(open: OpenPty, options: PtyOptions, { signa
     local?.resize(cols, rows);
     Promise.resolve(pty.resize(cols, rows)).catch(() => {});
   };
-  let ended = false;
   if (interactive) input.setRawMode(true);
   input.on("data", onData);
   if (process.stdout.isTTY && !fixedSize) process.stdout.on("resize", onResize);
