@@ -7,6 +7,7 @@ import path from "node:path";
 import test from "node:test";
 import { connectControl, processExited } from "./commands/daemon.js";
 import { HeldSessions, HOLDERS, holderDirectory } from "./held-sessions.js";
+import { HandleScope } from "./pty.js";
 import { launchCli, testDevices, type TestDevice } from "./test-support.js";
 
 const program = "printf 'READY\\n'; while IFS= read -r line; do printf 'got:%s\\n' \"$line\"; done";
@@ -63,7 +64,7 @@ test("a named session outlives cns daemon restart, a killed daemon and cns stop,
   await same("after the daemon was killed", "three");
 
   const stopped = await ok(studio, ["stop", "--state", studio.state]);
-  assert.match(stopped.stdout, /^Daemon stopped\.\nNamed sessions keep running: work\. Once the daemon runs again, cns kill DEVICE NAME on a paired device ends one\.$/m);
+  assert.equal(stopped.stdout, `Daemon stopped.\nNamed sessions keep running: work (holder pid ${holder}). cns stop --end-sessions ends them.\n`);
   assert.ok(alive(holder), "the holder outlives cns stop");
   await devices.up(studio, studio.port);
   await same("after cns stop and cns up", "four");
@@ -175,6 +176,50 @@ test("a device that may only start sessions is refused, with exit 4, the ones it
   await ok(phone, ["shell", "studio", "--name", "mine", "--", program]);
   await ok(phone, ["screen", "studio", "mine", "--until", "READY"]);
   await ok(phone, ["kill", "studio", "mine"]);
+
+  // The daemon audits the end of a session it adopted only when a paired device started it: host's
+  // end goes unrecorded, work's, which laptop started, is recorded. host ends first, so that a line
+  // for it would come before work's.
+  const local = new HeldSessions(dir);
+  t.after(() => local[Symbol.dispose]());
+  await local.adopt();
+  const pids = new Map(local.holders.map(({ name, pid }) => [name, pid]));
+  await local.openSession("host", new HandleScope()).kill();
+  assert.ok(await processExited(pids.get("host")!));
+  await local.openSession("work", new HandleScope()).kill();
+  const audited = async () => (await readFile(path.join(studio.dir, "audit.log"), "utf8")).trim().split("\n").map((line) => JSON.parse(line) as { action: string; target: string });
+  const deadline = Date.now() + 10000;
+  while (!(await audited()).some((entry) => entry.action === "session.end" && entry.target === "work")) {
+    assert.ok(Date.now() < deadline, "the daemon records the end of work");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  // Only phone's refused kill names it.
+  assert.deepEqual((await audited()).filter((entry) => entry.target === "host").map((entry) => entry.action), ["session.kill"]);
+});
+
+test("cns stop --end-sessions ends the named sessions that would keep running, also once no daemon runs", { skip: !HOLDERS, timeout: 120000 }, async (t) => {
+  const { devices, studio, laptop, ok, records, holderPid } = await setUp(t);
+  const first = await holderPid();
+  const ended = await ok(studio, ["stop", "--end-sessions", "--state", studio.state]);
+  assert.equal(ended.stdout, `Daemon stopped.\nNamed sessions ended: work (holder pid ${first}).\n`);
+  assert.ok(await processExited(first), "the holder ends");
+  assert.deepEqual(await records(), []);
+
+  // A daemon that no longer runs left one running, as one of an older cns, which does not see holders, does.
+  await devices.up(studio, studio.port);
+  await ok(laptop, ["shell", "studio", "--name", "work", "--", program]);
+  const second = await holderPid();
+  const stopped = await ok(studio, ["stop", "--state", studio.state]);
+  assert.equal(stopped.stdout, `Daemon stopped.\nNamed sessions keep running: work (holder pid ${second}). cns stop --end-sessions ends them.\n`);
+  assert.ok(alive(second));
+  const refused = await devices.cli(studio, ["stop", "--state", studio.state]);
+  assert.notEqual(refused.code, 0, "plain cns stop still fails with no daemon to stop");
+  assert.ok(alive(second), "and leaves the session running");
+  const afterwards = await ok(studio, ["stop", "--end-sessions", "--state", studio.state]);
+  assert.equal(afterwards.stdout, `No daemon is running.\nNamed sessions ended: work (holder pid ${second}).\n`);
+  assert.ok(await processExited(second));
+  assert.deepEqual(await records(), []);
+  assert.equal((await ok(studio, ["stop", "--end-sessions", "--state", studio.state])).stdout, "No daemon is running.\n");
 });
 
 test("a daemon whose holders' socket paths would be too long keeps its named sessions itself, says why, and ends them when it stops", { skip: !HOLDERS, timeout: 120000 }, async (t) => {

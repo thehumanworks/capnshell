@@ -7,7 +7,7 @@ import test, { type TestContext } from "node:test";
 import manifest from "../package.json" with { type: "json" };
 import { RpcTarget } from "capnweb";
 import { processExited } from "./commands/daemon.js";
-import { connectHolder, HeldSessions, HOLDERS, keepsSessions, socketsTooLong, startHolder } from "./held-sessions.js";
+import { connectHolder, daemonSessions, HeldSessions, HOLDERS, keepsSessions, socketsTooLong, startHolder } from "./held-sessions.js";
 import { HOLDER_CAPNWEB, HOLDER_PROTOCOL, holderRecordSchema, type HolderRecord } from "./holder.js";
 import { HandleScope, type PtyExit } from "./pty.js";
 import { OutputSink } from "./terminal.js";
@@ -73,6 +73,22 @@ test("holders outlive a daemon unless the systemd unit that runs it stops every 
   assert.equal(keeps(true, userUnit, "control-group", "darwin"), true);
   assert.deepEqual(asked, []);
   assert.equal(keeps(false, undefined, undefined, "win32"), false);
+});
+
+test("a daemon's status says its sessions outlive it as the systemd probe finds, and never for sessions it keeps itself", { skip: !HOLDERS }, () => {
+  const unit = "0::/user.slice/user-1000.slice/user@1000.service/app.slice/cns.service\n";
+  const probe = (mode: string) => (service: boolean) => keepsSessions(service, { platform: "linux", cgroup: () => unit, killMode: () => mode });
+  const place = (state: string, service: boolean, mode: string) => {
+    const placed = daemonSessions(state, service, { keeps: probe(mode) });
+    placed.host[Symbol.dispose]();
+    return { keeps: placed.keeps, held: placed.host instanceof HeldSessions, tooLong: placed.tooLong !== undefined };
+  };
+  const state = path.join(TEST_TMP, "cns-placed", "daemon.json");
+  assert.deepEqual(place(state, true, "control-group"), { keeps: false, held: true, tooLong: false }, "a unit that stops them with the daemon");
+  assert.deepEqual(place(state, true, "process"), { keeps: true, held: true, tooLong: false });
+  assert.deepEqual(place(state, false, "control-group"), { keeps: true, held: true, tooLong: false }, "a daemon cns up started");
+  assert.deepEqual(place(path.join(TEST_TMP, "d".repeat(100), "daemon.json"), false, "process"), { keeps: false, held: false, tooLong: true });
+  assert.ok(!existsSync(path.dirname(state)), "placing them creates nothing");
 });
 
 async function until(check: () => boolean | Promise<boolean>, what: string, timeoutMs = 10000) {

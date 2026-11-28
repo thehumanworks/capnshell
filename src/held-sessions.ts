@@ -12,7 +12,7 @@
  */
 import { spawn, spawnSync } from "node:child_process";
 import { lstat, readdir, readFile, unlink } from "node:fs/promises";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { RpcSession, RpcTarget, type RpcStub } from "capnweb";
@@ -21,7 +21,7 @@ import { checkPrivateDirectory, isPrivateFile, makePrivateDirectory } from "./co
 import { errorMessage, printable, strictlyPrintable } from "./errors.js";
 import { HOLDER_PROTOCOL, holderRecordSchema, holderSocket, LineTransport, type HolderApi, type HolderRecord, type HolderStart } from "./holder.js";
 import {
-  FINISHED_SESSION_MS, MAX_NAMED_PTYS, programOptionsSchema, revocable, sessionNameSchema,
+  FINISHED_SESSION_MS, MAX_NAMED_PTYS, programOptionsSchema, PtyRegistry, revocable, sessionNameSchema,
   type AttachOptions, type CaptureOptions, type HandleScope, type KeysOptions, type NamedPty, type PtyAttachment, type PtyExit,
   type PtySessionInfo, type PtySessionOptions, type PtySink, type SessionHandle, type SessionHost, type WaitOptions,
 } from "./pty.js";
@@ -429,6 +429,38 @@ export class HeldSessions implements SessionHost {
     for (const held of [...this.#held.values(), ...this.#ending.values()]) held.close();
     this.#held.clear();
   }
+}
+
+/**
+ * Where the daemon whose state is at `state` keeps its named sessions, and whether they outlive
+ * it, as its status reports in keepsSessions: in holders, unless this is Windows or their sockets'
+ * paths would be too long (`tooLong` says why), and outliving it unless systemd stops them with it.
+ */
+export function daemonSessions(state: string, service: boolean, { say, adopted, keeps = keepsSessions }: {
+  say?: (message: string) => void; adopted?: (record: HolderRecord, exited: Promise<PtyExit>) => void; keeps?: (service: boolean) => boolean;
+} = {}): { host: SessionHost & Disposable; holders?: HeldSessions; keeps: boolean; tooLong?: string } {
+  const dir = HOLDERS ? holderDirectory(state) : undefined;
+  const tooLong = dir === undefined ? undefined : socketsTooLong(dir);
+  const holders = dir !== undefined && !tooLong ? new HeldSessions(dir, say, { adopted }) : undefined;
+  return { host: holders ?? new PtyRegistry(), holders, keeps: !!holders && keeps(service), tooLong };
+}
+
+/**
+ * The named sessions that holders of the daemon at `state` run once it has stopped, by name and
+ * holder pid, for cns stop to name. With `end` they are ended first, as cns stop --end-sessions
+ * does, also those of a daemon too old to reach them. `notes` says what this cns cannot reach or end.
+ */
+export async function sessionsLeft(state: string, end: boolean): Promise<{ sessions: Array<{ name: string; pid: number }>; notes: string[] }> {
+  const dir = holderDirectory(state);
+  if (!HOLDERS || !existsSync(dir)) return { sessions: [], notes: [] };
+  const notes: string[] = [];
+  const left = new HeldSessions(dir, (note) => notes.push(note));
+  try {
+    await left.adopt();
+    if (!end) return { sessions: left.holders, notes };
+    const { ended, failed } = await left.endAll();
+    return { sessions: ended, notes: [...notes, ...failed] };
+  } finally { left[Symbol.dispose](); }
 }
 
 /** What a holder's handle and attachment share: input, size and screen, forwarded until the shell that issued them closes. */

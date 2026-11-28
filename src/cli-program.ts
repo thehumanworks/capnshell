@@ -359,14 +359,33 @@ export function createCli(): Command {
   const keeps = process.platform === "win32" ? "" : "; named sessions keep running";
   const stopCommand = (command: Command) => command
     .option("-S, --state <path>", "Local daemon state file")
-    .action(async (options: { state?: string }) => {
-      const [{ daemonStatePath, keptSessions, stopDaemon }, { sessionFacts }, { sessionsHint }] = await Promise.all([import("./commands/daemon.js"), import("./commands/pairing-cli.js"), import("./version.js")]);
-      const { status, kept, ended } = await stopDaemon(options.state);
-      console.log("Daemon stopped.");
-      if (kept.length) console.log(keptSessions(kept));
-      if (ended.length) {
-        const hint = sessionsHint(sessionFacts(status, daemonStatePath(options.state)));
-        console.log(`Named sessions ended with it: ${ended.join(", ")}.${hint ? ` ${hint}` : ""}`);
+    .addOption(new Option("-E, --end-sessions", "End the named sessions too, also those an older cns left running out of its reach").hideHelp(process.platform === "win32"))
+    .addHelpText("after", process.platform === "win32" ? "" : "\nNamed sessions keep running once the daemon stops, and the next daemon adopts them. cns stop names\neach with its holder's pid; --end-sessions ends them, also when no daemon runs.")
+    .action(async (options: { state?: string; endSessions?: boolean }) => {
+      const [{ daemonStatePath, keptSessions, stopDaemon }, { sessionFacts }, { sessionsHint }, { sessionsLeft }] = await Promise.all([
+        import("./commands/daemon.js"), import("./commands/pairing-cli.js"), import("./version.js"), import("./held-sessions.js"),
+      ]);
+      const state = daemonStatePath(options.state);
+      let stopped: Awaited<ReturnType<typeof stopDaemon>> | undefined;
+      try { stopped = await stopDaemon(options.state); }
+      catch (error) {
+        // With no daemon to stop, --end-sessions still ends the sessions one left running.
+        if (!options.endSessions || !(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+      }
+      console.log(stopped ? "Daemon stopped." : "No daemon is running.");
+      if (stopped?.ended.length) {
+        const hint = sessionsHint(sessionFacts(stopped.status, state));
+        console.log(`Named sessions ended with it: ${stopped.ended.join(", ")}.${hint ? ` ${hint}` : ""}`);
+      }
+      if (options.endSessions) {
+        const { sessions, notes } = await sessionsLeft(state, true);
+        if (sessions.length) console.log(`Named sessions ended: ${sessions.map(({ name, pid }) => `${name} (holder pid ${pid})`).join(", ")}.`);
+        for (const note of notes) console.log(note);
+      } else if (stopped?.kept.length) {
+        const { sessions, notes } = await sessionsLeft(state, false);
+        const pids = new Map(sessions.map(({ name, pid }) => [name, pid]));
+        console.log(keptSessions(stopped.kept.map((name) => ({ name, pid: pids.get(name) }))));
+        for (const note of notes) console.log(note);
       }
     });
   startCommand(daemon.command("start").description("Run this device as a paired peer: start its daemon, or report the running one (also cns up)"));

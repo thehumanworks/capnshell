@@ -152,7 +152,7 @@ export function createCnsExtension(options: CnsOptions = {}) {
         showStatus();
         try {
           const { pid, kept } = await stopDaemon(options.statePath);
-          return `Stopped the cns daemon (pid ${pid}).${kept.length ? ` ${keptSessions(kept)}` : ""}`;
+          return `Stopped the cns daemon (pid ${pid}).${kept.length ? ` ${keptSessions(kept.map((name) => ({ name })))}` : ""}`;
         } catch (error) {
           if (error instanceof Error && "code" in error && error.code === "ENOENT") return "No cns daemon is running.";
           throw error;

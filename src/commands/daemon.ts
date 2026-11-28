@@ -31,9 +31,9 @@ export interface ListenerInfo {
   keepsSessions?: boolean;
 }
 
-/** What the daemon and cns stop say about the named sessions that keep running once the daemon has stopped. */
-export function keptSessions(names: string[]): string {
-  return `Named sessions keep running: ${names.join(", ")}. Once the daemon runs again, cns kill DEVICE NAME on a paired device ends one.`;
+/** What the daemon and cns stop say about the named sessions that keep running once the daemon has stopped, by holder pid where known. */
+export function keptSessions(sessions: Array<{ name: string; pid?: number }>): string {
+  return `Named sessions keep running: ${sessions.map(({ name, pid }) => pid ? `${name} (holder pid ${pid})` : name).join(", ")}. cns stop --end-sessions ends them.`;
 }
 export interface DaemonStatus extends ListenerInfo {
   pid: number;

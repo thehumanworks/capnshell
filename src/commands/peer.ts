@@ -7,7 +7,7 @@ import { serve, type Server, type ServerWebSocket } from "bun";
 import { z } from "zod";
 import { PtyRegistry, ShellApi, type ShellInfo } from "../shell.js";
 import type { PtyExit, SessionHost } from "../pty.js";
-import { HeldSessions, HOLDERS, holderDirectory, keepsSessions, socketsTooLong } from "../held-sessions.js";
+import { daemonSessions, type HeldSessions } from "../held-sessions.js";
 import type { ConnectionController } from "../console.js";
 import { errorMessage, printable, strictlyPrintable } from "../errors.js";
 import type { DaemonConfig, PeerConfig } from "../options.js";
@@ -99,12 +99,9 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
   // Named PTY sessions outlive the connection that started them. The daemon's run in holder
   // processes of their own, which outlive it too (held-sessions.ts); on Windows, or where their
   // sockets' paths would be too long, they live here.
-  const holderDir = daemon && HOLDERS ? holderDirectory(daemonStatePath(daemon.state)) : undefined;
-  const tooLong = holderDir && socketsTooLong(holderDir);
-  const holders = holderDir && !tooLong ? new HeldSessions(holderDir, announce, { adopted: auditEnd }) : undefined;
-  const ptys: SessionHost & Disposable = holders ?? new PtyRegistry();
-  /** Whether they outlive this daemon: not when systemd stops them with it (keepsSessions). */
-  const keeps = !!holders && keepsSessions(!!daemon?.service);
+  // keeps: whether they outlive this daemon, not when systemd stops them with it (keepsSessions).
+  const { host: ptys, holders, keeps, tooLong }: { host: SessionHost & Disposable; holders?: HeldSessions; keeps: boolean; tooLong?: string } =
+    daemon ? daemonSessions(daemonStatePath(daemon.state), daemon.service, { say: announce, adopted: auditEnd }) : { host: new PtyRegistry(), keeps: false };
   let nextId = 1;
   let listener: Server<SocketData> | undefined;
   let controlCleanup: (() => Promise<void>) | undefined;
@@ -201,7 +198,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
     relayAnswers.clear();
     invites.endAll();
     for (const session of sessions.values()) remove(session);
-    const kept = holders?.running ?? [];
+    const kept = holders?.kept ?? [];
     ptys[Symbol.dispose]();
     if (kept.length && keeps) announce(keptSessions(kept));
     try {
