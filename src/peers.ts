@@ -219,14 +219,15 @@ export function getPeer(name: string): PeerEntry | undefined {
 }
 
 /**
- * The key the file saved as `name` names, also when this cns cannot use the record, or the file
- * is not private or is a link, as after a backup was restored; undefined when it names none. For
- * keeping a device out only (revokeDevice), which narrows, never to let one in.
+ * The key the file saved as `name` names, also when this cns cannot use the record, or when the
+ * file is not private or is a link (`loose`), as after a backup was restored; undefined when it
+ * names none. For keeping a device out only (revokeDevice), which narrows, never to let one in.
  */
-export function savedKey(name: string): PublicKey | undefined {
-  try { return getPeer(name)?.publicKey; } catch (error) {
-    if (error instanceof UnreadablePeer) return error.publicKey;
-    try { return publicKeySchema.safeParse((JSON.parse(readPeerFileLoosely(name) ?? "null") as { publicKey?: unknown } | null)?.publicKey).data; }
+export function savedKey(name: string): { publicKey: PublicKey; loose: boolean } | undefined {
+  const found = (publicKey: PublicKey | undefined, loose: boolean) => publicKey === undefined ? undefined : { publicKey, loose };
+  try { return found(getPeer(name)?.publicKey, false); } catch (error) {
+    if (error instanceof UnreadablePeer) return found(error.publicKey, false);
+    try { return found(publicKeySchema.safeParse((JSON.parse(readPeerFileLoosely(name) ?? "null") as { publicKey?: unknown } | null)?.publicKey).data, true); }
     catch { return undefined; }
   }
 }
@@ -316,5 +317,7 @@ export function learnAddresses(saved: readonly string[], advertised: readonly st
 export function resolvePeer(name: string): { name: string; publicKey: PublicKey; outgoing: Permission[]; addresses: string[] } {
   const entry = getPeer(name);
   if (!entry) throw new Error(`No paired device is saved as ${name}. Pair with it first: cns pair. cns peers lists the paired devices.`);
+  // A record left or restored of a device removed here is not dialed: what goes over that link goes to whoever has its key.
+  if (isRevoked(entry.publicKey)) throw new Error(`${name} was removed from this device (cns peer remove), so cns does not connect to it. To delete the record of it left here, run: cns peer remove ${name}. To use it again, pair with it again after that: cns pair.`);
   return { name, publicKey: entry.publicKey, outgoing: entry.grants.outgoing, addresses: entry.addresses };
 }

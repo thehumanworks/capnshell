@@ -29,9 +29,12 @@ export function gatewayUrl(options: GatewayOptions): string {
   return url.origin;
 }
 
-/** A request the gateway refused, with its HTTP status (401 when this device is not one of its owners), or no answer at all. */
+/**
+ * A request the gateway refused, with its HTTP status (401 when this device is not one of its
+ * owners) and the error it gave, `said`; or no answer at all, with neither.
+ */
 export class GatewayError extends Error {
-  constructor(message: string, readonly status?: number, options?: ErrorOptions) { super(message, options); }
+  constructor(message: string, readonly status?: number, readonly said?: string, options?: ErrorOptions) { super(message, options); }
 }
 
 /** One signed owner request; returns the gateway's answer or throws its error. */
@@ -46,13 +49,14 @@ export async function call<T>(options: GatewayOptions, action: string, input: Re
     response = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", [OWNER_HEADER]: ownerProof(identity, "POST", url, body) }, body, signal });
     text = await response.text();
   } catch (error) {
-    throw new GatewayError(`Cannot reach the gateway at ${gatewayUrl(options)}: ${(error as Error).message}`, undefined, { cause: error });
+    throw new GatewayError(`Cannot reach the gateway at ${gatewayUrl(options)}: ${(error as Error).message}`, undefined, undefined, { cause: error });
   }
   let answer: unknown;
-  try { answer = JSON.parse(text); } catch { throw new Error(`The gateway answered ${response.status}: ${text.slice(0, 200)}`); }
+  try { answer = JSON.parse(text); } catch { throw new Error(`The gateway answered ${response.status} and said: ${JSON.stringify(text.slice(0, 200))}`); }
   if (!response.ok) {
-    const message = (answer as { error?: string }).error ?? `The gateway answered ${response.status}.`;
-    throw new GatewayError(response.status === 401 ? `${message} This device's public key is ${identity.publicKey}.` : message, response.status);
+    const said = (answer as { error?: unknown } | null)?.error;
+    const message = typeof said === "string" ? said : `The gateway answered ${response.status}.`;
+    throw new GatewayError(response.status === 401 ? `${message} This device's public key is ${identity.publicKey}.` : message, response.status, typeof said === "string" ? said : undefined);
   }
   return answer as T;
 }

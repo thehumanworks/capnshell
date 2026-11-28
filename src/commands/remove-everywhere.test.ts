@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, renameSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, renameSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -11,11 +11,11 @@ import { ensureIdentity, generateIdentity, newKeyPair, type Identity } from "../
 import { applyMeshes, firstList, listMeshes, newerLists, nextList, readMesh, removeMesh, savedRecords, signList, writeMesh } from "../mesh.js";
 import { mintBotToken, startAsBot } from "../mesh-token.js";
 import { removePeerFile } from "../peer-files.js";
-import { getPeer, listPeers, revokedDevices, revokeDevice, savePairedPeer, type PeerEntry, type Permission } from "../peers.js";
+import { getPeer, listPeers, resolvePeer, revokedDevices, revokeDevice, savePairedPeer, type PeerEntry, type Permission } from "../peers.js";
 import { keepSecret, sealSecret, secretsFor } from "../secrets.js";
 import { secureReady } from "../secure.js";
 import { allowMembers, listMeshesCommand } from "./mesh-cli.js";
-import { unpair } from "./pairing-cli.js";
+import { peers, unpair } from "./pairing-cli.js";
 import { answerPlaces, forgetAtGateway, gatewayPlace, readAnswer, refused, removeCommand, removeHere, removePeer, type Place } from "./remove-everywhere.js";
 
 // Each test has a configuration of its own, no daemon (the state file named is never there), and no gateway.
@@ -44,6 +44,13 @@ const quietly = async <T>(run: () => T | Promise<T>): Promise<{ value: T; out: s
   let out = "";
   console.log = (...args: unknown[]) => { out += `${args.join(" ")}\n`; };
   try { return { value: await run(), out }; } finally { console.log = log; }
+};
+/** What `run` writes to stderr. */
+const warned = async (run: () => unknown): Promise<string> => {
+  const error = console.error;
+  let out = "";
+  console.error = (...args: unknown[]) => { out += `${args.join(" ")}\n`; };
+  try { await run(); return out; } finally { console.error = error; }
 };
 /** Pair with `who` directly, letting it use `incoming` here. */
 const pair = (name: string, who: Identity, incoming: Permission[] = []) => savePairedPeer(name, { publicKey: who.publicKey, addresses: [], pairedAt: new Date().toISOString(), grants: { incoming, outgoing: [] } });
@@ -87,10 +94,10 @@ test("a removed device gets no record here from any mesh, even one that lists it
   // A member record goes the same way, and its mesh does not bring it back.
   const { value: status, out } = await quietly(() => removeCommand(undefined, { fingerprint: tablet.fingerprint, state }));
   assert.equal(status, 0);
-  assert.equal(out, `Removing member-0 (fingerprint ${tablet.fingerprint}) here:\n  removed        this device: its pairing: no mesh gives it a record here again, until this device pairs with it directly\n`);
+  assert.equal(out, `Removing member-0 (fingerprint ${tablet.fingerprint}) here:\n  removed        this device: its pairing: saved here as member-0; no mesh gives it a record here again, until this device pairs with it directly\n`);
   applyMeshes(self.publicKey);
   assert.equal(accessOf(tablet), undefined);
-  // Running it again is harmless, and says nothing more.
+  // Running it again is safe, and says nothing more.
   const again = await quietly(() => removeCommand(undefined, { fingerprint: tablet.fingerprint, json: true, state }));
   assert.equal(again.value, 0);
   assert.deepEqual(JSON.parse(again.out), [{ device: null, place: "its pairing", outcome: "already gone" }]);
@@ -150,15 +157,21 @@ test("a plain removal narrows a mesh the device runs, and names the meshes here 
   const { out } = await quietly(() => removePeer("phone", { state }));
   assert.equal(out, [
     "Removed phone.",
-    "phone runs the mesh work, which this device is in. It stays at its last list here, version 2, and its members may now use nothing here. To finish, leave it: cns mesh leave work. To let its members use shell here again: cns mesh allow work shell.",
+    "phone runs the mesh work, which this device is in. It stays at its last list here, version 2, which whoever has phone's key may have added devices to, so its members may now use nothing here. To finish, leave it: cns mesh leave work. To let its members use shell here again, only once cns mesh list work shows no device you do not know: cns mesh allow work shell.",
     "phone is listed in the mesh club, which hub runs; it gets no record here from that mesh until this device pairs with it directly.",
     `phone is still listed in the mesh home, which this device runs. To take it out: cns mesh remove home member-0, or cns peer remove --fingerprint ${phone.fingerprint} --everywhere.`,
   ].join("\n") + "\n");
   assert.deepEqual(readMesh("work")?.allow, []);
-  // cns mesh allow undoes the narrowing; the mesh still takes no new list of phone's.
-  await quietly(() => allowMembers("work", ["shell"], { state }));
+  // cns mesh allow undoes the narrowing, and warns that the list may name devices whoever has phone's key added; the mesh still takes no new list of phone's.
+  assert.equal(await warned(() => quietly(() => allowMembers("work", ["shell"], { state }))), `Warning: the device with fingerprint ${phone.fingerprint}, which runs the mesh work, was removed from this device (cns peer remove), so its last list stays here, and that list may name devices whoever has its key added. Check that cns mesh list work shows no device you do not know; to end the mesh here instead: cns mesh leave work.\n`);
   assert.deepEqual(readMesh("work")?.allow, ["shell"]);
   assert.deepEqual(newerLists(listMeshes(), [nextWith("work", phone, generateIdentity())], revokedDevices()), []);
+  assert.equal(await warned(() => quietly(() => allowMembers("club", ["shell"], { state }))), "", "hub was not removed");
+  // Running the removal again is safe, but narrows the mesh again, and says what is left.
+  const rerun = await quietly(() => removeCommand(undefined, { fingerprint: phone.fingerprint, state }));
+  assert.equal(rerun.value, 4);
+  assert.match(rerun.out, /^ {2}already gone {3}this device: its pairing\n {2}narrowed {7}this device: mesh work: /m);
+  assert.deepEqual(readMesh("work")?.allow, []);
   const listed = JSON.parse((await quietly(() => listMeshesCommand("home", { json: true }))).out) as Array<{ members: Array<{ name: string; revoked: boolean }> }>;
   assert.deepEqual(listed[0]!.members.map((member) => [member.name, member.revoked]), [["this device", false], ["member-0", true]]);
   assert.match((await quietly(() => listMeshesCommand("work", {}))).out, /^ {2}admin \(admin\) \(revoked\)\t/m);
@@ -187,8 +200,8 @@ test("a mesh the lost device runs is narrowed, so a device whoever has its key a
   assert.equal(status, 4, "the mesh still needs leaving");
   const places = JSON.parse(out) as Place[];
   assert.deepEqual(outcomes(places), [["its pairing", "removed"], ["mesh work", "narrowed"]]);
-  assert.equal(places[1]!.detail, "it runs this mesh, which stays at version 3 here, as this device takes no new list of it; that list may name devices whoever has its key added, so its members may now use nothing here (they could use shell), and get none of its secrets from here; a bot started from one of its tokens lets it in until it is removed there too");
-  assert.equal(places[1]!.next, "To finish, leave it: cns mesh leave work. To let its members use shell here again: cns mesh allow work shell");
+  assert.equal(places[1]!.detail, "it runs this mesh, which stays at version 3 here, as this device takes no new list of it; that list may name devices whoever has its key added, so its members may now use nothing here (they could use shell), and get none of its secrets from here; the secrets held from it here may have been set by such a device, and cns mesh leave work drops them; a bot started from one of its tokens lets it in until it is removed there too");
+  assert.equal(places[1]!.next, "To finish, leave it: cns mesh leave work. To let its members use shell here again, only once cns mesh list work shows no device you do not know: cns mesh allow work shell");
   assert.deepEqual(accessOf(newLaptop), [[], "work"]);
   assert.deepEqual(secretsFor(newLaptop.publicKey, self, listMeshes()), []);
   assert.deepEqual(newerLists(listMeshes(), [nextWith("work", phone, generateIdentity(), "later")], revokedDevices()), [], "its mesh stays at the last list taken");
@@ -207,8 +220,7 @@ test("this device never removes itself, and a place that fails is reported while
   assert.deepEqual(places.map((place) => [place.place, place.outcome, place.next]), [
     ["its pairing", "removed", undefined],
     ["its meshes", "failed", `Later, run: cns peer remove --fingerprint ${phone.fingerprint} --meshes`],
-    ["its meshes", "failed", `Later, run: cns peer remove --fingerprint ${phone.fingerprint} --meshes`],
-  ]);
+  ], "said once");
   assert.match(places[1]!.detail!, /^The mesh home saved here cannot be read/);
   assert.equal(getPeer("phone"), undefined);
   assert.ok(revoked(phone));
@@ -223,9 +235,13 @@ test("a record this cns cannot read is found by its key, and the pairing re-chec
   assert.match(out, new RegExp(`^Removing phone \\(fingerprint ${phone.fingerprint}\\) here:\n {2}removed {8}this device: its pairing`));
   assert.ok(!existsSync(path.join(dir, "peers", "phone")) && revoked(phone));
   // The key saved under a name is checked again as it is removed, so another device saved there since stays, and is not revoked.
-  await assert.rejects(unpair("hub", phone.publicKey, state), /^Error: The pairing for hub changed; it was not removed\. Check cns peer list\.$/);
+  await assert.rejects(unpair("hub", phone.publicKey, state), /^Error: hub now names another device, or none, so it was left as it is\. Check cns peers\.$/);
   assert.ok(getPeer("hub") && !revoked(hub));
   await assert.rejects(removePeer("tv", { state }), /^Error: No paired device is saved as tv\. cns peers shows them\.$/);
+  // A damaged record that names no device only goes.
+  writeFileSync(path.join(dir, "peers", "junk"), "not a record", { mode: 0o600 });
+  assert.equal((await quietly(() => removePeer("junk", { state }))).out, "Removed junk. It named no device, so nothing was put on the revoked list.\n");
+  assert.ok(!existsSync(path.join(dir, "peers", "junk")));
 });
 
 test("a record that is not private, or is a link, still names the device to keep out", { skip: process.platform === "win32" }, async () => {
@@ -234,20 +250,65 @@ test("a record that is not private, or is a link, still names the device to keep
   // Paired directly, its file at 644, as after a backup was restored.
   pair("phone", phone);
   chmodSync(path.join(dir, "peers", "phone"), 0o644);
-  assert.equal((await quietly(() => removePeer("phone", { state }))).out, "Removed phone.\nphone is listed in the mesh home, which hub runs; it gets no record here from that mesh until this device pairs with it directly.\n");
+  assert.equal((await quietly(() => removePeer("phone", { state }))).out, `The file saved as phone is not a private file, or is a link, so the key in it was read anyway: fingerprint ${phone.fingerprint}.\nRemoved phone.\nphone is listed in the mesh home, which hub runs; it gets no record here from that mesh until this device pairs with it directly.\n`);
   assert.ok(revoked(phone) && !existsSync(path.join(dir, "peers", "phone")));
   applyMeshes(self.publicKey);
   assert.equal(accessOf(phone), undefined, "before, hub's mesh gave it a record, with shell");
-  // A link, as a dotfile manager makes, named by its name for --everywhere and by --fingerprint.
+  // A link, as a dotfile manager makes: whoever may write where it links chose the key in it, so
+  // --everywhere takes that key only when --fingerprint names it.
   const tablet = generateIdentity();
   pair("tablet", tablet, ["shell"]);
   renameSync(path.join(dir, "peers", "tablet"), path.join(dir, "tablet.json"));
   symlinkSync(path.join(dir, "tablet.json"), path.join(dir, "peers", "tablet"));
-  const dry = await quietly(() => removeCommand("tablet", { everywhere: true, dryRun: true, json: true, state }));
-  assert.deepEqual((JSON.parse(dry.out) as Place[])[0], { device: null, place: "its pairing", outcome: "would remove", detail: "no mesh would give it a record here again, until this device pairs with it directly" });
+  await assert.rejects(removeCommand("tablet", { everywhere: true, dryRun: true, state }), { message: `The file saved as tablet is not a private file, or is a link, so the key in it was read anyway: fingerprint ${tablet.fingerprint}. A key read that way is not removed everywhere by name. If it is the lost device's, as cns peers on another of your devices shows, run: cns peer remove --fingerprint ${tablet.fingerprint} --everywhere` });
+  const dry = await quietly(() => removeCommand(undefined, { fingerprint: tablet.fingerprint, everywhere: true, dryRun: true, json: true, state }));
+  assert.deepEqual((JSON.parse(dry.out) as Place[])[0], { device: null, place: "its pairing", outcome: "would remove", detail: "saved here as tablet (not a private file, or a link, so its key was read anyway); no mesh would give it a record here again, until this device pairs with it directly" });
   const { out } = await quietly(() => removeCommand(undefined, { fingerprint: tablet.fingerprint, state }));
-  assert.match(out, new RegExp(`^Removing tablet \\(fingerprint ${tablet.fingerprint}\\) here:\n {2}removed {8}this device: its pairing`));
+  assert.match(out, new RegExp(`^Removing tablet \\(fingerprint ${tablet.fingerprint}\\) here:\n {2}removed {8}this device: its pairing: saved here as tablet \\(not a private file`));
   assert.ok(revoked(tablet) && !existsSync(path.join(dir, "peers", "tablet")));
+});
+
+test("each record that names the device is named as it goes, and a removal that cannot finish says what changed", { skip: process.platform === "win32" }, async () => {
+  pair("hub", hub, ["shell"]);
+  // old-phone is a link to hub's record: removing it takes hub, and says so, and that the file was read loosely.
+  symlinkSync(path.join(dir, "peers", "hub"), path.join(dir, "peers", "old-phone"));
+  assert.equal((await quietly(() => removePeer("old-phone", { state }))).out, `The file saved as old-phone is not a private file, or is a link, so the key in it was read anyway: fingerprint ${hub.fingerprint}.\nRemoved old-phone and hub, which name the same device.\n`);
+  assert.ok(revoked(hub) && !existsSync(path.join(dir, "peers", "hub")) && !existsSync(path.join(dir, "peers", "old-phone")));
+  assert.equal(process.exitCode, undefined);
+  // b is a link to a, a loose record of phone: once a goes, b names nothing, and is left. phone's mesh is narrowed all the same.
+  pair("phone", phone);
+  mesh("work", phone, [], ["shell"]);
+  removePeerFile("phone");
+  writeFileSync(path.join(dir, "peers", "a"), JSON.stringify({ publicKey: phone.publicKey }), { mode: 0o644 });
+  symlinkSync(path.join(dir, "peers", "a"), path.join(dir, "peers", "b"));
+  try {
+    const { out } = await quietly(() => removePeer("a", { state }));
+    assert.equal(out, [
+      `The file saved as a is not a private file, or is a link, so the key in it was read anyway: fingerprint ${phone.fingerprint}.`,
+      `Could not finish removing a here: a was removed, and its key is on the revoked list; b now names another device, or none, so it was left as it is. Check cns peers. Later, run: cns peer remove --fingerprint ${phone.fingerprint} --meshes.`,
+      "a runs the mesh work, which this device is in. It stays at its last list here, version 2, which whoever has a's key may have added devices to, so its members may now use nothing here. To finish, leave it: cns mesh leave work. To let its members use shell here again, only once cns mesh list work shows no device you do not know: cns mesh allow work shell.",
+    ].join("\n") + "\n");
+    assert.equal(process.exitCode, 1);
+  } finally { process.exitCode = undefined; }
+  assert.ok(revoked(phone) && lstatSync(path.join(dir, "peers", "b")).isSymbolicLink(), "b is left");
+  assert.deepEqual(readMesh("work")?.allow, []);
+});
+
+test("a record left of a device removed here is marked in cns peers, and cns does not connect to it", async () => {
+  pair("phone", phone, ["shell"]);
+  pair("hub", hub);
+  // Removed, then its record restored, as from a backup.
+  revokeDevice(phone.fingerprint, phone.publicKey);
+  assert.throws(() => resolvePeer("phone"), { message: "phone was removed from this device (cns peer remove), so cns does not connect to it. To delete the record of it left here, run: cns peer remove phone. To use it again, pair with it again after that: cns pair." });
+  assert.equal(resolvePeer("hub").publicKey, hub.publicKey);
+  const listed = JSON.parse((await quietly(() => peers({ json: true, state }))).out) as Array<{ name: string; revoked: boolean }>;
+  assert.deepEqual(listed.map((row) => [row.name, row.revoked]), [["hub", false], ["phone", true]]);
+  let table = "";
+  const hint = await warned(async () => { table = (await quietly(() => peers({ state }))).out; });
+  assert.match(table, /^phone {2}removed {2}/m);
+  assert.match(table, /^hub {4}offline {2}/m);
+  assert.match(hint, /^phone was removed from this device \(cns peer remove\), so cns neither connects to it nor lets it in; its record is left over, as from a backup\. To delete it: cns peer remove phone\.$/m);
+  assert.doesNotMatch(hint, /^phone grants this device no access/m);
 });
 
 test("a FIFO, a link to a device file or a file too large for a record in peers/ is neither waited on nor read", { skip: process.platform === "win32" }, () => {
@@ -259,7 +320,7 @@ test("a FIFO, a link to a device file or a file too large for a record in peers/
   // In a process of its own, so that a read that waits fails the test rather than hanging it.
   const script = `const { getPeer, listPeers, savedKey } = await import(${JSON.stringify(path.join(import.meta.dir, "..", "peers.ts"))});
     let strict = "read"; try { getPeer("fifo"); } catch (error) { strict = error.message; }
-    console.log(JSON.stringify({ keys: ["fifo", "zero", "huge"].map((name) => savedKey(name) ?? null), strict, listed: listPeers(() => {}).map((peer) => peer.name) }));`;
+    console.log(JSON.stringify({ keys: ["fifo", "zero", "huge"].map((name) => savedKey(name)?.publicKey ?? null), strict, listed: listPeers(() => {}).map((peer) => peer.name) }));`;
   const ran = spawnSync(process.execPath, ["-e", script], { env: { ...process.env, CNS_CONFIG_DIR: dir }, encoding: "utf8", timeout: 4_000 });
   assert.equal(ran.signal, null, `it waited: ${ran.stderr}`);
   const found = JSON.parse(ran.stdout) as { keys: unknown[]; strict: string; listed: string[] };
@@ -274,8 +335,12 @@ test("a revoked directory that is not private stops a removal before anything go
   mkdirSync(revokedDir);
   chmodSync(revokedDir, 0o755);
   // The key goes on the list before the record goes, so a list that cannot be written leaves the record.
-  await assert.rejects(unpair("phone", phone.publicKey, state), { message: `Configuration directory must be private and owned by your user: ${revokedDir}. To make it private, run: chmod 700 '${revokedDir}'` });
+  const fix = { message: `Configuration directory must be private and owned by your user: ${revokedDir}. To make it private, run: chmod 700 '${revokedDir}'` };
+  await assert.rejects(unpair("phone", phone.publicKey, state), fix);
   assert.ok(getPeer("phone"));
+  // Where the daemon lets nothing in then, cns peers and cns run say what to run.
+  await assert.rejects(peers({ state }), fix);
+  assert.throws(() => resolvePeer("phone"), fix);
 });
 
 test("--everywhere reports the records it cannot read, and a device paired as the gateway is, while no gateway answered", async () => {
@@ -376,7 +441,7 @@ test("what is left on a device is built here from each place and outcome alone: 
     { place: "its pairing", outcome: "not permitted" },
   ]), [
     { device: "hub", place: "its pairing", outcome: "removed" },
-    { device: "hub", place: "mesh work", outcome: "narrowed", detail: "it runs this mesh, so hub takes no new list of it, and its members may now use nothing there; cns mesh allow work GRANTS there undoes that", next: "To finish, run: cns run hub -- cns mesh leave work" },
+    { device: "hub", place: "mesh work", outcome: "narrowed", detail: "it runs this mesh, so hub takes no new list of it, and its members may now use nothing there; only once cns mesh list work there shows no device you do not know, cns mesh allow work GRANTS there undoes that", next: "To finish, run: cns run hub -- cns mesh leave work" },
     { device: "hub", place: "mesh club", outcome: "not permitted", detail: "it runs this mesh, so hub takes no new list of it, and its members may use nothing there", next: "To finish, run: cns run hub -- cns mesh leave club" },
     { device: "hub", place: "its meshes", outcome: "failed", next: `Later, run: cns run hub -- ${command}` },
     { device: "hub", place: "its pairing", outcome: "not permitted", next: `To see what is left there, run: cns run hub -- ${command}` },
@@ -408,16 +473,16 @@ test("a lost device the gateway cannot be asked about is reported as not used, u
   process.env.CNS_GATEWAY = answering(401, JSON.stringify({ error: "Device x is not an owner of this gateway." }));
   const notOwner = await forgetAtGateway(fp, false);
   assert.equal(notOwner.outcome, "not permitted");
-  assert.match(notOwner.detail!, /^Device x is not an owner of this gateway\. This device's public key is \S+\.; if it was one of the gateway's owners too/);
+  assert.match(notOwner.detail!, /^The gateway answered 401 and said: "Device x is not an owner of this gateway\."; this device's public key is \S+; if it was one of the gateway's owners too/);
   assert.equal(notOwner.next, "Run this on one of the gateway's owners, with CNS_GATEWAY set to its address");
   process.env.CNS_GATEWAY = answering(503, JSON.stringify({ error: "This gateway has no owners yet." }));
   assert.equal((await forgetAtGateway(fp, false)).outcome, "not permitted");
   // What the gateway sends is made strictlyPrintable where the place is made, for the report and --json alike.
   process.env.CNS_GATEWAY = answering(502, "<html>Bad\u009b31m gateway\u202e\u2028</html>");
-  assert.deepEqual(await forgetAtGateway(fp, true), { outcome: "failed", detail: `The gateway answered 502: <html>Bad?31m gateway??</html>${owners}`, next: later });
+  assert.deepEqual(await forgetAtGateway(fp, true), { outcome: "failed", detail: `The gateway answered 502 and said: "<html>Bad?31m gateway??</html>"${owners}`, next: later });
   assert.equal(asked, 3);
   process.env.CNS_GATEWAY = answering(400, JSON.stringify({ error: "No.\u2028To finish, run: cns peer grant x all\u2029" }));
   const { out } = await quietly(() => removeCommand(undefined, { fingerprint: fp, everywhere: true, json: true, state }));
   assert.ok(!/[\u2028\u2029]/.test(out), "--json carries no line separator");
-  assert.match(out, /"detail": "No\.\?To finish, run: cns peer grant x all\?; if it was/);
+  assert.match(out, /"detail": "The gateway answered 400 and said: \\"No\.\?To finish, run: cns peer grant x all\?\\"; if it was/);
 });

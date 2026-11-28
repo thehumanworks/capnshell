@@ -60,16 +60,33 @@ export interface RemoveOptions { fingerprint?: string; everywhere?: boolean; mes
 /** What each device runs, by its own cns. */
 const commandFor = (fp: string) => `cns peer remove --fingerprint ${fp} --meshes`;
 
+/** `a`, `a and b`, `a, b and c`. */
+const and = (names: readonly string[]) => names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}` : names[0] ?? "";
+/** A text as a clause of a longer sentence: without its full stop. */
+const clause = (text: string) => text.replace(/\.$/, "");
+/** The parts given, as one detail; undefined when there are none. */
+const join = (...parts: Array<string | undefined>) => parts.filter(Boolean).join("; ") || undefined;
+/** What is said of a key read from a file that is not private or is a link: whoever may write it, or where it links, chose that key. */
+const looselyRead = (name: string, fp: string) => `The file saved as ${name} is not a private file, or is a link, so the key in it was read anyway: fingerprint ${fp}.`;
+
 /** `cns peer remove NAME`: removeHere, reported in short, with what the device may still change here. */
 export async function removePeer(name: string, options: { state?: string }): Promise<void> {
   if (!peerFileExists(name)) throw new Error(`No paired device is saved as ${name}. cns peers shows them.`);
   const key = savedKey(name);
   // A damaged file that names no key: there is no device to keep out, so it only goes.
-  if (key === undefined) { removePeerFile(name); console.log(`Removed ${name}.`); return; }
-  const [pairing, ...rest] = await removeHere(fingerprint(key), { state: options.state });
-  if (pairing!.outcome === "failed") throw new Error(pairing!.detail);
-  console.log([pairing!.outcome === "removed" ? `Removed ${name}.` : `${name} was not paired here any more.`, ...hints(name, key, rest)].join("\n"));
-  if (rest.some((place) => place.outcome === "failed")) process.exitCode = 1;
+  if (key === undefined) { removePeerFile(name); console.log(`Removed ${name}. It named no device, so nothing was put on the revoked list.`); return; }
+  const fp = fingerprint(key.publicKey);
+  const records = recordsWithKey(fp).map((record) => record.name);
+  const [pairing, ...rest] = await removeHere(fp, { state: options.state });
+  // Each record that went, by name: another one may name the same device.
+  const gone = records.filter((record) => !peerFileExists(record));
+  console.log([
+    ...key.loose ? [looselyRead(name, fp)] : [],
+    pairing!.outcome === "failed" ? `Could not finish removing ${name} here: ${clause(pairing!.detail!)}. ${pairing!.next}.`
+      : gone.length > 1 ? `Removed ${and(gone)}, which name the same device.` : gone.length ? `Removed ${gone[0]}.` : `${name} was not paired here any more.`,
+    ...hints(name, key.publicKey, rest),
+  ].join("\n"));
+  if ([pairing!, ...rest].some((place) => place.outcome === "failed")) process.exitCode = 1;
 }
 
 /**
@@ -82,10 +99,10 @@ function hints(name: string, key: PublicKey, places: readonly Place[]): string[]
   const self = loadIdentity()?.publicKey;
   return [
     ...places.map((place) => {
-      if (place.outcome === "failed") return `Not finished here: ${place.detail}. ${place.next}.`;
-      const mesh = place.place.slice("mesh ".length);
-      const version = states.find((state) => state.name === mesh)?.list.version;
-      return `${name} runs the mesh ${mesh}, which this device is in. It stays at its last list here${version ? `, version ${version}` : ""}, and its members may ${place.outcome === "narrowed" ? "now " : ""}use nothing here. ${place.next}.`;
+      if (place.outcome === "failed") return `Not finished here: ${clause(place.detail!)}. ${place.next}.`;
+      const mesh = states.find((state) => state.name === place.place.slice("mesh ".length));
+      const secrets = mesh && self && holdsSecrets(self, mesh) ? " The secrets held from it here may have been set by such a device, and leaving the mesh drops them." : "";
+      return `${name} runs the mesh ${place.place.slice("mesh ".length)}, which this device is in. It stays at its last list here${mesh ? `, version ${mesh.list.version}` : ""}, which whoever has ${name}'s key may have added devices to, so its members may ${place.outcome === "narrowed" ? "now " : ""}use nothing here.${secrets} ${place.next}.`;
     }),
     ...states.filter((state) => state.admin !== key).flatMap((state) => state.list.members.filter((member) => member.key === key).map((member) => state.admin === self
       ? `${name} is still listed in the mesh ${state.name}, which this device runs. To take it out: cns mesh remove ${state.name} ${member.name}, or cns peer remove --fingerprint ${fingerprint(key)} --everywhere.`
@@ -98,14 +115,14 @@ function hints(name: string, key: PublicKey, places: readonly Place[]): string[]
  * status: 1 when a place was unreachable or failed, else 4 when one still needs something run there, else 0.
  */
 export async function removeCommand(name: string | undefined, options: RemoveOptions): Promise<number> {
-  const target = resolve(name, options.fingerprint);
+  const target = resolve(name, options.fingerprint, !!options.everywhere);
   const command = commandFor(target.fingerprint);
   // Loaded, never made: a dry run changes nothing, and a device with no identity has paired with nothing.
   const identity = loadIdentity();
   const unreadable: Place[] = [];
   const peers = options.everywhere && identity ? listPeers((peer) => {
     const key = savedKey(peer);
-    if (key === undefined || fingerprint(key) !== target.fingerprint) unreadable.push({ device: peer, place: "", outcome: "failed", detail: "this cns cannot read its record here, so it was not asked; cns peers says why", next: `On ${peer}, run: ${command}` });
+    if (key === undefined || fingerprint(key.publicKey) !== target.fingerprint) unreadable.push({ device: peer, place: "", outcome: "failed", detail: "this cns cannot read its record here, so it was not asked; cns peers says why", next: `On ${peer}, run: ${command}` });
   }).filter((peer) => peer.fingerprint !== target.fingerprint) : [];
   const places = await removeHere(target.fingerprint, { meshes: options.meshes || options.everywhere, dryRun: options.dryRun, state: options.state });
   if (options.everywhere) {
@@ -127,24 +144,35 @@ export async function removeCommand(name: string | undefined, options: RemoveOpt
   return places.some((place) => place.next !== undefined) ? 4 : 0;
 }
 
-/** The saved records whose key has fingerprint `fp`, also those this cns cannot use (savedKey). */
-function savedRecords(fp: string): Array<{ name: string; publicKey: PublicKey }> {
+/**
+ * The saved records whose key has fingerprint `fp`, also those this cns cannot use (savedKey).
+ * Those read loosely come first, so that a link goes before the record it points to, and still
+ * names its key when it goes.
+ */
+function recordsWithKey(fp: string): Array<{ name: string; publicKey: PublicKey; loose: boolean }> {
   return peerNames().flatMap((name) => {
-    const publicKey = savedKey(name);
-    return publicKey !== undefined && fingerprint(publicKey) === fp ? [{ name, publicKey }] : [];
-  });
+    const key = savedKey(name);
+    return key !== undefined && fingerprint(key.publicKey) === fp ? [{ name, ...key }] : [];
+  }).sort((a, b) => Number(b.loose) - Number(a.loose));
 }
 
-/** The device named by `name` here, or by --fingerprint, which also names one removed here already or named otherwise. */
-function resolve(name: string | undefined, given: string | undefined): { fingerprint: string; label: string } {
+/**
+ * The device named by `name` here, or by --fingerprint, which also names one removed here already
+ * or named otherwise. A key read from a file that is not private, or is a link, is removed
+ * everywhere only when --fingerprint names it: whoever may write that file chose it.
+ */
+function resolve(name: string | undefined, given: string | undefined, everywhere: boolean): { fingerprint: string; label: string } {
   if (given !== undefined) {
     if (!FINGERPRINT.test(given)) throw new Error(`${strictlyPrintable(given)} is not a fingerprint: those are six groups of four letters and digits, as cns peers shows them.`);
-    return { fingerprint: given, label: savedRecords(given)[0]?.name ?? given };
+    const records = recordsWithKey(given);
+    return { fingerprint: given, label: (records.find((record) => !record.loose) ?? records[0])?.name ?? given };
   }
   if (!peerFileExists(name!)) throw new Error(`No paired device is saved as ${name}. If it was removed here already, name it by its fingerprint, which cns peers on another of your devices shows: cns peer remove --fingerprint FINGERPRINT --everywhere.`);
   const key = savedKey(name!);
   if (key === undefined) throw new Error(`The file saved as ${name} names no device, so there is nothing to remove elsewhere. To remove it here, run: cns peer remove ${name}`);
-  return { fingerprint: fingerprint(key), label: name! };
+  const fp = fingerprint(key.publicKey);
+  if (key.loose && everywhere) throw new Error(`${looselyRead(name!, fp)} A key read that way is not removed everywhere by name. If it is the lost device's, as cns peers on another of your devices shows, run: cns peer remove --fingerprint ${fp} --everywhere`);
+  return { fingerprint: fp, label: name! };
 }
 
 /**
@@ -169,7 +197,8 @@ export function gatewayPlace(peer: Pick<PeerEntry, "name" | "fingerprint" | "add
  * mesh gives it a record here again, no list it signs is taken and the daemon lets no record of it
  * in, until this device pairs with it directly, and remove its pairings, direct or a mesh's
  * (unpair). A mesh it runs stays at its last list, which may name devices whoever has its key
- * added, so this device narrows it: its members may use nothing here (cns mesh allow undoes that).
+ * added, so this device narrows it: its members may use nothing here (cns mesh allow undoes that,
+ * once cns mesh list shows no device the person does not know).
  * With `meshes`, also take it out of the meshes this device runs, by a new member list it signs. A
  * mesh another device runs still lists it, as only that mesh's admin changes that list.
  */
@@ -187,48 +216,69 @@ export async function removeHere(fp: string, { meshes = false, dryRun = false, s
   };
 
   await attempt("its pairing", async () => {
-    const found = savedRecords(fp);
+    const found = recordsWithKey(fp);
     const kept = revokedDevices().has(fp) ? undefined : `no mesh ${dryRun ? "would give" : "gives"} it a record here again, until this device pairs with it directly`;
-    if (!dryRun) {
-      if (!found.length) revokeDevice(fp);
-      for (const { name, publicKey } of found) await unpair(name, publicKey, state);
+    if (!found.length) {
+      if (!dryRun) revokeDevice(fp);
+      return [here("its pairing", "already gone", kept)];
     }
-    return [here("its pairing", found.length ? dryRun ? "would remove" : "removed" : "already gone", kept)];
+    // Each record by name, as another one may name the same device.
+    const saved = `saved here as ${and(found.map(({ name, loose }) => loose ? `${name} (not a private file, or a link, so its key was read anyway)` : name))}`;
+    if (dryRun) return [here("its pairing", "would remove", join(saved, kept))];
+    for (const { name, publicKey } of found) {
+      try { await unpair(name, publicKey, state); }
+      catch (error) {
+        // What went before this one is said too: its key is on the revoked list then.
+        let gone: string[] = [];
+        try { gone = found.filter((record) => !peerFileExists(record.name)).map((record) => record.name); } catch { /* The error says why. */ }
+        const went = gone.length ? `${and(gone)} ${gone.length === 1 ? "was" : "were"} removed, and its key is on the revoked list` : undefined;
+        return [here("its pairing", "failed", join(went, clause(strictlyPrintable(errorMessage(error)))), `Later, run: ${command}`)];
+      }
+    }
+    return [here("its pairing", "removed", join(saved, kept))];
   });
   // A device with no identity runs no mesh and is in none.
   if (!self) return places;
 
-  let states: MeshState[] = [];
+  let states: MeshState[] | undefined;
   await attempt("its meshes", () => { states = listMeshes(); return []; });
-  for (const mesh of meshes ? states.filter((each) => each.admin === self.publicKey && each.list.members.some((member) => is(member.key))) : []) {
+  for (const mesh of meshes ? (states ?? []).filter((each) => each.admin === self.publicKey && each.list.members.some((member) => is(member.key))) : []) {
     await attempt(`mesh ${mesh.name}`, () => {
       const list = nextList(mesh.list, (members) => members.filter((member) => !is(member.key)), Date.now());
       if (!dryRun) writeMesh({ ...mesh, signed: signList(list, self) });
-      const secrets = heldSecrets(self.publicKey, [mesh]).some(({ record }) => record.value !== undefined) ? "; it keeps the mesh's secrets it read, so change them at their source" : "";
+      const secrets = holdsSecrets(self.publicKey, mesh) ? "; it keeps the mesh's secrets it read, so change them at their source" : "";
       return [here(`mesh ${mesh.name}`, dryRun ? "would remove" : "removed", `${dryRun ? "version" : "its list is now version"} ${list.version}, without it; members drop it when they get that list${secrets}`)];
     });
   }
   // A mesh it runs: this device takes no new list of it (newerLists), and none of its secrets go
   // to its members (secretsFor). Leaving is this device's person's call: it ends the other
   // members' records here too.
-  for (const mesh of states.filter((each) => is(each.admin))) {
+  for (const mesh of (states ?? []).filter((each) => is(each.admin))) {
     await attempt(`mesh ${mesh.name}`, () => {
       const at = `mesh ${mesh.name}`;
       const leave = `To finish, leave it: cns mesh leave ${mesh.name}`;
-      const kept = `it runs this mesh, which ${dryRun ? "would stay" : "stays"} at version ${mesh.list.version} here, as this device ${dryRun ? "would take" : "takes"} no new list of it`;
-      const bots = "a bot started from one of its tokens lets it in until it is removed there too";
-      if (!mesh.allow.length) return [here(at, "not permitted", `${kept}; its members may use nothing here; ${bots}`, leave)];
+      const kept = `it runs this mesh, which ${dryRun ? "would stay" : "stays"} at version ${mesh.list.version} here, as this device ${dryRun ? "would take" : "takes"} no new list of it; that list may name devices whoever has its key added`;
+      // Secrets this device took before: such a device may have set them, and only leaving drops them.
+      const secrets = holdsSecrets(self.publicKey, mesh) ? `; the secrets held from it here may have been set by such a device, and cns mesh leave ${mesh.name} drops them` : "";
+      const bots = "; a bot started from one of its tokens lets it in until it is removed there too";
+      if (!mesh.allow.length) return [here(at, "not permitted", `${kept}, so its members may use nothing here${secrets}${bots}`, leave)];
       const before = describeGrants(mesh.allow);
-      if (dryRun) return [here(at, "would narrow", `${kept}, and its members would use nothing here (they may use ${before} now); ${bots}`, leave)];
+      if (dryRun) return [here(at, "would narrow", `${kept}, so its members would use nothing here (they may use ${before} now)${secrets}${bots}`, leave)];
       writeMesh({ ...mesh, allow: [] });
-      return [here(at, "narrowed", `${kept}; that list may name devices whoever has its key added, so its members may now use nothing here (they could use ${before}), and get none of its secrets from here; ${bots}`,
-        `${leave}. To let its members use ${before} here again: cns mesh allow ${mesh.name} ${grantWords(mesh.allow)}`)];
+      return [here(at, "narrowed", `${kept}, so its members may now use nothing here (they could use ${before}), and get none of its secrets from here${secrets}${bots}`,
+        `${leave}. To let its members use ${before} here again, only once cns mesh list ${mesh.name} shows no device you do not know: cns mesh allow ${mesh.name} ${grantWords(mesh.allow)}`)];
     });
   }
   // Records follow the lists and the revoked list at once, also those a running daemon made while
-  // this ran, and the daemon offers the new lists to linked devices.
-  if (!dryRun) await attempt("its meshes", async () => { await settle({ state }, self.publicKey); return []; });
+  // this ran, and the daemon offers the new lists to linked devices. Not when the meshes could
+  // not be read, which is said already.
+  if (!dryRun && states) await attempt("its meshes", async () => { await settle({ state }, self.publicKey); return []; });
   return places;
+}
+
+/** Whether this device holds secrets of `mesh` that still have a value. */
+function holdsSecrets(self: PublicKey, mesh: MeshState): boolean {
+  return heldSecrets(self, [mesh]).some(({ record }) => record.value !== undefined);
 }
 
 /**
@@ -243,7 +293,7 @@ export async function forgetAtGateway(fp: string, dryRun: boolean): Promise<Pick
   // with can still approve connectors, so this is said whatever the gateway answered.
   const owners = "; if it was one of the gateway's owners too, it can still approve connectors until its key is out of OWNER_KEYS (cd gateway && npx wrangler secret put OWNER_KEYS); cns gateway grants lists the connectors, and cns gateway revoke ID stops one";
   // Text the gateway sent, such as a device's name or an error, is made strictlyPrintable here.
-  const place = (outcome: Outcome, detail: string, more: { next?: string; fingerprint?: string } = {}) => ({ outcome, detail: `${strictlyPrintable(detail)}${owners}`, ...more });
+  const place = (outcome: Outcome, detail: string, more: { next?: string; fingerprint?: string } = {}) => ({ outcome, detail: `${clause(strictlyPrintable(detail))}${owners}`, ...more });
   if (!process.env.CNS_GATEWAY) return place("not used", `CNS_GATEWAY is not set here, so no gateway was asked. If this device owns a gateway, run: cns gateway status, then cns gateway remove NAME (fingerprint ${fp})`);
   const options: GatewayOptions = {};
   const later = `Later, run: cns peer remove --fingerprint ${fp} --everywhere`;
@@ -258,8 +308,10 @@ export async function forgetAtGateway(fp: string, dryRun: boolean): Promise<Pick
     await call(options, "remove", { name: device.name }, signal);
     return place("removed", `${url} had it as ${device.name}; no connector reaches it now`, gateway);
   } catch (error) {
-    const detail = errorMessage(error);
-    if (error instanceof GatewayError && error.status === undefined) return place("unreachable", detail, { next: later });
+    if (error instanceof GatewayError && error.status === undefined) return place("unreachable", errorMessage(error), { next: later });
+    // The gateway's own words, quoted, so that none reads as this cns's advice.
+    const detail = !(error instanceof GatewayError) ? errorMessage(error)
+      : `The gateway answered ${error.status}${error.said === undefined ? "" : ` and said: ${JSON.stringify(error.said)}`}${error.status === 401 ? `; this device's public key is ${loadIdentity()?.publicKey}` : ""}`;
     if (error instanceof GatewayError && (error.status === 401 || error.status === 503)) {
       return place("not permitted", detail, { next: "Run this on one of the gateway's owners, with CNS_GATEWAY set to its address" });
     }
@@ -297,7 +349,7 @@ export function answerPlaces(name: string, fp: string, answer: ReadonlyArray<{ p
     // A mesh it runs there: that device narrowed it, or would, or had nothing to narrow, and what is left is to leave it.
     const runs = mesh !== undefined && (outcome === "narrowed" || outcome === "would narrow" || outcome === "not permitted");
     const detail = !runs ? undefined
-      : outcome === "narrowed" ? `it runs this mesh, so ${name} takes no new list of it, and its members may now use nothing there; cns mesh allow ${mesh} GRANTS there undoes that`
+      : outcome === "narrowed" ? `it runs this mesh, so ${name} takes no new list of it, and its members may now use nothing there; only once cns mesh list ${mesh} there shows no device you do not know, cns mesh allow ${mesh} GRANTS there undoes that`
         : outcome === "would narrow" ? `it runs this mesh, so ${name} would take no new list of it, and its members would use nothing there`
           : `it runs this mesh, so ${name} takes no new list of it, and its members may use nothing there`;
     const next = outcome === "failed" ? `Later, run: ${there(commandFor(fp))}`
@@ -352,9 +404,9 @@ async function onDevice(peer: PeerEntry, fp: string, identity: Identity, dryRun:
 function report(target: { fingerprint: string; label: string }, places: readonly Place[], options: RemoveOptions): string {
   const what = options.everywhere ? "everywhere this device may" : "here";
   const head = options.dryRun ? `Dry run, nothing changed. Removing ${target.label} (fingerprint ${target.fingerprint}) ${what} would do this:` : `Removing ${target.label} (fingerprint ${target.fingerprint}) ${what}:`;
-  const sentence = (text: string) => strictlyPrintable(text).replace(/\.$/, "");
+  // Every text in a place is strictlyPrintable already, and its device a saved name.
   return [head, ...places.map((place) => {
     const where = place.device === null ? (place.place === "the gateway" ? place.place : `this device: ${place.place}`) : [place.device, place.place].filter(Boolean).join(": ");
-    return `  ${place.outcome.padEnd(13)}  ${strictlyPrintable(where)}${place.detail ? `: ${sentence(place.detail)}` : ""}${place.next ? `. ${sentence(place.next)}.` : ""}`;
+    return `  ${place.outcome.padEnd(13)}  ${where}${place.detail ? `: ${clause(place.detail)}` : ""}${place.next ? `. ${clause(place.next)}.` : ""}`;
   })].join("\n");
 }

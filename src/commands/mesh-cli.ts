@@ -322,6 +322,10 @@ export async function allowMembers(name: string, words: string[], options: State
   writeMesh({ ...state, allow });
   await settle(options, identity.publicKey);
   console.log(`Members of the mesh ${name} may use here: ${describeGrants(allow)}.`);
+  // Allowed all the same: the person may have checked the list already.
+  if (allow.length && revokedDevices().has(fingerprint(state.admin))) {
+    console.error(`Warning: ${adminName(state)}, which runs the mesh ${name}, was removed from this device (cns peer remove), so its last list stays here, and that list may name devices whoever has its key added. Check that cns mesh list ${name} shows no device you do not know; to end the mesh here instead: cns mesh leave ${name}.`);
+  }
 }
 
 /** The members of a mesh other than this device, its admin, by the names cns mesh remove takes. */
