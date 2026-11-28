@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdtemp, readdir, readFile, realpath, rm } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
@@ -132,6 +132,76 @@ test("killing a held session ends its holder, and its name can be used again at 
   await assert.rejects(async () => { await first.info(); }, /PTY session work no longer exists/);
   const again = await sessions.startSession("work", { command: "printf again; sleep 60" }, null, new HandleScope());
   assert.equal((await again.wait({ text: "again", timeoutMs: 10000 })).matched, true);
+  // The first handle never reaches the session that took its name.
+  await assert.rejects(async () => { await first.capture(); }, /PTY session work no longer exists/);
+  await assert.rejects(async () => { await first.kill(); }, /PTY session work no longer exists/);
+  assert.equal((await again.info()).running, true);
+});
+
+test("a start the daemon gives up on leaves no holder behind", { skip: !HOLDERS, timeout: 30000 }, async (t) => {
+  const { sessions, records } = await holders(t);
+  const starting = sessions.startSession("work", { command: "sleep 60" }, null, new HandleScope());
+  sessions[Symbol.dispose]();
+  await assert.rejects(starting, /The daemon is stopping\./);
+  await until(async () => (await records()).length === 0, "the holder to end and remove its record");
+});
+
+test("holders keep to a private directory: a looser one is refused, a looser record ignored, and each socket is the user's alone", { skip: !HOLDERS, timeout: 30000 }, async (t) => {
+  const { dir, sessions, records } = await holders(t);
+  await sessions.startSession("work", { command: "sleep 60" }, null, new HandleScope());
+  const [record] = await records() as [HolderRecord];
+  assert.equal((await stat(dir)).mode & 0o777, 0o700);
+  assert.equal((await stat(record.socket)).mode & 0o777, 0o600);
+  sessions[Symbol.dispose]();
+  // A record others could have written, even one that names a live holder and its token, is ignored.
+  const loose = path.join(dir, "loose.json");
+  await writeFile(loose, JSON.stringify({ ...record, name: "loose" }));
+  await chmod(loose, 0o644);
+  const said: string[] = [];
+  const next = new HeldSessions(dir, (message) => said.push(message));
+  await next.adopt();
+  next[Symbol.dispose]();
+  assert.deepEqual(next.names, []);
+  assert.match(said.join("\n"), /^Ignored \S+loose\.json: it is not a private file of this user\.$/m);
+  assert.doesNotMatch(said.join("\n"), /loose.*pid/);
+  // A directory others may read is refused, with what to run.
+  await chmod(dir, 0o755);
+  try { await assert.rejects(new HeldSessions(dir).adopt(), /must be private and owned by your user: \S+\. To make it private, run: chmod 700 /); }
+  finally { await chmod(dir, 0o700); }
+});
+
+test("a second holder of a live name is reported, with the pid that ends it", { skip: !HOLDERS, timeout: 30000 }, async (t) => {
+  const { dir, sessions, records } = await holders(t);
+  await sessions.startSession("work", { command: "sleep 60" }, null, new HandleScope());
+  // A daemon that never adopted the first starts another.
+  const other = new HeldSessions(dir);
+  await other.startSession("work", { command: "sleep 60" }, null, new HandleScope());
+  other[Symbol.dispose]();
+  const [one, two] = (await records()).map((record) => record.pid);
+  const said: string[] = [];
+  const next = new HeldSessions(dir, (message) => said.push(message));
+  t.after(() => next[Symbol.dispose]());
+  await next.adopt();
+  assert.deepEqual(next.names, ["work"]);
+  assert.match(said.join("\n"), new RegExp(`^Two holders run a session named work, pids (${one} and ${two}|${two} and ${one}): this daemon reaches the first\\. kill (${one}|${two}) ends the other\\.$`, "m"));
+});
+
+test("a holder closes on a caller whose hello is too long, or that says nothing for 5 seconds", { skip: !HOLDERS, timeout: 30000 }, async (t) => {
+  const { sessions, records } = await holders(t);
+  await sessions.startSession("work", { command: "sleep 60" }, null, new HandleScope());
+  const [record] = await records() as [HolderRecord];
+  /** How long the holder takes to close on a caller that sends `hello`; Infinity past 8 seconds. */
+  const closes = (hello: string) => new Promise<number>((resolve) => {
+    const started = Date.now();
+    const socket = net.connect(record.socket, () => { if (hello) socket.write(hello); });
+    const timer = setTimeout(() => { socket.destroy(); resolve(Infinity); }, 8000);
+    socket.on("error", () => {});
+    socket.on("close", () => { clearTimeout(timer); resolve(Date.now() - started); });
+  });
+  const long = await closes("x".repeat(2000));
+  assert.ok(long < 2000, `a hello past 1024 bytes is closed on at once, not after ${long} ms`);
+  const silent = await closes("");
+  assert.ok(silent >= 4500 && silent < 8000, `a silent caller is closed on after 5 seconds, not ${silent} ms`);
 });
 
 test("a holder answers only a caller with its record's token", { skip: !HOLDERS, timeout: 30000 }, async (t) => {
