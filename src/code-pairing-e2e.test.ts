@@ -1,39 +1,27 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { startRelay } from "./relay-server.js";
-import { launchCli, unusedPort } from "./test-support.js";
+import { launchCli, testDevices, unusedPort } from "./test-support.js";
 import { WORDS } from "./words.js";
 
 const posix = process.platform !== "win32";
 
 test("devices pair by typing a short code, after a wrong one, through the relay", { skip: !posix, timeout: 120000 }, async (t) => {
-  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-code-")));
-  const cleanups: Array<() => Promise<unknown>> = [];
-  t.after(async () => { for (const cleanup of cleanups.reverse()) await cleanup(); await rm(root, { recursive: true, force: true }); });
+  // Made first, so its hooks stop the daemon before the relay stops.
+  const devices = await testDevices(t, "cns-code-");
   const external = process.env.CNS_TEST_RELAY_URL;
   const relayPort = Number(await unusedPort("127.0.0.1"));
   const relay = external ? undefined : startRelay({ bind: "127.0.0.1", port: relayPort });
-  cleanups.push(async () => relay?.stop());
-  const relayBase = external ?? `ws://127.0.0.1:${relayPort}`;
-  const device = async (name: string) => {
-    const dir = path.join(root, name);
-    await mkdir(dir, { mode: 0o700 });
-    return { env: { CNS_CONFIG_DIR: dir, HOME: dir, CNS_RELAY: relayBase }, state: path.join(dir, ".cns", "daemon.json"), dir };
-  };
-  const studio = await device("studio");
-  const laptop = await device("laptop");
-  const cli = async (dev: { env: Record<string, string> }, args: string[]) => {
-    const child = launchCli(t, args, { env: dev.env });
-    child.child.stdin.end();
-    return { code: await child.exited, stdout: child.stdout, stderr: child.stderr };
-  };
+  t.after(async () => relay?.stop());
+  const env = { CNS_RELAY: external ?? `ws://127.0.0.1:${relayPort}` };
+  const studio = await devices.device("studio", env);
+  const laptop = await devices.device("laptop", env);
+  const cli = devices.cli;
 
-  const up = await cli(studio, ["up", "--bind", "127.0.0.1", "--port", await unusedPort("127.0.0.1"), "--state", studio.state]);
-  assert.equal(up.code, 0, up.stderr);
-  cleanups.push(() => cli(studio, ["stop", "--state", studio.state]));
+  await devices.up(studio);
 
   const inviting = launchCli(t, ["pair", "--yes", "--name", "laptop", "--grant", "all", "--state", studio.state], { env: studio.env });
   inviting.child.stdin.end();
@@ -73,27 +61,23 @@ test("devices pair by typing a short code, after a wrong one, through the relay"
 });
 
 test("three wrong codes end the pairing on the inviting device", { skip: !posix, timeout: 120000 }, async (t) => {
-  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-code-")));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  // Its hooks stop the daemon and then remove its state; removing the state first left the daemon running.
+  const devices = await testDevices(t, "cns-code-");
   const relayPort = Number(await unusedPort("127.0.0.1"));
   const relay = startRelay({ bind: "127.0.0.1", port: relayPort });
   t.after(() => relay.stop());
-  const env = (name: string) => ({ CNS_CONFIG_DIR: path.join(root, name), HOME: path.join(root, name), CNS_RELAY: `ws://127.0.0.1:${relayPort}` });
-  for (const name of ["studio", "laptop"]) await mkdir(path.join(root, name), { mode: 0o700 });
-  const state = path.join(root, "studio", ".cns", "daemon.json");
-  const upped = launchCli(t, ["up", "--bind", "127.0.0.1", "--port", await unusedPort("127.0.0.1"), "--state", state], { env: env("studio") });
-  upped.child.stdin.end();
-  assert.equal(await upped.exited, 0, upped.stderr);
-  t.after(async () => { const stop = launchCli(t, ["stop", "--state", state], { env: env("studio") }); stop.child.stdin.end(); await stop.exited; });
-  const inviting = launchCli(t, ["pair", "--yes", "--state", state], { env: env("studio") });
+  const env = { CNS_RELAY: `ws://127.0.0.1:${relayPort}` };
+  const studio = await devices.device("studio", env);
+  const laptop = await devices.device("laptop", env);
+  await devices.up(studio);
+  const inviting = launchCli(t, ["pair", "--yes", "--state", studio.state], { env: studio.env });
   inviting.child.stdin.end();
   await inviting.waitFor("Code: ");
   const [room, ...words] = /Code: (\d+-[a-z]+-[a-z]+-[a-z]+)\n/.exec(inviting.stdout)![1]!.split("-");
   const other = WORDS.find((word) => !words.includes(word))!;
   for (let tries = 1; tries <= 3; tries++) {
-    const wrong = launchCli(t, ["pair", room!, other, words[1]!, words[2]!, "--yes"], { env: env("laptop") });
-    wrong.child.stdin.end();
-    assert.equal(await wrong.exited, 3, wrong.stderr);
+    const wrong = await devices.cli(laptop, ["pair", room!, other, words[1]!, words[2]!, "--yes"]);
+    assert.equal(wrong.code, 3, wrong.stderr);
   }
   assert.equal(await inviting.exited, 3, inviting.output);
   assert.match(inviting.stderr, /The code was typed wrong 3 times, so it no longer works\. Run cns pair again/);
