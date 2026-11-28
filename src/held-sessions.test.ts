@@ -44,6 +44,27 @@ test("holders outlive a daemon unless the systemd unit that runs it stops every 
   assert.equal(keeps(true, userUnit, undefined), false, "a unit systemctl cannot tell of");
   assert.equal(keeps(true, "0::/system.slice/cns.service\n", "mixed"), false, "the NixOS module's system service");
   assert.deepEqual(asked, [["cns.service", true], ["cns.service", true], ["cns.service", true], ["cns.service", false]]);
+  // A cgroup v1 host: only the name=systemd line names the unit; a controller's line before it can name another.
+  asked.length = 0;
+  const v1 = [
+    "12:pids:/user.slice/user-1000.slice/user@1000.service",
+    "11:cpu,cpuacct:/user.slice",
+    "4:memory:/user.slice/user-1000.slice/user@1000.service",
+    "1:name=systemd:/user.slice/user-1000.slice/user@1000.service/app.slice/cns.service",
+    "",
+  ].join("\n");
+  assert.equal(keeps(true, v1, "control-group"), false);
+  // A hybrid host reads the unified hierarchy's line, also when name=systemd and the controllers say otherwise, or it comes last.
+  const hybrid = ["12:pids:/user.slice/user-1000.slice/user@1000.service", "1:name=systemd:/system.slice/other.service", "0::/system.slice/cns.service", ""].join("\n");
+  assert.equal(keeps(true, hybrid, "process"), true);
+  // And the name=systemd line when the unified one names no unit, as where it is not mounted.
+  const unmounted = ["9:name=systemd:/user.slice/user-1000.slice/user@1000.service/app.slice/cns.service", "8:pids:/user.slice/user-1000.slice/user@1000.service", "0::/", ""].join("\n");
+  assert.equal(keeps(true, unmounted, "mixed"), false);
+  assert.deepEqual(asked, [["cns.service", true], ["cns.service", false], ["cns.service", true]]);
+  // A v1 host with no systemd at all, as in a container, has no unit to ask about.
+  assert.equal(keeps(true, ["9:name=systemd:/", "8:pids:/process_api/cc-shell", "0::/", ""].join("\n"), "control-group"), true);
+  assert.equal(keeps(true, "12:pids:/system.slice/docker.service\n", "control-group"), true, "a controller's line alone names no unit of this process");
+  assert.equal(asked.length, 3);
   // Only a daemon run as a service asks: one cns up started stops alone, whatever unit its shell is in.
   asked.length = 0;
   assert.equal(keeps(false, "0::/user.slice/user-1000.slice/user@1000.service/app.slice/tmux.service\n", "control-group"), true);

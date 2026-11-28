@@ -66,10 +66,23 @@ export function keepsSessions(service: boolean, { platform = process.platform, c
 } = {}): boolean {
   if (platform === "win32") return false;
   if (!service || platform !== "linux") return true;
-  const group = cgroup();
-  const unit = group && /\/([^/\n]+\.service)$/m.exec(group)?.[1];
-  if (!unit) return true;
-  return killMode(unit, group.includes("/user@")) === "process";
+  const found = cgroupUnit(cgroup() ?? "");
+  if (!found) return true;
+  return killMode(found.unit, found.user) === "process";
+}
+
+/**
+ * The systemd service a process runs in, from its /proc/PID/cgroup: the unified hierarchy's
+ * `0::` line, else, on a cgroup v1 host, the `name=systemd` one. The other v1 lines are
+ * controllers' groups, which can name another unit, such as `12:pids:/…/user@1000.service`.
+ */
+export function cgroupUnit(text: string): { unit: string; user: boolean } | undefined {
+  for (const line of [/^0::(.*)$/m, /^\d+:name=systemd:(.*)$/m]) {
+    const group = line.exec(text)?.[1];
+    const unit = group && /\/([^/]+\.service)$/.exec(group)?.[1];
+    if (unit) return { unit, user: group.includes("/user@") };
+  }
+  return undefined;
 }
 
 function ownCgroup(): string | undefined {
