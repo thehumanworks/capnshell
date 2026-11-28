@@ -95,9 +95,13 @@ export function wakeArguments(card: LanCard, shell: Device["shell"]): string[] {
 
 /** How long cns wake may run on a device: it sends for a third of a second. */
 const RUN_MS = 15_000;
-/** How long a sender has to answer: one that sleeps too must not hold up the command for long. */
+/**
+ * How long a sender has to answer: one cns chose may sleep too and must not hold up the command for
+ * long, while one --via names gets as long as cns run's, as it may be reached only through a slow relay.
+ */
 const CONNECT_MS = 5_000;
-const reachSoon: Reach = (name) => reachDevice(name, (device) => connectDevice(resolvePeer(device), AbortSignal.timeout(CONNECT_MS)));
+const VIA_CONNECT_MS = 20_000;
+const reachWithin = (ms: number): Reach => (name) => reachDevice(name, (device) => connectDevice(resolvePeer(device), AbortSignal.timeout(ms)));
 
 /** Send from this device, for each card. */
 async function fromHere(cards: readonly LanCard[], here: readonly LanCard[], send: SendPacket): Promise<Outcome> {
@@ -161,7 +165,7 @@ function named(name: string): PeerEntry {
  * this device, which is what each sender runs. Prints a line for each sender as soon as it is
  * known, and returns the exit status (wakeExitCode).
  */
-export async function wake(name: string | undefined, options: WakeOptions, reach: Reach = reachSoon, here: () => LanCard[] = lanCards, send: SendPacket = sendMagicPacket): Promise<number> {
+export async function wake(name: string | undefined, options: WakeOptions, reach: Reach = reachWithin(options.via === undefined ? CONNECT_MS : VIA_CONNECT_MS), here: () => LanCard[] = lanCards, send: SendPacket = sendMagicPacket): Promise<number> {
   if (options.mac !== undefined) {
     if (name !== undefined || options.via !== undefined) throw new Error("Name a paired device or give --mac, not both: cns wake DEVICE, or cns wake --mac MAC.");
     const mac = macAddress(options.mac);
