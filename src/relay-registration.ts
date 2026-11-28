@@ -126,14 +126,18 @@ function failed(state: Registration, failure: string): RegistrationStep {
 export function stepRegistration(state: Registration, event: RegistrationEvent, now: number): RegistrationStep {
   const same: RegistrationStep = { state, effects: [] };
   const { phase } = state;
-  if (phase === "stopped") return same;
+  const stopping: RegistrationEffect = { do: "close", reason: "The daemon is stopping" };
+  if (phase === "stopped") {
+    // A connection that finishes opening just after the daemon stopped is closed at once.
+    return event.t === "opened" ? { state, effects: [stopping] } : same;
+  }
   if (event.t === "stop") {
     // While connecting, stopping aborts the connection itself; while waiting, the wait runs out unanswered.
     const open = phase === "proving" || phase === "registered";
-    return { state: { ...state, phase: "stopped" }, effects: open ? [{ do: "close", reason: "The daemon is stopping" }] : [] };
+    return { state: { ...state, phase: "stopped" }, effects: open ? [stopping] : [] };
   }
   if (phase === "connecting") {
-    if (event.t === "opened") return { state: { ...state, phase: "proving", heardAt: now, readyAt: 0 }, effects: [] };
+    if (event.t === "opened") return { state: { ...state, phase: "proving", heardAt: now }, effects: [] };
     if (event.t === "open-failed") return failed(state, printable(event.error));
     return same;
   }

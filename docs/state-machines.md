@@ -175,7 +175,7 @@ then backoff against a relay that keeps dropping the registration (1 s doubling 
 reset only by a registration that lasted 30 s), a relay that refuses every registration
 (logged once per reason, until a registration), silence, hostile messages, printable log
 lines, and what `cns status` and `cns doctor` show in each state. It runs in about 100 ms,
-and each of 34 rules broken by hand fails it. `relay-client.test.ts` and `relay-e2e.test.ts`
+and each of 35 rules broken by hand fails it. `relay-client.test.ts` and `relay-e2e.test.ts`
 stay as the wiring checks. Making it explicit found one bug: a relay that sent the JSON
 `null` made the message handler throw, which it no longer does.
 

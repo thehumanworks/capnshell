@@ -620,11 +620,13 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
       try { opened = await openSocket(url, cancelled.signal); }
       catch (error) { return step({ t: "open-failed", error: errorMessage(error) }); }
       socket = opened;
-      const pinger = setInterval(() => step({ t: "tick" }), RELAY_PING_MS);
+      // Only the current connection speaks for the registration.
+      const pinger = setInterval(() => { if (socket === opened) step({ t: "tick" }); }, RELAY_PING_MS);
       pinger.unref?.();
-      opened.addEventListener("message", (event: MessageEvent) => step({ t: "message", data: event.data }));
+      opened.addEventListener("message", (event: MessageEvent) => { if (socket === opened) step({ t: "message", data: event.data }); });
       opened.addEventListener("close", (event: CloseEvent) => {
         clearInterval(pinger);
+        if (socket !== opened) return;
         socket = undefined;
         step({ t: "closed", code: event.code, reason: event.reason });
       }, { once: true });

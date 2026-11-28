@@ -99,9 +99,10 @@ test("a hostile relay cannot crash the daemon or make it open connections withou
         ws.send(JSON.stringify({ t: "ready" }));
         // JSON that is not an object.
         ws.send("null");
-        // Then a flood: unique ids, one id repeated, and ids that are not ids at all.
-        for (let index = 0; index < 100; index++) ws.send(JSON.stringify({ t: "incoming", id: `id${String(index).padStart(20, "0")}` }));
+        // Then a flood: one id repeated, before the cap could hide a second answer to it, then
+        // unique ids, and ids that are not ids at all.
         for (let index = 0; index < 50; index++) ws.send(JSON.stringify({ t: "incoming", id: "B".repeat(22) }));
+        for (let index = 0; index < 100; index++) ws.send(JSON.stringify({ t: "incoming", id: `id${String(index).padStart(20, "0")}` }));
         for (const id of ["../../etc", "x", "A".repeat(500), 7]) ws.send(JSON.stringify({ t: "incoming", id }));
       },
       close(ws) { if (ws.data.kind === "accept" && ws.data.n === 1) badChallengeClosed = true; },
