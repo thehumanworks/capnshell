@@ -30,7 +30,7 @@ Follow what they print: when something is wrong they name the command that fixes
 | Exit 5 from `cns doctor NAME` | No address answered, or none is saved. |
 | Exit 124 | `--timeout` passed. Raise it, or use a named session and `cns screen --until`. |
 | `is not a function`, or a new feature missing after an upgrade | The daemon, here or there, still runs the old cns. See below. |
-| `Relay: ... (registering)` that never turns `registered` | The service cannot reach or verify the relay: read its log (`journalctl --user -u cns` on Linux, `~/.cns/service.log` on macOS). Never set `NODE_TLS_REJECT_UNAUTHORIZED=0`. |
+| `Relay: ... (registering)` that never turns `registered` | The service cannot reach or verify the relay: read its log (`journalctl --user -u cns` on Linux, `~/.cns/service.log` on macOS and Windows). Never set `NODE_TLS_REJECT_UNAUTHORIZED=0`. |
 | `Local daemon connection timed out` | Local loopback trouble, as with WSL mirrored networking. Do not delete `~/.cns`; see docs/adr/0003-local-control-loopback.md. |
 
 ## Version drift

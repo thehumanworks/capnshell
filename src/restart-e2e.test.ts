@@ -67,6 +67,8 @@ test("a paired device restarts this device's daemon with cns run, and the daemon
 test("cns daemon restart lets systemd restart its service, stops any other daemon first, and refuses services it cannot start", () => {
   assert.deepEqual(restartPlan(true, "systemd"), { stop: false, start: "systemd" });
   assert.deepEqual(restartPlan(true, "launchd"), { stop: true, start: "launchd" });
+  // The task's supervisor starts only a daemon that failed, so a restart stops the daemon and runs the task again.
+  assert.deepEqual(restartPlan(true, "schtasks"), { stop: true, start: "schtasks" });
   // A daemon cns up started outside the service it installed, as when the service failed to start.
   assert.deepEqual(restartPlan(false, "systemd"), { stop: true, start: "systemd" });
   assert.deepEqual(restartPlan(false, undefined), { stop: true, start: "detached" });

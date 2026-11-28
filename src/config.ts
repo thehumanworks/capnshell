@@ -26,7 +26,8 @@ export function checkPrivateDirectory(target: string): void {
 // Windows: a directory is private when its DACL allows nobody but this user, SYSTEM and
 // the Administrators group, as Windows OpenSSH requires of ~/.ssh. `icacls /save` gives the
 // DACL as SDDL, with SIDs rather than account names, which Windows translates.
-const system32 = () => path.join(process.env.SystemRoot ?? "C:\\Windows", "System32");
+/** System32, where cns runs Windows tools from rather than whatever the search path finds first. */
+export const system32 = () => path.join(process.env.SystemRoot ?? "C:\\Windows", "System32");
 /** Trustees allowed in a private directory's DACL besides the user: SYSTEM, Administrators, and OWNER RIGHTS. */
 const WINDOWS_TRUSTED = new Set(["SY", "S-1-5-18", "BA", "S-1-5-32-544", "OW", "S-1-3-4"]);
 let userSid: string | undefined;
