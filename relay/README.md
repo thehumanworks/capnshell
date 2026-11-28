@@ -52,8 +52,15 @@ Worker's address changes, update `DEFAULT_RELAY` and release cns.
 ## Test locally
 
 ```sh
-cd relay && npx wrangler@4.151.3 dev --local --port 8787 &
-cd .. && CNS_TEST_RELAY_URL=ws://127.0.0.1:8787 bun test src/relay-hub.test.ts src/relay-e2e.test.ts
+cd relay && npx wrangler@4.151.3 dev --local --port 8787 --local-upstream 127.0.0.1:8787
+```
+
+Without `--local-upstream`, the custom domain in `wrangler.toml` makes the Worker see the
+host `cns.nothuman.work`, and the client check answers `401`. Once it prints `Ready`, run
+the tests from the repository root in another terminal:
+
+```sh
+CNS_TEST_RELAY_URL=ws://127.0.0.1:8787 bun test src/relay-hub.test.ts src/relay-e2e.test.ts
 ```
 
 The tests then run the relay protocol, the client check, and a full pairing, commands and a
