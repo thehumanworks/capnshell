@@ -14,7 +14,7 @@ import { ShellApi, type ExecSink, type PtyExit } from "../shell.js";
 import { cliInvocation, launchCli as launch, LOOPBACK, settledLink, testDevices } from "../test-support.js";
 import { plain } from "../terminal.js";
 import type { PeerController } from "../console.js";
-import { connectControl, removeStaleState, startDaemon, stateRemoval, stateSchema, stopDaemon } from "./daemon.js";
+import { connectControl, listenFailure, logEnding, removeStaleState, startDaemon, stateRemoval, stateSchema, stopDaemon } from "./daemon.js";
 import { serveControl } from "./daemon-server.js";
 
 async function temporaryState(t: TestContext): Promise<string> {
@@ -452,7 +452,8 @@ test("stale state is removed only once its daemon's process is gone", { skip: pr
 test("daemon startup reports a listener failure and leaves no state", { skip: process.platform === "win32", timeout: 15000 }, async (t) => {
   const devices = await testDevices(t);
   const studio = await devices.device("studio");
-  const occupied = net.createServer();
+  // The daemon asks whether a cns daemon holds the port; closing the server waits for that connection.
+  const occupied = net.createServer((socket) => socket.destroy());
   occupied.listen(0, "127.0.0.1");
   await once(occupied, "listening");
   t.after(() => new Promise<void>((resolve) => occupied.close(() => resolve())));
@@ -461,7 +462,45 @@ test("daemon startup reports a listener failure and leaves no state", { skip: pr
   const started = await devices.cli(studio, ["up", "--bind", "127.0.0.1", "--port", String(address.port), "--state", studio.state]);
   assert.equal(started.code, 1, started.output);
   assert.match(started.output, /exited during startup/);
+  // The daemon's own words, from its log: which port, and the command that uses another.
+  assert.ok(started.stderr.includes(`Port ${address.port} on 127.0.0.1 is in use. Stop what uses it, or start cns on another port: cns up --bind 127.0.0.1 --state ${studio.state} --port PORT.`), started.stderr);
   await assert.rejects(() => stat(studio.state), { code: "ENOENT" });
+});
+
+test("cns up names the cns daemon that holds its port", { skip: process.platform === "win32", timeout: 30000 }, async (t) => {
+  const devices = await testDevices(t);
+  const studio = await devices.device("studio");
+  // This device's daemon at its default state, which cns status and cns stop reach.
+  const running = { ...studio, state: path.join(studio.dir, ".cns", "daemon.json") };
+  const port = await devices.up(running);
+  const second = await devices.cli(studio, ["up", "--bind", "127.0.0.1", "--port", port, "--state", studio.state]);
+  assert.equal(second.code, 1, second.output);
+  assert.ok(second.stderr.includes(`Port ${port} on 127.0.0.1 is in use by this device's cns daemon: cns status shows it and cns stop stops it.`), second.stderr);
+  assert.match(second.stderr, /cns up --bind 127\.0\.0\.1 --state \S+ --port PORT\.$/m);
+  // Another device's daemon answers at the port, but no state here leads to it.
+  const desk = await devices.device("desk");
+  const third = await devices.cli(desk, ["up", "--bind", "127.0.0.1", "--port", port, "--state", desk.state]);
+  assert.equal(third.code, 1, third.output);
+  assert.ok(third.stderr.includes(`Port ${port} on 127.0.0.1 is in use by another cns daemon,`), third.stderr);
+  assert.match(third.stderr, /--port PORT\.$/m);
+});
+
+test("a port this user may not take says why and what to run instead", async () => {
+  const denied = Object.assign(new Error("permission denied 127.0.0.1:80"), { code: "EACCES" });
+  assert.equal(await listenFailure(denied, { bind: "127.0.0.1", port: 80, state: path.join(os.homedir(), ".cns", "daemon.json"), service: false }),
+    "Cannot listen on port 80 on 127.0.0.1: ports below 1024 need extra rights. Start cns on another port: cns up --bind 127.0.0.1 --port PORT.");
+  assert.equal(await listenFailure(denied, { bind: "0.0.0.0", port: 80, state: "/elsewhere/daemon.json", service: true }),
+    "Cannot listen on port 80 on 0.0.0.0: ports below 1024 need extra rights. Start cns on another port: cns up --install --port PORT.");
+  assert.equal(await listenFailure(new Error("unrelated"), { bind: "0.0.0.0", port: 80, state: "/elsewhere/daemon.json", service: false }), undefined);
+});
+
+test("a daemon's log ending is its last lines, printable and short", async (t) => {
+  const log = `${await temporaryState(t)}.log`;
+  assert.equal(await logEnding(log), "", "a log that cannot be read leaves nothing out");
+  await writeFile(log, `first\nsecond\r\n\nthird \u001b[31mred\u001b[0m‮\nfourth\n\n`);
+  assert.equal(await logEnding(log), "second\nthird ?[31mred?[0m?\nfourth");
+  await writeFile(log, `${"x".repeat(3000)}\n${"y".repeat(600)}\n`);
+  assert.equal(await logEnding(log), `...${"y".repeat(500)}`);
 });
 
 test("concurrent daemon starts cannot replace the winner's state", { skip: process.platform === "win32", timeout: 20000 }, async (t) => {
