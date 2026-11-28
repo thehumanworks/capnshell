@@ -78,6 +78,18 @@ async function readState(file: string): Promise<DaemonState> {
   }
 }
 
+/**
+ * What a failure to read daemon state says about its removal: "gone" once the file no longer
+ * exists, "going" while Windows still holds it for deletion, undefined for any other failure.
+ * Windows keeps a removed file "delete pending" until every handle to it closes, and opening it
+ * meanwhile fails with EPERM instead of ENOENT.
+ */
+export function stateRemoval(error: unknown, platform: NodeJS.Platform = process.platform): "gone" | "going" | undefined {
+  const code = error instanceof Error && "code" in error ? error.code : undefined;
+  if (code === "ENOENT") return "gone";
+  return code === "EPERM" && platform === "win32" ? "going" : undefined;
+}
+
 export async function removeOwnedState(file: string, token: string): Promise<void> {
   try {
     if ((await readState(file)).token === token) await unlink(file);
@@ -314,8 +326,10 @@ export async function stopDaemon(statePath?: string): Promise<number> {
     try {
       if ((await readState(file)).token !== state.token) break;
     } catch (error) {
-      if (error instanceof Error && "code" in error && error.code === "ENOENT") break;
-      throw error;
+      const removal = stateRemoval(error);
+      if (removal === "gone") break;
+      // Windows still holds the removed file for deletion: wait until it is gone.
+      if (removal !== "going") throw error;
     }
     await new Promise((resolve) => setTimeout(resolve, 25));
   }

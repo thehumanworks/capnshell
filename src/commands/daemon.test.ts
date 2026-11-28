@@ -14,7 +14,7 @@ import { ShellApi, type ExecSink, type PtyExit } from "../shell.js";
 import { cliInvocation, launchCli as launch, LOOPBACK, settledLink, testDevices } from "../test-support.js";
 import { plain } from "../terminal.js";
 import type { PeerController } from "../console.js";
-import { connectControl, removeStaleState, startDaemon, stateSchema } from "./daemon.js";
+import { connectControl, removeStaleState, startDaemon, stateRemoval, stateSchema, stopDaemon } from "./daemon.js";
 import { serveControl } from "./daemon-server.js";
 
 async function temporaryState(t: TestContext): Promise<string> {
@@ -243,6 +243,48 @@ test("control cleanup never removes another daemon's state", async (t) => {
   await writeFile(statePath, JSON.stringify(replacement));
   await cleanup();
   assert.equal(JSON.parse(await readFile(statePath, "utf8")).token, replacement.token);
+});
+
+test("a failure to read state tells a removed file, and on Windows one still being removed, from any other", () => {
+  const failure = (code: string) => Object.assign(new Error(code), { code });
+  for (const platform of ["win32", "linux", "darwin"] as const) assert.equal(stateRemoval(failure("ENOENT"), platform), "gone", platform);
+  assert.equal(stateRemoval(failure("EPERM"), "win32"), "going");
+  for (const platform of ["linux", "darwin"] as const) assert.equal(stateRemoval(failure("EPERM"), platform), undefined, platform);
+  for (const error of [failure("EACCES"), failure("ELOOP"), new SyntaxError("Unexpected token"), "EPERM"]) assert.equal(stateRemoval(error, "win32"), undefined, String(error));
+});
+
+/**
+ * Stop a daemon whose state, once it is asked to stop, opens with EPERM three times, as a file
+ * Windows holds for deletion does, and is then gone; as if on `platform`.
+ */
+async function stopDeletePending(t: TestContext, platform: NodeJS.Platform) {
+  const statePath = await temporaryState(t);
+  let stopping = false;
+  t.after(await serveControl(emptyController, () => { stopping = true; }, statePath));
+  let pending = 3;
+  const originalOpen = fs.open;
+  const spy = spyOn(fs, "open").mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+    if (stopping && args[0] === statePath) {
+      if (pending-- > 0) throw Object.assign(new Error(`EPERM: operation not permitted, open '${statePath}'`), { code: "EPERM" });
+      await rm(statePath, { force: true });
+    }
+    return originalOpen(...args);
+  });
+  const actual = process.platform;
+  Object.defineProperty(process, "platform", { value: platform });
+  try { return { pid: await stopDaemon(statePath), pending }; }
+  finally {
+    Object.defineProperty(process, "platform", { value: actual });
+    spy.mockRestore();
+  }
+}
+
+test("stop waits while Windows still holds the removed state file for deletion", async (t) => {
+  assert.deepEqual(await stopDeletePending(t, "win32"), { pid: process.pid, pending: -1 });
+});
+
+test("stop still fails on EPERM reading state off Windows", { skip: process.platform === "win32" }, async (t) => {
+  await assert.rejects(() => stopDeletePending(t, process.platform), { code: "EPERM" });
 });
 
 test("cns up, status, attach and stop use local control independently of the peer bind", async (t) => {
