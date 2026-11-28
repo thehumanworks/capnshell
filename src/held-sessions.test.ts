@@ -9,7 +9,7 @@ import manifest from "../package.json" with { type: "json" };
 import { RpcTarget } from "capnweb";
 import { processExited } from "./commands/daemon.js";
 import { connectHolder, daemonSessions, HeldSessions, HOLDERS, keepsSessions, socketsTooLong, startHolder } from "./held-sessions.js";
-import { HOLDER_CAPNWEB, HOLDER_PROTOCOL, holderRecordSchema, type HolderRecord } from "./holder.js";
+import { HOLDER_CAPNWEB, HOLDER_PROTOCOL, holderRecordSchema, holderSocket, type HolderRecord } from "./holder.js";
 import { HandleScope, type PtyExit } from "./pty.js";
 import { OutputSink } from "./terminal.js";
 import { childOfThisProcess, PROJECT_ROOT, TEST_TMP } from "./test-support.js";
@@ -25,11 +25,14 @@ test("holder protocol 1 is pinned to the Cap'n Web release it was defined with",
 
 test("holders run only where their sockets' paths fit: 103 bytes on macOS, 107 on Linux", () => {
   const limit = process.platform === "darwin" ? 103 : 107;
-  // A socket is the directory, a slash, 16 hex digits and .sock.
+  // A socket is the directory, a separator, 16 hex digits and .sock, joined as the platform joins paths.
   const fits = `/${"d".repeat(limit - 23)}`;
+  const example = (dir: string) => holderSocket(dir, "0".repeat(16));
+  assert.equal(Buffer.byteLength(example(fits)), limit);
   assert.equal(socketsTooLong(fits), undefined);
+  assert.equal(Buffer.byteLength(example(`${fits}x`)), limit + 1);
   assert.equal(socketsTooLong(`${fits}x`),
-    `Named sessions run in this daemon and end when it stops or restarts: a socket of theirs, such as ${fits}x/0000000000000000.sock, ` +
+    `Named sessions run in this daemon and end when it stops or restarts: a socket of theirs, such as ${example(`${fits}x`)}, ` +
     `would be ${limit + 1} bytes long, over the ${limit} this system allows. A shorter --state path lets them outlive the daemon.`);
   // Bytes, not characters.
   assert.match(socketsTooLong(`/${"é".repeat(60)}`) ?? "", /would be 143 bytes long/);
