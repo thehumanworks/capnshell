@@ -28,7 +28,7 @@ import { selfInvocation, selfPath } from "../runtime.js";
 import { behindHint, CNS_VERSION, daemonDrift, describeVersion, reportedVersion, restartAdvice, sessionsHint, versionOrder } from "../version.js";
 import { holderDirectory, HOLDERS, socketsTooLong } from "../held-sessions.js";
 import { knownLatestRelease } from "../releases.js";
-import { describeService, installService, installedService, installedServiceRuns, lingering, registeredTask, runTask, startInstalledService, serviceEnvironment, serviceFailed, serviceFile, serviceKind, serviceLog, serviceName, serviceOverrides, SETTING_VARIABLES, startService, taskName, uninstallService, type ServiceKind } from "../service.js";
+import { describeService, installService, installedService, installedServiceRuns, lingering, registeredTask, runTask, startInstalledService, serviceEnvironment, serviceFailed, serviceFile, serviceKind, serviceLog, serviceName, serviceOverrides, SETTING_VARIABLES, startService, TaskGone, taskGone, taskName, uninstallService, type ServiceKind } from "../service.js";
 import { windowsUserSid } from "../config.js";
 
 /** How long the invited device waits for the inviting person to decide. */
@@ -304,11 +304,14 @@ async function keepHandlesHere(): Promise<void> {
 /**
  * The daemon, started through the scheduled task; undefined if the task does not start it, and the
  * caller starts it detached: a restart or install from another device must not leave this one without a daemon.
+ * Throws TaskGone instead once the task is gone, as after cns up --uninstall.
  */
 async function startTask(state: string): Promise<ControlConnection | undefined> {
   let failure = "no daemon answered within 15 seconds";
   try { if (await runTask(state)) return await awaitControl(state); }
   catch (error) { failure = errorMessage(error); }
+  const gone = taskGone(failure);
+  if (gone) throw gone;
   console.error(`The scheduled task did not start the daemon (${failure}); starting it without the task. See ${serviceLog("schtasks", state)}.`);
   return undefined;
 }
@@ -341,6 +344,8 @@ async function restartNow(statePath: string | undefined, delayMs: number, reload
     if (service === "schtasks") detached = !(started = await startTask(state));
     else if (service) await startInstalledService(service, installed!.path, reload, { log: console.error });
   } catch (error) {
+    // Uninstalled while this restart ran: cns up --uninstall stops the daemon and says so, so it stays stopped.
+    if (error instanceof TaskGone) throw new Error(`${error.message} The daemon stays stopped; cns up starts it without the task.`, { cause: error });
     // Stopped here, so nothing else starts it: start it without the service rather than leave the device without a daemon.
     if (!plan.stop) throw error;
     console.error(`The ${serviceName(service!)} did not start the daemon (${errorMessage(error)}); starting it without the service.`);
@@ -489,17 +494,28 @@ async function uninstall(options: UpOptions): Promise<void> {
   const state = task && (task.state ?? daemonStatePath(options.state));
   if (!(await uninstallService(kind))) { console.log(`No ${serviceName(kind)} is installed.`); return; }
   if (state && await serviceDaemonAt(state)) {
-    try { await stopDaemon(state); } catch (error) { console.error(`Stopping the daemon: ${errorMessage(error)}`); }
+    let pid: number | undefined;
+    try { ({ pid } = await stopDaemon(state)); } catch (error) { console.error(`Stopping the daemon: ${errorMessage(error)}`); }
     if (await serviceDaemonAt(state)) throw new Error(`Removed the ${serviceName(kind)}, but its daemon still runs. Stop it with cns stop --state "${state}".`);
+    // Gone, not only stopping, before this says it is stopped.
+    if (pid !== undefined && !(await processExited(pid, 10_000))) throw new Error(`Removed the ${serviceName(kind)}, but its daemon (pid ${pid}) has not exited yet.`);
   }
+  // One the task did not start, as cns up starts one where the task cannot run, is left running.
+  const other = state ? await daemonAt(state) : undefined;
+  if (other) { console.log(`Removed the ${serviceName(kind)}. A daemon it did not start runs at ${state} (pid ${other.pid}); cns stop --state "${state}" stops it.`); return; }
   console.log(`Removed the ${serviceName(kind)}; the daemon is stopped. Run cns up to start it without the service.`);
+}
+
+/** What the daemon that answers at this state file says of itself; undefined when none answers. */
+async function daemonAt(state: string): Promise<DaemonStatus | undefined> {
+  let control: ControlConnection;
+  try { control = await connectControl(state); } catch { return undefined; }
+  try { return await control.remote.status(); } finally { control.close(); }
 }
 
 /** Whether a daemon that a service runs answers at this state file. */
 async function serviceDaemonAt(state: string): Promise<boolean> {
-  let control: ControlConnection;
-  try { control = await connectControl(state); } catch { return false; }
-  try { return (await control.remote.status()).service === true; } finally { control.close(); }
+  return (await daemonAt(state))?.service === true;
 }
 
 /**
