@@ -284,9 +284,6 @@ _cns() {
   local -a found
   found=(\${(f)"$(cns __complete zsh "\${(@Q)words[2,CURRENT-1]}" "\${(Q)PREFIX}" 2>/dev/null)"})
   (( $#found )) || { _files; return }
-  # As with files: the word up to its last / or : stays as typed, and only the rest is listed.
-  compset -P '*[/:]'
-  found=(\${found#\${(Q)IPREFIX}})
   compadd -S '' -- \${(M)found:#*[/:\\\\]}
   compadd -- \${found:#*[/:\\\\]}
 }
