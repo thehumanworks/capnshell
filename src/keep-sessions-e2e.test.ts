@@ -264,3 +264,28 @@ test("a daemon whose holders' socket paths would be too long keeps its named ses
   assert.ok(await processExited(work!.pid), "the session ended with the daemon");
   assert.ok(await processExited(daemon.pid), "and the daemon has exited");
 });
+
+// The daemon adopts its holders before it listens, so a port it cannot take fails a start that
+// already holds them: they must be let go, not ended, and the failure still says why.
+test("a daemon that adopted its sessions and then cannot take its port says why, and leaves them running for the next", { skip: !HOLDERS, timeout: 120000 }, async (t) => {
+  const { devices, studio, ok, work, holderPid } = await setUp(t);
+  const before = (await work())!;
+  const holder = await holderPid();
+  await ok(studio, ["stop", "--state", studio.state]);
+  // Something else takes the port while no daemon runs.
+  const other = net.createServer();
+  await new Promise<void>((resolve, reject) => { other.once("error", reject); other.listen(Number(studio.port), "127.0.0.1", resolve); });
+  const free = () => new Promise<void>((resolve) => { if (other.listening) other.close(() => resolve()); else resolve(); });
+  t.after(free);
+  const refused = await devices.cli(studio, ["up", "--bind", "127.0.0.1", "--port", studio.port!, "--state", studio.state]);
+  assert.equal(refused.code, 1, refused.output);
+  // The end of the daemon's log: it took the session back, let it go, and then could not listen.
+  assert.ok(refused.stderr.includes(`\nAdopted named sessions: work.\nNamed sessions keep running: work (holder pid ${holder}). cns stop --end-sessions ends them.\n` +
+    `Port ${studio.port} on 127.0.0.1 is in use. Stop what uses it, or start cns on another port:`), refused.stderr);
+  assert.ok(alive(holder), "the holder outlives the start that failed");
+  await free();
+  await devices.up(studio, studio.port);
+  const now = await work();
+  assert.deepEqual([now?.pid, now?.startedAt, now?.running], [before.pid, before.startedAt, true], "the next daemon takes the session back");
+  assert.equal(await holderPid(), holder);
+});
