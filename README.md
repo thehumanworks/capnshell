@@ -55,8 +55,22 @@ laptop $ cns shell studio
 | `mcp [DEVICE]` | Serve MCP tools on a paired device, or on the devices linked to the daemon. |
 | `attach` | Open a console for the local daemon. |
 | `stop` | Stop the local daemon and its sessions. |
+| `completion SHELL` | Print the tab completion script for `bash`, `zsh`, `fish` or `pwsh` (see [Tab completion](#tab-completion)). |
 
 Use `cns <command> --help` for options, and `cns --version` for the version of this cns. Every option has a one-letter form as well, such as `-s` for `--session` and `-D` for `--device`. A command that takes a device or a session name as an argument also takes it as an option, so `cns screen -D studio -s work` is `cns screen studio work`, and `cns ui -D studio -s work` is `cns ui studio/work`.
+
+### Tab completion
+
+`cns completion SHELL` prints a script that completes commands and options, paired devices, a device's named sessions, and the remote path of `cns cp DEVICE:PATH`. Load it once per shell:
+
+| Shell | Install |
+| --- | --- |
+| bash 3.2 or later | Add `eval "$(cns completion bash)"` to `~/.bashrc` (on macOS, `~/.bash_profile`). |
+| zsh | Add `source <(cns completion zsh)` to `~/.zshrc`, after `compinit`; or save it as `_cns` in a directory on `$fpath`. |
+| fish | `cns completion fish > ~/.config/fish/completions/cns.fish` |
+| PowerShell | Add `cns completion pwsh \| Out-String \| Invoke-Expression` to `$PROFILE`. It completes `cns` and `cns.exe`. Checked with PowerShell 7.4 on Linux, in its own argument passing and in the older one of Windows PowerShell 5.1 and PowerShell 7.2; not yet run on Windows. |
+
+Commands and options come from cns itself, so a newer cns completes its own. Device names are the devices saved here, less those removed with `cns peer remove`, and need no network. Session names (`cns screen studio <Tab>`, `--attach`, `--session`, `cns ui studio/<Tab>`) and remote paths (`cns cp studio:~/pro<Tab>`, one directory at a time, hidden entries once a `.` is typed, a link as a file) come from the device through the local daemon's link to it, as `cns sessions` and `cns cp` use it: they need `cns up` running here, and the `sessions` or `files` grant there. A device that does not answer within 300 ms, has no link, or does not grant it completes nothing; completion never dials a device, waits on the relay or starts a daemon. A word with no completion falls back to the shell's own completion of local files, so a local path that starts like a device's name completes as `./name`; in bash, a `DEVICE:PATH` with nothing to offer stays as typed, and in a word whose quote is not yet closed Tab offers nothing and only closes the quote (`'studio:My D` becomes `'studio:My D'`). Names from the device that hold control or formatting characters, line breaks or half of a UTF-16 pair, or are longer than 255, are left out, the rest are quoted for the shell, and at most 200 are offered. Paths on a Windows device keep the separator typed, or `/`.
 
 ## Device identity
 
