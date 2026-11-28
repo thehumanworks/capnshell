@@ -38,6 +38,45 @@ test("a refusal says which grant is missing and the command that adds it on the 
   expect(explainDenial("Permission denied: shell not granted to $(rm -rf ~).")).toBe("Permission denied: shell not granted to $(rm -rf ~).");
 });
 
+test("port words: one port each, never part of all, shown as ports, and refused where they would be sent", () => {
+  expect(expandGrants(["port:8080", "shell", "port:5432", "port:5432"], { ports: true })).toEqual(["shell", "port:5432", "port:8080"]);
+  expect(expandGrants(["all"], { ports: true }).some((grant) => grant.startsWith("port"))).toBe(false);
+  // Without ports, as for a pairing, a mesh, a bot token or the gateway, a port word is refused with where to give it.
+  expect(() => expandGrants(["shell", "port:5432"])).toThrow("port:5432 is given only on the device that has the port, to a device paired with it directly: cns peer grant NAME port:5432. A pairing, a mesh or a bot token cannot hold it, as a cns from before cns forward would refuse it whole; a mesh's members reach every port with shell.");
+  // One port per word: no range, no list in one word, no bare ports.
+  for (const bad of ["port:0", "port:65536", "port:05432", "port:", "port:22-80", "port:5432,8080", "ports", "ports:5432"]) expect(() => expandGrants([bad], { ports: true })).toThrow();
+  expect(describeGrants(["shell", "port:5432", "port:8080"])).toBe("shell, ports 5432, 8080");
+  expect(describeGrants(["port:22"])).toBe("port 22");
+  expect(grantWords(["files", "port:5432", "port:8080"])).toBe("files,port:5432,port:8080");
+  expect(grantWords([])).toBe("none");
+  expect(explainDenial("Permission denied: port:5432 not granted to laptop.", "studio"))
+    .toBe("Permission denied: port:5432 not granted to laptop. To allow it, run on studio: cns peer grant laptop port:5432");
+});
+
+test.skipIf(process.platform === "win32")("a record that holds a port word needs ports, and one that no longer does needs nothing", () => {
+  const studio = generateIdentity();
+  savePairedPeer("studio", { publicKey: studio.publicKey, addresses: [], pairedAt: PAIRED_AT, grants: { incoming: ["files", "port:5432"], outgoing: [] } });
+  expect(JSON.parse(readRecord("studio")).needs).toEqual(["ports"]);
+  expect(getPeer("studio")?.grants.incoming).toEqual(["files", "port:5432"]);
+  // Held in either direction.
+  updatePairedPeer("studio", (peer) => ({ ...peer, grants: { incoming: ["files"], outgoing: ["port:22"] } }));
+  expect(JSON.parse(readRecord("studio")).needs).toEqual(["ports"]);
+  expect(getPeer("studio")?.grants.outgoing).toEqual(["port:22"]);
+  updatePairedPeer("studio", (peer) => ({ ...peer, grants: { incoming: ["files"], outgoing: [] } }));
+  expect(JSON.parse(readRecord("studio")).needs).toBeUndefined();
+  // A port word that is not one is refused, never dropped.
+  writeRecord("studio", { ...JSON.parse(readRecord("studio")), needs: ["ports"], grants: { incoming: ["port:99999"], outgoing: [] } });
+  expect(() => getPeer("studio")).toThrow("not a valid paired-device record");
+
+  // A mesh gives no single port: a member denied one is told to pair directly first, the narrower way, or to allow shell there.
+  savePairedPeer("desk", { publicKey: generateIdentity().publicKey, addresses: [], pairedAt: PAIRED_AT, grants: { incoming: [], outgoing: ["files"] }, mesh: "home" });
+  expect(explainDenial("Permission denied: port:5432 not granted to laptop.", "desk")).toBe("Permission denied: port:5432 not granted to laptop. desk gives members of the mesh home no single port. " +
+    "To allow it, pair the two devices directly and run on desk: cns peer grant laptop port:5432; or run on desk: cns mesh allow home shell,files, which reaches every port");
+  // Without a port, a member is told to widen what the mesh allows, as before.
+  expect(explainDenial("Permission denied: shell not granted to laptop.", "desk")).toBe("Permission denied: shell not granted to laptop. desk gives members of the mesh home what cns mesh allow set there. " +
+    "To allow it, run on desk: cns mesh allow home shell,files");
+});
+
 test.skipIf(process.platform === "win32")("paired devices are saved under a name and keyed by identity", () => {
   const studio = generateIdentity();
   savePairedPeer("studio", { publicKey: studio.publicKey, addresses: ["ws://192.168.1.10:47381"], pairedAt: new Date().toISOString(), grants: { incoming: ["shell"], outgoing: expandGrants(["all"]) } });
@@ -205,7 +244,7 @@ test("every field of a record says what a cns that does not know it does with it
       case "array": return objects(def.element!, at);
       case "union": return def.options!.flatMap((option) => objects(option, at));
       case "pipe": return [...objects(def.in!, at), ...objects(def.out!, at)];
-      case "string": case "literal": case "enum": case "number": case "boolean": return [];
+      case "string": case "literal": case "enum": case "number": case "boolean": case "custom": return [];
       default: throw new Error(`${at} is a ${def.type} schema; teach this test to look inside it.`);
     }
   };

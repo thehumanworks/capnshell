@@ -6,7 +6,7 @@ import { errorMessage, printable } from "../errors.js";
 import { setModified, type FileChunk, type FileKind } from "../files.js";
 import { failure, LIST_TIMEOUT_MS } from "../fleet-sessions.js";
 import { ensureIdentity, type Identity } from "../identity.js";
-import { explainDenial, reachablePeers, resolvePeer, type Permission } from "../peers.js";
+import { explainDenial, reachablePeers, resolvePeer, type Grant } from "../peers.js";
 import { secureReady } from "../secure.js";
 import type { ShellApi } from "../shell.js";
 import {
@@ -73,7 +73,7 @@ function remoteHost(device: string, remote: RpcStub<ShellApi>): Host {
 }
 
 /** Whether a device's saved grants let this one read its skills: `skills`, or `files`, which covers them. */
-const mayRead = (outgoing: readonly Permission[]) => outgoing.includes("skills") || outgoing.includes("files");
+const mayRead = (outgoing: readonly Grant[]) => outgoing.includes("skills") || outgoing.includes("files");
 
 /** The links this command opened, closed together when it ends. */
 class Links {

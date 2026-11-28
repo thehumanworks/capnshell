@@ -7,7 +7,7 @@ import { meshFiles, peerNamePattern } from "../peer-files.js";
 import { DEFAULT_INVITE_MS, MAX_INVITE_MS, suggestedName } from "../pairing.js";
 import { botTokenForCode, hostCode, MAX_WRONG_CODES, PairingCodeError, parseCode } from "../pairing-code.js";
 import { builtInRelay } from "../relay-config.js";
-import { describeGrants, expandGrants, getPeer, listPeers, resolvePeer, revokedDevices, savePairedPeer, type Permission } from "../peers.js";
+import { describeGrants, expandGrants, getPeer, listPeers, permissionsOf, resolvePeer, revokedDevices, savePairedPeer, type Permission } from "../peers.js";
 import { heldSecrets } from "../secrets.js";
 import { connectDevice } from "./connect-device.js";
 import { connectControl } from "./daemon.js";
@@ -18,8 +18,13 @@ interface StateOption { state?: string }
 /** How long cns mesh join waits for the admin to answer. */
 const JOIN_MS = 30_000;
 
-const grantsFrom = (words: readonly string[] | string | undefined): Permission[] =>
-  expandGrants((Array.isArray(words) ? words : words === undefined ? [] : [words]).flatMap((word) => word.split(",")).map((word) => word.trim()).filter(Boolean));
+const wordsOf = (words: readonly string[] | string | undefined): string[] =>
+  (Array.isArray(words) ? words : words === undefined ? [] : [words]).flatMap((word) => word.split(",")).map((word) => word.trim()).filter(Boolean);
+/**
+ * Grants for a mesh: a member list, a bot token, or what members may use here. None holds a port
+ * word, which a member's older cns could not read: a port is granted on a direct pairing.
+ */
+const grantsFrom = (words: readonly string[] | string | undefined): Permission[] => expandGrants(wordsOf(words));
 
 function requireMesh(name: string): MeshState {
   const state = readMesh(name);
@@ -89,7 +94,7 @@ export async function addMembers(name: string, devices: string[], options: State
     const entry = getPeer(device);
     if (!entry) throw new Error(`No paired device is saved as ${device}. Pair with it first: cns pair.`);
     if (entry.mesh !== undefined) throw new Error(`${device} is here as a member of the mesh ${entry.mesh}. A mesh takes only devices paired with its admin directly, which they join through.`);
-    if (options.gateway) return { key: entry.publicKey, name: device, limit: limit ?? entry.grants.incoming, gateway: true };
+    if (options.gateway) return { key: entry.publicKey, name: device, limit: limit ?? permissionsOf(entry.grants.incoming), gateway: true };
     // The gateway has no address and lets this device use nothing; as a plain member, members would dial it and share secrets with it.
     if (!entry.addresses.length && !entry.grants.outgoing.length) console.error(`${device} has no address and lets this device use nothing, as the cns gateway does. If it is the gateway, add it with --gateway instead.`);
     return { key: entry.publicKey, name: device, ...entry.addresses.length ? { addresses: entry.addresses } : {}, ...limit ? { limit } : {} };
@@ -255,10 +260,10 @@ export async function removeMembers(name: string, devices: string[], options: St
 export async function joinMesh(name: string | undefined, options: StateOption & { via?: string; allow?: string; code?: string[] }): Promise<void> {
   if (options.code !== undefined) { await joinByCode(name, { ...options, code: options.code }); return; }
   if (name === undefined || options.via === undefined) throw new Error("Say which mesh and its admin: cns mesh join NAME --via DEVICE. For a code from cns mesh token --code: cns mesh join --code CODE.");
+  const allow = grantsFrom(options.allow);
   checkRoom(name);
   const expect = resolvePeer(options.via);
   if (getPeer(options.via)?.mesh !== undefined) throw new Error(`${options.via} is here as a mesh member. Join through the mesh's admin, a device paired with this one directly.`);
-  const allow = grantsFrom(options.allow);
   const { identity } = ensureIdentity();
   const connection = await connectDevice(expect, AbortSignal.timeout(JOIN_MS));
   let answer: unknown;
@@ -315,10 +320,10 @@ async function joinByCode(name: string | undefined, options: { via?: string; all
 
 /** `cns mesh allow NAME GRANTS...`: what every member of the mesh may use on this device. */
 export async function allowMembers(name: string, words: string[], options: StateOption): Promise<void> {
+  const allow = grantsFrom(words);
   const { identity } = ensureIdentity();
   const state = requireMesh(name);
   if (state.admin === identity.publicKey) throw new Error(`This device runs the mesh ${name}, so members reach it through their pairings with it: cns peer grant DEVICE GRANTS changes what each may use.`);
-  const allow = grantsFrom(words);
   writeMesh({ ...state, allow });
   await settle(options, identity.publicKey);
   console.log(`Members of the mesh ${name} may use here: ${describeGrants(allow)}.`);

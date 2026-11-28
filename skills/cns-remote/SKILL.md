@@ -1,6 +1,6 @@
 ---
 name: cns-remote
-description: Run commands, copy files and drive terminal programs on the user's other devices with cns (cns run, cns cp, cns shell -d, cns screen, cns keys). Use when a task needs another machine, such as building or testing on another OS, reading a server's logs or using a GPU box, or when the user names one of their devices.
+description: Run commands, copy files, reach ports and drive terminal programs on the user's other devices with cns (cns run, cns cp, cns forward, cns shell -d, cns screen, cns keys). Use when a task needs another machine, such as building or testing on another OS, reading a server's logs or using a GPU box, or when the user names one of their devices.
 ---
 
 # Working on another device with cns
@@ -16,7 +16,7 @@ cns doctor studio       # each address: ok (hostname, linux/Bash, cns 2.2.0, enc
 ```
 
 `ACCESS` is what this device may use there: `shell` (commands), `files` (cp, file tools),
-`sessions` (named terminals), `skills`. `cns doctor DEVICE` shows the device's OS and shell.
+`sessions` (named terminals), `skills`, `ports 5432, 8080` (cns forward to those ports only). `cns doctor DEVICE` shows the device's OS and shell.
 Commands use that shell's syntax: Bash on Linux and macOS, Windows PowerShell on Windows.
 
 ## One command: cns run
@@ -46,6 +46,26 @@ cns cp -r studio:~/photos nas:~/backup/   # device to device, through this one
 
 `cp` needs the `files` grant on each device it uses. A destination that is a directory, or
 ends in `/`, gets the source under its own name. Existing files are overwritten.
+
+## A port on the device: cns forward
+
+To reach a database, dev server or web UI that listens only on localhost on the device:
+
+```sh
+cns forward studio 5432                  # 127.0.0.1:5432 here is localhost:5432 on studio
+cns forward studio 3000 --local 13000    # another port here when 3000 is taken
+```
+
+- It runs until stopped, so run it as a background process, and wait for its stderr line
+  `cns: forwarding 127.0.0.1:5432 to localhost:5432 on studio, via ...` before connecting,
+  such as with `psql -h 127.0.0.1 -p 5432`. Stop it when the task is done: it listens on
+  127.0.0.1 only, but every program on this device can use the port meanwhile.
+- It needs `shell` or that port's grant (`port:5432`) on the device. It exits 4 when it may
+  not reach the port, with the command to run there, and 3 when the device no longer accepts
+  this one. `Port 5432 is in use on this device` gives a `--local` to use instead. A device
+  that runs a cns from before cns forward is named with `cns upgrade DEVICE`.
+- A dropped link closes the open connections; cns forward reconnects on its own and says so.
+  Connect again rather than restarting it.
 
 ## State that persists: a shell that stays
 

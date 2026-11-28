@@ -20,29 +20,64 @@ import { CNS_VERSION } from "./version.js";
  */
 export const PERMISSIONS = ["shell", "files", "skills", "sessions:list", "sessions:create", "sessions:view", "sessions:control", "sessions:kill"] as const;
 export type Permission = typeof PERMISSIONS[number];
+/**
+ * A port word, such as `port:5432`: cns forward may reach that one port on localhost here, as
+ * `shell` may reach every port (docs/adr/0011-port-forwarding.md). It is never part of `all`,
+ * and never sent where a cns from before it would refuse the whole proposal or list: a pairing,
+ * anything of a mesh, a bot token (expandGrants refuses it there). Only a direct pairing's record
+ * holds one, which then needs `ports`.
+ */
+export type PortGrant = `port:${number}`;
+/** What a device may hold here: permissions and port words. */
+export type Grant = Permission | PortGrant;
 export const PRESETS: Record<"shell" | "files" | "sessions" | "all", readonly Permission[]> = {
   shell: ["shell"],
   files: ["files"],
   sessions: ["sessions:list", "sessions:create", "sessions:view", "sessions:control", "sessions:kill"],
   all: PERMISSIONS.filter((permission) => permission !== "skills"),
 };
+/** Port words one device may hold here. */
+export const MAX_PORT_GRANTS = 64;
 const permissionSchema = z.enum(PERMISSIONS);
+/** The port a port word names, or undefined for any other word. */
+export function grantedPort(word: string): number | undefined {
+  const port = Number(/^port:([1-9][0-9]{0,4})$/.exec(word)?.[1]);
+  return port <= 65535 ? port : undefined;
+}
+/** The ports among `grants`, in order. */
+export const grantedPorts = (grants: readonly string[]): number[] => grants.flatMap((word) => grantedPort(word) ?? []);
+/** `grants` without its port words. */
+export const permissionsOf = (grants: readonly Grant[]): Permission[] => grants.filter((grant): grant is Permission => grantedPort(grant) === undefined);
+const portGrantSchema = z.custom<PortGrant>((word) => typeof word === "string" && grantedPort(word) !== undefined, "A port word is port:N, with N from 1 to 65535.");
+/** Permissions as every cns reads them, as pairings, member lists and bot tokens carry them: never a port word. */
 export const grantsSchema = z.array(permissionSchema).max(PERMISSIONS.length);
+/** What a record holds, and what a device says it grants: permissions and port words. */
+export const heldGrantsSchema = z.array(z.union([permissionSchema, portGrantSchema])).max(PERMISSIONS.length + MAX_PORT_GRANTS);
 
-/** Expand presets and permissions, such as ["shell", "sessions"], into a canonical permission list; "none" adds nothing. */
-export function expandGrants(words: readonly string[]): Permission[] {
+/**
+ * Expand presets, permissions and, with `ports`, port words, such as ["shell", "sessions"], into a
+ * canonical list: permissions in PERMISSIONS order, then ports in order; "none" adds nothing.
+ */
+export function expandGrants(words: readonly string[], options?: { ports?: false }): Permission[];
+export function expandGrants(words: readonly string[], options: { ports: true }): Grant[];
+export function expandGrants(words: readonly string[], { ports = false }: { ports?: boolean } = {}): Grant[] {
   const set = new Set<Permission>();
+  const numbers = new Set<number>();
   for (const word of words) {
+    const port = grantedPort(word);
     if (word === "none") continue;
-    if (word in PRESETS) for (const permission of PRESETS[word as keyof typeof PRESETS]) set.add(permission);
+    if (port !== undefined) {
+      if (!ports) throw new Error(`${word} is given only on the device that has the port, to a device paired with it directly: cns peer grant NAME ${word}. A pairing, a mesh or a bot token cannot hold it, as a cns from before cns forward would refuse it whole; a mesh's members reach every port with shell.`);
+      numbers.add(port);
+    } else if (word in PRESETS) for (const permission of PRESETS[word as keyof typeof PRESETS]) set.add(permission);
     else set.add(permissionSchema.parse(word));
   }
-  return PERMISSIONS.filter((permission) => set.has(permission));
+  if (numbers.size > MAX_PORT_GRANTS) throw new Error(`A device holds at most ${MAX_PORT_GRANTS} port words.`);
+  return [...PERMISSIONS.filter((permission) => set.has(permission)), ...[...numbers].sort((a, b) => a - b).map((port): PortGrant => `port:${port}`)];
 }
 
-/** Permissions as people read them: presets where a whole group is present. */
-export function describeGrants(grants: readonly Permission[]): string {
-  if (!grants.length) return "none";
+/** Presets where a whole group is present, then the other permissions. */
+function presetWords(grants: readonly Grant[]): string[] {
   const words: string[] = [];
   const rest = new Set(grants);
   for (const preset of ["shell", "files", "sessions"] as const) {
@@ -51,15 +86,22 @@ export function describeGrants(grants: readonly Permission[]): string {
       for (const permission of PRESETS[preset]) rest.delete(permission);
     }
   }
-  return [...words, ...PERMISSIONS.filter((permission) => rest.has(permission))].join(", ");
+  return [...words, ...PERMISSIONS.filter((permission) => rest.has(permission))];
 }
 
-/** The words `cns peer grant` takes for these permissions, comma-separated: presets where a whole group is present. */
-export function grantWords(grants: readonly Permission[]): string {
-  return describeGrants(grants).replaceAll(", ", ",");
+/** Grants as people read them: presets where a whole group is present, and port words as "ports 5432, 8080". */
+export function describeGrants(grants: readonly Grant[]): string {
+  const ports = grantedPorts(grants);
+  const words = [...presetWords(grants), ...ports.length ? [`${ports.length === 1 ? "port" : "ports"} ${ports.join(", ")}`] : []];
+  return words.length ? words.join(", ") : "none";
 }
 
-const DENIAL = /^Permission denied: ((?:[a-z:]+)(?:, [a-z:]+)*) not granted to ([A-Za-z0-9][A-Za-z0-9_-]{0,63})\.$/;
+/** The words `cns peer grant` takes for these grants, comma-separated: presets where a whole group is present. */
+export function grantWords(grants: readonly Grant[]): string {
+  return [...presetWords(grants), ...grantedPorts(grants).map((port) => `port:${port}`)].join(",") || "none";
+}
+
+const DENIAL = /^Permission denied: ((?:[a-z0-9:]+)(?:, [a-z0-9:]+)*) not granted to ([A-Za-z0-9][A-Za-z0-9_-]{0,63})\.$/;
 
 /**
  * A refusal from a paired device, with what to do about it: the grant that is missing and
@@ -67,17 +109,29 @@ const DENIAL = /^Permission denied: ((?:[a-z:]+)(?:, [a-z:]+)*) not granted to (
  * `device` is this device's name for the other one; other messages come back unchanged.
  */
 export function explainDenial(message: string, device?: string): string {
+  const hint = allowHint(message, device);
+  return hint ? `${message} ${hint}` : message;
+}
+
+/** What explainDenial adds to a refusal: the command that allows it, or undefined for another message. */
+export function allowHint(message: string, device?: string): string | undefined {
   const match = DENIAL.exec(message);
-  if (!match) return message;
-  let missing: Permission[];
-  try { missing = expandGrants(match[1]!.split(", ")); } catch { return message; }
-  if (!missing.length) return message;
+  if (!match) return undefined;
+  let missing: Grant[];
+  try { missing = expandGrants(match[1]!.split(", "), { ports: true }); } catch { return undefined; }
+  if (!missing.length) return undefined;
   const where = device ? `on ${device}` : "on the other device";
   // A mesh member gets what the device lets every member of the mesh use, so that is what to widen there.
   let entry: PeerEntry | undefined;
   try { entry = device ? getPeer(device) : undefined; } catch { entry = undefined; }
-  if (entry?.mesh) return `${message} ${device} gives members of the mesh ${entry.mesh} what cns mesh allow set there. To allow it, run ${where}: cns mesh allow ${entry.mesh} ${grantWords(expandGrants([...entry.grants.outgoing, ...missing]))}`;
-  return `${message} To allow it, run ${where}: cns peer grant ${match[2]} ${grantWords(missing)}`;
+  if (entry?.mesh) {
+    const ports = missing.some((grant) => grantedPort(grant) !== undefined);
+    const widened = grantWords(expandGrants([...permissionsOf(entry.grants.outgoing), ...permissionsOf(missing), ...ports ? ["shell"] : []]));
+    // A mesh gives no single port. The narrower way first: a direct pairing gets the port's word; else shell reaches every port.
+    if (ports) return `${device} gives members of the mesh ${entry.mesh} no single port. To allow it, pair the two devices directly and run ${where}: cns peer grant ${match[2]} ${grantWords(missing)}; or run ${where}: cns mesh allow ${entry.mesh} ${widened}, which reaches every port`;
+    return `${device} gives members of the mesh ${entry.mesh} what cns mesh allow set there. To allow it, run ${where}: cns mesh allow ${entry.mesh} ${widened}`;
+  }
+  return `To allow it, run ${where}: cns peer grant ${match[2]} ${grantWords(missing)}`;
 }
 
 /**
@@ -85,12 +139,14 @@ export function explainDenial(message: string, device?: string): string {
  * do, such as an expiry on its grants, belongs to a feature, and a record that holds it
  * names the feature in `needs`. A cns refuses a record that needs a feature it does not
  * know, rather than ignore the field and let the device do more than it should; any other
- * field it does not know, at the top or in `grants`, it ignores. None yet: a feature is
- * named here and its fields marked with it in PEER_FIELDS, and recordText then lists it in
- * `needs` of every record that holds one of them. PEER_FIELDS has the rules a new field
- * keeps.
+ * field it does not know, at the top or in `grants`, it ignores. A feature is named here and
+ * its fields marked with it in PEER_FIELDS, and recordText then lists it in `needs` of every
+ * record that holds one of them. PEER_FIELDS has the rules a new field keeps.
+ * - `ports`: a port word (PortGrant) in either list of `grants`. These are base fields, so
+ *   neededFeatures looks at their values; a cns from before ports could not read them anyway,
+ *   and with `needs` it says why it leaves the device out.
  */
-const FEATURES = [] as const;
+const FEATURES = ["ports"] as const;
 type Feature = typeof FEATURES[number];
 const knownFeatures: ReadonlySet<string> = new Set<string>(FEATURES);
 
@@ -135,7 +191,7 @@ export const pairedPeerSchema = z.object({
   /** Where this device has reached the peer; tried in order. */
   addresses: z.array(addressSchema).max(16),
   pairedAt: z.iso.datetime(),
-  grants: z.object({ incoming: grantsSchema, outgoing: grantsSchema }),
+  grants: z.object({ incoming: heldGrantsSchema, outgoing: heldGrantsSchema }),
   /**
    * Set when the device is here because it is a member of this mesh (mesh.ts), not because
    * it paired with this one: the mesh's member list keeps the record and its incoming grants.
@@ -192,7 +248,8 @@ function entryFor(name: string, content: string): PeerEntry {
 function neededFeatures(record: PairedPeer): Feature[] {
   const used = (fields: Record<string, FieldKind>, value: object) => Object.entries(fields)
     .flatMap(([key, kind]) => kind === "base" || kind === "informational" || (value as Record<string, unknown>)[key] === undefined ? [] : [kind]);
-  return [...new Set([...used(PEER_FIELDS.record, record), ...used(PEER_FIELDS.grants, record.grants)])].sort();
+  const ports: Feature[] = grantedPorts([...record.grants.incoming, ...record.grants.outgoing]).length ? ["ports"] : [];
+  return [...new Set([...used(PEER_FIELDS.record, record), ...used(PEER_FIELDS.grants, record.grants), ...ports])].sort();
 }
 
 /**
@@ -347,7 +404,7 @@ export function reachablePeers(report?: (name: string, error: unknown) => void):
 }
 
 /** The paired device a command names: the identity to expect and every address to try. */
-export function resolvePeer(name: string): { name: string; publicKey: PublicKey; outgoing: Permission[]; addresses: string[] } {
+export function resolvePeer(name: string): { name: string; publicKey: PublicKey; outgoing: Grant[]; addresses: string[] } {
   const entry = getPeer(name);
   if (!entry) throw new Error(`No paired device is saved as ${name}. Pair with it first: cns pair. cns peers lists the paired devices.`);
   refuseRemoved(entry);

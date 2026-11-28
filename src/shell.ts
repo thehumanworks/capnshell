@@ -8,6 +8,7 @@ import {
   type AccessOptions, type GlobOptions, type ReadFileOptions, type WriteAtOptions,
 } from "./files.js";
 import { listSkillFiles, listSkills, readSkillFile } from "./skills.js";
+import { PortForward, portSchema } from "./forward.js";
 import { bash, commandSchema, optionsSchema, powershell, powershellArgs, type RunOptions } from "./platform.js";
 import {
   HandleScope, MAX_PTYS, openUnnamedPty, ptyOptionsSchema, PtyRegistry,
@@ -106,6 +107,7 @@ export class ShellApi<H extends SessionHost = PtyRegistry> extends RpcTarget {
   #children = new Set<ChildProcess>();
   #ptys = new Set<PtySession>();
   #forks = new Set<ShellApi<H>>();
+  #forwards = new Set<PortForward>();
   /** The named-session handles and attachments this shell issued; closing it revokes them. */
   #handles = new HandleScope();
   #registry: H;
@@ -396,6 +398,18 @@ export class ShellApi<H extends SessionHost = PtyRegistry> extends RpcTarget {
   }
 
   /**
+   * Carry TCP connections to `port` on localhost here, for cns forward (forward.ts): the handle's
+   * connect(sink) opens one. Releasing the handle, or closing this shell, closes them. There is
+   * no host to name, so a forward never reaches another machine.
+   */
+  forward(port: number): PortForward {
+    if (this.#closed) throw new Error("This shell session is closed.");
+    const forward = new PortForward(portSchema.parse(port), this.#owner, (ended) => this.#forwards.delete(ended));
+    this.#forwards.add(forward);
+    return forward;
+  }
+
+  /**
    * Another shell on this peer with its own command limit, sharing its named sessions.
    * Releasing the fork kills the commands it started, closes its unnamed PTYs and
    * revokes the named-session handles it issued, so a caller can cancel a run without
@@ -418,6 +432,7 @@ export class ShellApi<H extends SessionHost = PtyRegistry> extends RpcTarget {
     this.#released.resolve();
     for (const child of this.#children) killTree(child);
     for (const pty of this.#ptys) pty[Symbol.dispose]();
+    for (const forward of this.#forwards) forward[Symbol.dispose]();
     this.#handles.close(HANDLES_REVOKED);
     for (const fork of this.#forks) fork[Symbol.dispose]();
     this.#onClose?.();

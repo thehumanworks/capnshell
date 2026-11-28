@@ -10,26 +10,26 @@ import { errorMessage } from "./errors.js";
  * input, environment variables or secret values.
  */
 
-export type AuditAction = "run" | "terminal" | "session.start" | "session.attach" | "session.end" | "session.kill" | "file.read" | "file.write" | "file.mkdir" | "skill.read";
+export type AuditAction = "run" | "terminal" | "session.start" | "session.attach" | "session.end" | "session.kill" | "file.read" | "file.write" | "file.mkdir" | "skill.read" | "port.forward";
 
 export interface AuditEntry {
   /** When it started, as an ISO time. */
   start: string;
-  /** When it ended, for a command, a terminal and a session's end. */
+  /** When it ended, for a command, a terminal, a session's end and a forward. */
   end?: string;
   /**
-   * "start" on the line a command or terminal gets as it starts. The line that ends it follows,
+   * "start" on the line a command, terminal or forward gets as it starts. The line that ends it follows,
    * with the same action, target and start; without one, it is still running or its daemon stopped.
    */
   phase?: "start";
-  /** Shared by a command's or terminal's start line and the line that ends it. */
+  /** Shared by a command's, terminal's or forward's start line and the line that ends it. */
   id?: string;
   /** The device's name on this device, when it acted. */
   peer: string;
   /** The device's key fingerprint, which a rename does not change. */
   fingerprint: string | null;
   action: AuditAction;
-  /** The command line, path, session name, or skill/file. */
+  /** The command line, path, session name, skill/file, or localhost:PORT. */
   target: string;
   /** Where a program ran, when the device chose. */
   cwd?: string;
@@ -42,6 +42,10 @@ export interface AuditEntry {
   exitCode?: number | null;
   signal?: string;
   timedOut?: boolean;
+  /** On a forward's end line: the TCP connections it carried, the bytes the device sent to the port, and those the port sent back. */
+  connections?: number;
+  bytesIn?: number;
+  bytesOut?: number;
   /** Why it failed, such as a grant the device lacks. */
   error?: string;
 }

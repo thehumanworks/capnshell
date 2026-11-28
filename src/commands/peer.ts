@@ -19,7 +19,7 @@ import { ensureIdentity, fingerprint, type Identity, type PublicKey } from "../i
 import { GrantedShell, type GrantHolder } from "../granted-shell.js";
 import { createInvite, decisionSchema, PairingApi, suggestedName } from "../pairing.js";
 import { InviteBook } from "../invites.js";
-import { advertisedSchema, describeGrants, explainDenial, findPairedPeer, getPeer, grantsSchema, isRevoked, lanSchema, learnAddresses, listPeers, revokedDevices, savePairedPeer, updatePairedPeer, type LanCard, type PeerEntry } from "../peers.js";
+import { advertisedSchema, describeGrants, explainDenial, findPairedPeer, getPeer, heldGrantsSchema, isRevoked, lanSchema, learnAddresses, listPeers, revokedDevices, savePairedPeer, updatePairedPeer, type LanCard, type PeerEntry } from "../peers.js";
 import { lanCards } from "../wake.js";
 import { listeningAddresses } from "../addresses.js";
 import { serveControl, type PairingController } from "./daemon-server.js";
@@ -343,7 +343,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
         return parsed.success ? parsed.data : undefined;
       } catch { return undefined; }
     };
-    const [advertised, granted, lan] = await Promise.all([ask(() => remote.addresses(), advertisedSchema), ask(() => remote.granted(), grantsSchema), ask(() => remote.lan(), lanSchema)]);
+    const [advertised, granted, lan] = await Promise.all([ask(() => remote.addresses(), advertisedSchema), ask(() => remote.granted(), heldGrantsSchema), ask(() => remote.lan(), lanSchema)]);
     if (!sessions.has(session.id) || stopping) return;
     try {
       // Found by key, so a renamed alias is still the one updated.
