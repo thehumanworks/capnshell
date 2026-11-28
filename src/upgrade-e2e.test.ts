@@ -56,7 +56,8 @@ async function miseDevice(t: TestContext, devices: Awaited<ReturnType<typeof tes
   await writeFile(miseLog, "");
   await script(path.join(bin, "cns"), `echo ${sh(JSON.stringify({ version: "2.7.0", daemon: { version: "2.7.0", executable: path.join(installs, "2.7.0", "cns"), sessions: [] } }))}`);
   // What mise 2026.11.14 prints for these, cut to what cns reads.
-  const listing = { [tool]: [{ version: "2.7.0", install_path: path.join(installs, "2.7.0"), installed: true, active: true }] };
+  const source = { type: "mise.toml", path: path.join(devices.root, name, ".config", "mise", "config.toml") };
+  const listing = { [tool]: [{ version: "2.7.0", requested_version: "2.7.0", install_path: path.join(installs, "2.7.0"), source, installed: true, active: true }] };
   await script(path.join(bin, "mise"), [
     `echo "$*" >> ${sh(miseLog)}`,
     `case "$1" in`,

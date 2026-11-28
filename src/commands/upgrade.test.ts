@@ -93,8 +93,17 @@ interface Simulated {
   /** The name mise's config gives the tool that installed cns there, such as a [tool_alias], and the backend mise says it comes from. */
   tool: string;
   backend: string;
+  /** The backends of other tools, by name. */
+  backends: Record<string, string>;
+  /** What mise ls --installed --json lists, in place of the tool's version that the daemon runs, which the global config asks for. */
+  listing: Record<string, object[]>;
+  /** What mise which cns answers: the cns that mise's config gives there. */
+  configured: string | { code: number; stdout?: string; stderr?: string };
   answers: Record<string, { code: number; stdout?: string; stderr?: string }>;
 }
+
+/** What mise ls --installed --json says of a version that a config asks for. */
+const asked = { type: "mise.toml", path: "/home/a/.config/mise/config.toml" };
 
 /** A device as cns upgrade reaches it: a daemon running a cns that mise installed from MISE_TOOL, with no named sessions, unless told otherwise. */
 function device(overrides: Partial<Simulated> = {}) {
@@ -103,26 +112,34 @@ function device(overrides: Partial<Simulated> = {}) {
   const tool = overrides.tool ?? MISE_TOOL;
   const directory = tool.replaceAll(/[:/]/g, "-");
   const fresh = windows ? `C:\\Users\\a\\AppData\\Local\\mise\\installs\\${directory}\\2.9.0\\cns.exe` : `/home/a/.local/share/mise/installs/${directory}/2.9.0/cns`;
-  // What mise ls --installed --json lists there: the version the daemon runs.
-  const listing = { node: [{ version: "24.0.0", install_path: "/home/a/.local/share/mise/installs/node/24.0.0" }], [tool]: [{ version: "2.7.0", install_path: fresh.replace(/[\\/]cns(\.exe)?$/, "").replace("2.9.0", "2.7.0"), installed: true }] };
+  const old = fresh.replace("2.9.0", "2.7.0");
+  const listing = overrides.listing ?? {
+    node: [{ version: "24.0.0", install_path: "/home/a/.local/share/mise/installs/node/24.0.0", source: asked }],
+    [tool]: [{ version: "2.7.0", install_path: old.replace(/[\\/]cns(\.exe)?$/, ""), source: asked, installed: true }],
+  };
   const state = {
-    pid: 100, version: overrides.version ?? "2.7.0", up: true, commands: [] as string[],
+    pid: 100, version: overrides.version ?? "2.7.0", up: true, commands: [] as string[], timeouts: [] as number[],
     /** What the daemon runs once a restart takes it onto another cns. */
     restartsInto: "2.9.0",
   };
   const sessions = overrides.sessions === undefined ? [] : overrides.sessions;
   const status = (version: string, extra: object = {}) => ({
     code: 0,
-    stdout: JSON.stringify({ version, daemon: { version: state.version, executable: overrides.executable ?? fresh.replace("2.9.0", "2.7.0"), ...sessions ? { sessions } : {} }, ...extra }),
+    stdout: JSON.stringify({ version, daemon: { version: state.version, executable: overrides.executable ?? old, ...sessions ? { sessions } : {} }, ...extra }),
   });
   const answer = (command: string): { code: number; stdout?: string; stderr?: string } => {
     for (const [prefix, result] of Object.entries(overrides.answers ?? {})) if (command.includes(prefix)) return result;
     if (/^(& )?cns status --json/.test(command)) return status(state.version);
     if (command.includes("mise --version")) return { code: 0, stdout: "2026.11.3 linux-x64 (2026-11-20)" };
     if (command.includes("mise ls --installed --json")) return { code: 0, stdout: JSON.stringify(listing, null, 2) };
-    if (command.includes("mise tool ")) return { code: 0, stdout: JSON.stringify({ backend: overrides.backend ?? MISE_TOOL, installed_versions: ["2.7.0"] }) };
+    const named = /mise tool '([^']*)'/.exec(command)?.[1];
+    if (named !== undefined) return { code: 0, stdout: JSON.stringify({ backend: overrides.backends?.[named] ?? (named === tool ? overrides.backend : undefined) ?? MISE_TOOL, installed_versions: ["2.7.0"] }) };
     if (command.includes("mise use -g")) return { code: 0, stderr: "mise github:thehumanworks/capnshell@2.9.0 ✓ installed" };
-    if (command.includes("mise which cns")) return { code: 0, stdout: `${fresh}\n` };
+    if (/mise which cns(;|$)/.test(command)) {
+      const configured = overrides.configured ?? old;
+      return typeof configured === "string" ? { code: 0, stdout: `${configured}\n` } : configured;
+    }
+    if (command.includes("mise which cns --tool")) return { code: 0, stdout: `${fresh}\n` };
     if (command.includes("status --json")) return status("2.9.0", { service: overrides.service === undefined ? null : overrides.service });
     if (command.includes("daemon restart") || command.includes("up --install")) {
       state.pid += 1;
@@ -135,17 +152,41 @@ function device(overrides: Partial<Simulated> = {}) {
     if (!state.up) throw new Error(`Cannot connect to ${name}: connect ECONNREFUSED 192.168.1.9:47381.`);
     const reached: Device = {
       platform: overrides.platform ?? (windows ? "win32" : "linux"), shell, version: state.version,
-      run: async (command) => { state.commands.push(command); const result = answer(command); return { stdout: "", stderr: "", ...result }; },
+      run: async (command, timeoutMs) => { state.commands.push(command); state.timeouts.push(timeoutMs); const result = answer(command); return { stdout: "", stderr: "", ...result }; },
       close() {},
     };
     return reached;
   };
-  return { state, reach, fresh };
+  return { state, reach, fresh, old };
 }
 
 const quick = { backMs: 0, sleep: async () => {} };
-/** What cns upgrade asks mise before it changes anything there: its version, what it installed, and the backend of the tool that holds the daemon's cns. */
+/** What cns upgrade asks mise before it changes anything there: whether it is there, what it installed, and the backend of the tool that holds the daemon's cns. */
 const asks = (tool = MISE_TOOL) => ["cns status --json", "mise --version", "mise ls --installed --json", `mise tool '${tool}' --json`];
+
+test("a cns from a tool that no config asks for any more, as after a move to a tool alias, is upgraded by the tool the config names now", async () => {
+  // mise use -g github:thehumanworks/capnshell@2.7.0 once; since then [tool_alias] cns with cns = "2.8.0". The daemon still runs 2.7.0.
+  const installs = "/home/a/.local/share/mise/installs";
+  const listing = { cns: [{ version: "2.8.0", install_path: `${installs}/cns/2.8.0`, source: asked }], [MISE_TOOL]: [{ version: "2.7.0", install_path: `${installs}/github-thehumanworks-capnshell/2.7.0` }] };
+  const moved = device({ listing, configured: `${installs}/cns/2.8.0/cns` });
+  assert.equal(reportLine(await upgradeDevice("studio", "2.9.0", moved.reach, quick)), "studio: upgraded from 2.7.0 to 2.9.0");
+  assert.deepEqual(moved.state.commands.slice(0, 8), [...asks(), "mise which cns", "mise tool 'cns' --json", "mise use -g 'cns@2.9.0'", "mise which cns --tool 'cns@2.9.0'"]);
+  assert.match(reportLine(await upgradeDevice("studio", "2.9.0", device({ listing, configured: `${installs}/cns/2.8.0/cns` }).reach, { ...quick, dryRun: true })), /: mise use -g cns@2\.9\.0, which pins/);
+  // The alias the config names now comes from elsewhere: the tool that installed the daemon's cns is upgraded, as before.
+  const fork = device({ listing, configured: `${installs}/cns/2.8.0/cns`, backends: { cns: "github:someone-else/capnshell" } });
+  await upgradeDevice("studio", "2.9.0", fork.reach, quick);
+  assert.equal(fork.state.commands[6], "mise use -g 'github:thehumanworks/capnshell@2.9.0'");
+  // No config gives a cns there, or not one that mise lists, or the same tool: the tool that installed the daemon's cns is upgraded.
+  for (const configured of [{ code: 1, stderr: "mise ERROR cns is not a mise bin" }, { code: 0, stdout: "/usr/local/bin/cns\n" }, { code: 0, stdout: `${installs}/github-thehumanworks-capnshell/2.7.0/cns\n` }]) {
+    const alone = device({ listing: { [MISE_TOOL]: listing[MISE_TOOL] }, configured });
+    assert.equal(reportLine(await upgradeDevice("studio", "2.9.0", alone.reach, quick)), "studio: upgraded from 2.7.0 to 2.9.0");
+    assert.deepEqual(alone.state.commands.slice(4, 6), ["mise which cns", "mise use -g 'github:thehumanworks/capnshell@2.9.0'"]);
+  }
+  // A failed mise tool for the tool the config names stops the device.
+  const unread = device({ listing, configured: `${installs}/cns/2.8.0/cns`, answers: { "mise tool 'cns'": { code: 1, stderr: "mise ERROR boom" } } });
+  assert.match(reportLine(await upgradeDevice("studio", "2.9.0", unread.reach, quick)), /^studio: needs a manual step: mise tool cns --json failed \(mise ERROR boom\)\. /);
+  assert.equal(unread.state.commands.length, 6);
+});
 
 test("a device that runs a cns from mise is upgraded with the exact version, then its daemon restarts on the new cns", async () => {
   const studio = device();

@@ -38,8 +38,11 @@ export function toolName(value: string): string | undefined {
   return /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(value) ? value : undefined;
 }
 
-/** What `mise ls --installed --json` prints, as far as the upgrade reads it: each tool's installed versions, by the name mise's config gives the tool. */
-const listingSchema = z.record(z.string(), z.array(z.object({ install_path: z.string() })));
+/**
+ * What `mise ls --installed --json` prints, as far as the upgrade reads it: each tool's installed
+ * versions, by the name mise's config gives the tool, each with the config that asks for it, if any.
+ */
+const listingSchema = z.record(z.string(), z.array(z.object({ install_path: z.string(), source: z.unknown().optional() })));
 type Listing = z.infer<typeof listingSchema>;
 
 /** What `mise tool NAME --json` says the tool's backend is: github:OWNER/REPO, through any tool alias. */
@@ -232,13 +235,32 @@ async function miseTool(name: string, target: string, platform: NodeJS.Platform,
   const tool = toolName(tools[0]!);
   if (!tool) return { result: "failed", reason: `mise there names the tool that installed cns ${printable(tools[0]!)}, which cns does not put on a command line`, next: byHand };
   // Through a tool alias, as mise reads its config there: [tool_alias], or [alias] before it.
-  const described = await run("mise", ["tool", word(tool), "--json"], MISE_MS);
-  if (described.code !== 0) return { result: "failed", reason: `mise tool ${tool} --json failed (${why(described, "mise")})`, next: byHand };
-  const backend = parsed(toolSchema, described.stdout)?.backend;
-  if (!backend) return { result: "failed", reason: `cns cannot read what mise tool ${tool} --json printed there`, next: byHand };
+  const backendOf = async (named: string): Promise<{ backend: string } | Refusal> => {
+    const described = await run("mise", ["tool", word(named), "--json"], MISE_MS);
+    if (described.code !== 0) return { result: "failed", reason: `mise tool ${named} --json failed (${why(described, "mise")})`, next: byHand };
+    const backend = parsed(toolSchema, described.stdout)?.backend;
+    return backend ? { backend } : { result: "failed", reason: `cns cannot read what mise tool ${named} --json printed there`, next: byHand };
+  };
   // GitHub does not tell owners or repositories apart by case.
-  if (backend.toLowerCase() !== MISE_TOOL) {
-    return { result: "manual", reason: `the mise tool ${tool} that installed its cns comes from ${printable(backend)}, not from ${MISE_TOOL}`, next: `There, point ${tool} at ${MISE_TOOL} in mise's config ([tool_alias]) and run cns upgrade ${name} again, or install cns ${target} yourself, ${RESTART_THERE}.` };
+  const ours = (backend: string) => backend.toLowerCase() === MISE_TOOL;
+  const holder = await backendOf(tool);
+  if (!("backend" in holder)) return holder;
+  // No config there asks for the tool that installed the daemon's cns, as after a move to a tool
+  // alias: mise use -g with it would add it again beside the one the config names now, so that one
+  // is upgraded instead, when it is a cns from MISE_TOOL too.
+  if (!listing[tool]!.some((version) => version.source !== undefined)) {
+    const which = await run("mise", ["which", "cns"], MISE_MS);
+    const current = which.code === 0 ? executablePath(which.stdout) : undefined;
+    const others = current ? miseToolsHolding(listing, current, platform).filter((other) => other !== tool) : [];
+    const other = others.length === 1 ? toolName(others[0]!) : undefined;
+    if (other) {
+      const configured = await backendOf(other);
+      if (!("backend" in configured)) return configured;
+      if (ours(configured.backend)) return { tool: other };
+    }
+  }
+  if (!ours(holder.backend)) {
+    return { result: "manual", reason: `the mise tool ${tool} that installed its cns comes from ${printable(holder.backend)}, not from ${MISE_TOOL}`, next: `There, point ${tool} at ${MISE_TOOL} in mise's config ([tool_alias]) and run cns upgrade ${name} again, or install cns ${target} yourself, ${RESTART_THERE}.` };
   }
   return { tool };
 }
