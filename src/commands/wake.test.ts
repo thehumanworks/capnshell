@@ -12,11 +12,10 @@ import { planWake, reportLine, wake, wakeArguments, wakeExitCode, type Outcome }
 const key = () => generateIdentity().publicKey;
 const card = (mac: string, cidr: string): LanCard => ({ mac, cidr });
 const STUDIO_ETH = card("3c:22:fb:12:34:56", "192.168.1.23/24");
-const studio = { name: "studio", publicKey: key(), lan: [STUDIO_ETH, card("02:42:ac:11:00:01", "172.17.0.1/16"), card("a6:0b:11:22:33:44", "192.168.1.24/24")] };
-
 /** A paired device's record as planWake reads it, letting this device run commands unless `outgoing` says otherwise. */
 const peer = (name: string, lan?: LanCard[], extra: { outgoing?: Permission[]; gateway?: true; publicKey?: string } = {}) =>
   ({ name, publicKey: extra.publicKey ?? key(), ...lan ? { lan } : {}, ...extra.gateway ? { gateway: true as const } : {}, grants: { incoming: [], outgoing: extra.outgoing ?? ["shell"] } });
+const studio = peer("studio", [STUDIO_ETH, card("02:42:ac:11:00:01", "172.17.0.1/16"), card("a6:0b:11:22:33:44", "192.168.1.24/24")]);
 
 test("the packet is sent from this device and from each paired device on the sleeping one's network, and from no other", () => {
   const nas = peer("nas", [card("00:11:32:aa:bb:cc", "192.168.1.10/24")]);
@@ -50,17 +49,20 @@ test("a device that does not let this one run commands is asked only when no oth
 });
 
 test("planning says what to do when no card of the device is known, none wakes it, or no device is on its network", () => {
-  assert.throws(() => planWake({ name: "studio", publicKey: key() }, [], []),
+  assert.throws(() => planWake(peer("studio"), [], []),
     /^Error: cns does not know studio's network card yet: this device's daemon learns it from studio's daemon over their link, while studio is awake and both run a cns that has cns wake\. Wake studio by hand this once\. Then keep a daemon running here \(cns up\), and once cns peers shows studio online, run cns upgrade studio if it shows an older cns there; cns wake studio works from then on\.$/);
   // Its wired card sits in a bridge, whose address is locally administered: the way out is the card's own address.
-  assert.throws(() => planWake({ name: "nas", publicKey: key(), lan: [card("e2:4f:01:02:03:04", "192.168.1.10/24")] }, [], []),
+  assert.throws(() => planWake(peer("nas", [card("e2:4f:01:02:03:04", "192.168.1.10/24")]), [], []),
     /^Error: cns knows no card of nas that a packet wakes: e2:4f:01:02:03:04 is virtual or locally administered, as a bridge such as br0, a virtual machine's or WSL's card, or a Wi-Fi private address is\. If its wired card sits in a bridge, find that card's MAC address on nas \(ip link\), then send the packet from a device on its network: cns wake --mac MAC on that device, or cns run DEVICE -- cns wake --mac MAC from here\.$/);
-  assert.throws(() => planWake({ name: "wsl", publicKey: key(), lan: [card("00:15:5d:01:02:03", "172.23.80.5/20")] }, [], []), /^Error: cns knows no card of wsl that a packet wakes: 00:15:5d:01:02:03 is virtual/);
+  assert.throws(() => planWake(peer("wsl", [card("00:15:5d:01:02:03", "172.23.80.5/20")]), [], []), /^Error: cns knows no card of wsl that a packet wakes: 00:15:5d:01:02:03 is virtual/);
   // Nothing with an IPv4 address on a local network, as on a device that uses IPv6 only.
   for (const lan of [[], [card("3c:22:fb:12:34:57", "169.254.3.4/16")]]) {
-    assert.throws(() => planWake({ name: "pi", publicKey: key(), lan }, [], []),
+    assert.throws(() => planWake(peer("pi", lan), [], []),
       /^Error: pi said it has no network card with an IPv4 address on a local network, and a Wake-on-LAN packet goes out as an IPv4 broadcast, so cns cannot wake pi, as when it uses IPv6 only\. Wake it by hand\.$/);
   }
+  // A daemon tells its cards only to a device it lets use something.
+  assert.throws(() => planWake(peer("vault", [], { outgoing: [] }), [], []),
+    /^Error: vault lets this device use nothing, so it tells this one none of its network cards\. Have vault grant this device what it should use there \(cns peer grant on vault\); once cns peers shows vault online with that access, cns wake vault works\. Until then, send the packet from a device on its network: cns wake --mac MAC there\.$/);
   assert.throws(() => planWake(studio, [card("a6:00:00:00:00:01", "10.0.0.2/24")], [peer("nas", [card("00:11:32:aa:bb:cc", "192.168.2.10/24")])]),
     /^Error: No device cns knows to be on studio's network \(192\.168\.1\.23\/24\) can send the packet: this device is not on it, and no paired device has said it is\. Name one that is: cns wake studio --via DEVICE\./);
 });

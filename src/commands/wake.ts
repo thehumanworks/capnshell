@@ -25,11 +25,16 @@ type Peer = Pick<PeerEntry, "name" | "publicKey" | "lan" | "gateway" | "grants">
  * cns gateway, which is on no local network, never sends one. Throws, with what to do, when cns
  * knows no card of the device that a packet wakes, or no device on its network.
  */
-export function planWake(sleeper: Pick<PeerEntry, "name" | "publicKey" | "lan">, here: readonly LanCard[], peers: readonly Peer[], via?: string): Sender[] {
+export function planWake(sleeper: Pick<PeerEntry, "name" | "publicKey" | "lan" | "grants">, here: readonly LanCard[], peers: readonly Peer[], via?: string): Sender[] {
   const { name } = sleeper;
   if (sleeper.lan === undefined) {
     throw new Error(`cns does not know ${name}'s network card yet: this device's daemon learns it from ${name}'s daemon over their link, while ${name} is awake and both run a cns that has cns wake. ` +
       `Wake ${name} by hand this once. Then keep a daemon running here (cns up), and once cns peers shows ${name} online, run cns upgrade ${name} if it shows an older cns there; cns wake ${name} works from then on.`);
+  }
+  // A daemon tells its cards only to a device it lets use something.
+  if (!sleeper.lan.length && !sleeper.grants.outgoing.length) {
+    throw new Error(`${name} lets this device use nothing, so it tells this one none of its network cards. Have ${name} grant this device what it should use there (cns peer grant on ${name}); once cns peers shows ${name} online with that access, cns wake ${name} works. ` +
+      `Until then, send the packet from a device on its network: cns wake --mac MAC there.`);
   }
   const known = sleeper.lan.filter(usable);
   if (!known.length) {
@@ -49,7 +54,7 @@ export function planWake(sleeper: Pick<PeerEntry, "name" | "publicKey" | "lan">,
   const chosen = candidates.filter((candidate) => candidate.cards.length);
   if (!chosen.length) {
     throw new Error(`No device cns knows to be on ${name}'s network (${cards.map((card) => card.cidr).join(", ")}) can send the packet: this device is not on it, and no paired device has said it is. ` +
-      `Name one that is: cns wake ${name} --via DEVICE. A device says which networks it is on when its daemon links to this one's, both running a cns that has cns wake; cns peers shows which are online.`);
+      `Name one that is: cns wake ${name} --via DEVICE. A device tells this one which networks it is on when its daemon links to this one's, while it lets this device use something and both run a cns that has cns wake; cns peers shows which are online.`);
   }
   // Only when none of them may send is each asked anyway, so that the report says what to grant.
   const able = chosen.filter((candidate) => candidate.shell);
