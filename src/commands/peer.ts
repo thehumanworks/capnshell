@@ -108,16 +108,22 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
    * behind, such as one restored from a backup, does not let it in. Pairing again clears that.
    */
   const pairedHere = (publicKey: PublicKey) => isRevoked(publicKey) ? undefined : findPairedPeer(publicKey);
-  /** What this device lets an authenticated paired device do here: exactly its saved incoming grants. */
-  function offerTo(publicKey: PublicKey): { local: GrantedShell; name: string; grants: GrantHolder } {
+  /** What this device lets an authenticated paired device do here: exactly its saved incoming grants. `daemon`: the device's daemon made the link. */
+  function offerTo(publicKey: PublicKey, daemon: boolean): { local: GrantedShell; name: string; grants: GrantHolder } {
     const entry = pairedHere(publicKey);
     if (!entry) throw new AuthError("not-paired", "Not paired with this device.");
     const grants: GrantHolder = { current: entry.grants.incoming };
     const owner = fingerprint(publicKey);
-    return { local: new GrantedShell(new ShellApi(ptys, { owner }), grants, entry.name, owner, advertisedToPeers, answerMeshes(publicKey), answerSecrets(publicKey), localSecrets, audit, lanFor(entry)), name: entry.name, grants };
+    return { local: new GrantedShell(new ShellApi(ptys, { owner }), grants, entry.name, owner, advertisedToPeers, answerMeshes(publicKey), answerSecrets(publicKey), localSecrets, audit, lanFor(entry, daemon, grants)), name: entry.name, grants };
   }
-  /** This device's network cards, for cns wake on a paired device; none for the cns gateway, a Worker on no local network. */
-  const lanFor = (entry: Pick<PeerEntry, "gateway">) => (): LanCard[] => entry.gateway ? [] : lanCards();
+  /**
+   * This device's network cards, for cns wake: told only over a standing link to another daemon, and
+   * only while this device grants that one something. A command's connection, the cns gateway's
+   * (which links as one, and may also be saved as a mesh's gateway) and a device granted nothing
+   * here learn none.
+   */
+  const lanFor = (entry: Pick<PeerEntry, "gateway">, daemon: boolean, grants: GrantHolder) => (): LanCard[] =>
+    daemon && !entry.gateway && grants.current.length ? lanCards() : [];
   /** Invites handed out and not yet settled (invites.ts). */
   const invites = new InviteBook();
   const links = new Map<string, { stop: () => void; publicKey: PublicKey }>();
@@ -564,7 +570,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
       const via = isRelayAddress(url) ? "relay" : "direct";
       const grants: GrantHolder = { current: current.grants.incoming };
       const owner = fingerprint(current.publicKey);
-      const local = new GrantedShell(new ShellApi(ptys, { owner }), grants, name, owner, advertisedToPeers, answerMeshes(current.publicKey), answerSecrets(current.publicKey), localSecrets, audit, lanFor(current));
+      const local = new GrantedShell(new ShellApi(ptys, { owner }), grants, name, owner, advertisedToPeers, answerMeshes(current.publicKey), answerSecrets(current.publicKey), localSecrets, audit, lanFor(current, true, grants));
       const remote = rpcSession<ShellApi>(channel, local);
       const session = register({ close: (reason) => channel.close(reason), outbound: true, via, dialed: url }, local, remote, new URL(url).host, { name, publicKey: current.publicKey, daemon: true });
       session.grants = grants;
@@ -687,7 +693,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
         channel.close("Duplicate link");
         return undefined;
       }
-      const offered = invite ? { local: pairingFor(invite.id, peer), name: undefined, grants: undefined } : offerTo(peer);
+      const offered = invite ? { local: pairingFor(invite.id, peer), name: undefined, grants: undefined } : offerTo(peer, mode === "daemon");
       if (outcome === "replace") remove(held!);
       const remote = rpcSession<ShellApi>(channel, offered.local);
       const session = register({ close: (reason) => channel.close(reason), outbound: false, via }, offered.local, remote, address,

@@ -187,9 +187,10 @@ export class GrantedShell extends RpcTarget {
   /**
    * This device's network cards on local networks, each a MAC address and an IPv4 address with its
    * prefix, so that a paired device can have another one on the same network wake this one while
-   * it sleeps (cns wake). It needs no grant, as addresses does not.
+   * it sleeps (cns wake). The daemon answers only over a standing link from a device it grants
+   * something (peer.ts), and none otherwise.
    */
-  lan(): LanCard[] { return this.#lan().map((card) => ({ ...card })); }
+  lan(): LanCard[] { return this.#lan(); }
   /**
    * Swap mesh member lists: this device keeps any offered list that is newer than its own and
    * signed by that mesh's admin, and answers with the lists of the meshes the peer is in. It
