@@ -58,6 +58,9 @@ What the code had to work with:
   grant stops new connections even on a link that lives on. It dials the port and returns a
   connection with `write(bytes)`, `end()` and release; the sink here gets `data(bytes)`, `end()`
   and `closed(reason?)`. Releasing the handle, or the link closing, closes every connection.
+  The device refuses a sink that lacks `data`, `end` or `closed`. Every call to the other end
+  runs in a microtask, so a call that throws, or fails because the other end released what it
+  called, closes only that connection and frees its slot; nothing throws in a socket handler.
 - **Bounded bytes in flight.** At most 64 KiB per call. A call is answered once its bytes are
   written to the socket at the other end (the write callback), so an answer means the bytes have
   left cns. At most 4 calls (256 KiB) may be unanswered per connection in each direction, and 8
@@ -79,7 +82,9 @@ What the code had to work with:
   it has one, else a direct dial, then the relay. It prints which. When the link is lost, its
   connections close at both ends and the listener stays: it reconnects with `cns shell`'s
   backoff (0.5 s, doubling to 15 s), and a new connection waits up to 10 seconds for a link.
-  Each attempt reads the peer record again, so a device unpaired here meanwhile ends it.
+  Each link and each new local connection reads the peer record again, so a device unpaired
+  or removed here meanwhile, or another device saved under its name, ends it with 3, even
+  while its own link is still up.
 - **Exit status.** A failure on the first attempt ends the command with 1, with what to fix.
   After that it retries until it is told to stop, except that a device that no longer accepts
   this one (an `AuthError`: not paired, identity changed, invalid proof), or a device removed
@@ -114,9 +119,10 @@ What the code had to work with:
 
 ## Platforms
 
-- **Linux** is tested end to end with real daemons: a lent link, the command's own direct link
-  and the relay, 50 MiB each way by hash, 32 connections and a refused one, a grant revoked
-  mid-forward, unpairing and a peer daemon restart.
+- **Linux** is tested end to end with real daemons: a lent link and the command's own direct
+  link, 50 MiB each way by hash, 32 connections and a refused one, a grant revoked mid-forward,
+  unpairing there and removal here, a killed forward released, and a peer daemon restart. The
+  relay carries a link as it does any other, and is not tested on its own.
 - **Bun's `node:net`.** `pause()` stopping reads, `pauseOnConnect`, `allowHalfOpen` half-close and
   write callbacks are proven by `src/forward.test.ts` with real sockets, which runs on every
   platform the tests run on, including the weekly Windows workflow. The end-to-end tests skip
