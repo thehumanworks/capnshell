@@ -214,8 +214,10 @@ export class HeldSessions implements SessionHost {
     try {
       if (this.#held.size + this.#unreachable.size + this.#starting.size > MAX_NAMED_PTYS) await this.#evictFinished();
       const record = await startHolder({ dir: this.#dir, name, options: parsed, owner, finishedMs: this.#finishedMs });
-      const connection = await connectHolder(record);
-      if (this.#closed) { connection.close(); throw new Error("The daemon is stopping."); }
+      // A start that fails leaves no session behind: the caller is told it did not start.
+      const abandon = (error: Error) => { try { process.kill(record.pid, "SIGTERM"); } catch { /* Gone. */ } return error; };
+      const connection = await connectHolder(record).catch((error: Error) => { throw abandon(error); });
+      if (this.#closed) { connection.close(); throw abandon(new Error("The daemon is stopping.")); }
       this.#keep(record, connection);
     } finally { this.#starting.delete(name); }
     return new HeldNamedPty(this, name, this.#held.get(name)!, scope);
