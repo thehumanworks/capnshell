@@ -190,13 +190,22 @@ test("starting the task runs it, and runs it again each second until a daemon an
 
 // What changed: a restart still running the task when cns up --uninstall deleted it found /Run
 // failing, and started the daemon detached, just after uninstalling had said it was stopped.
-test("a task that did not start the daemon lets it start without the task while Task Scheduler has it, and not once it is gone", () => {
+test("a task that did not start the daemon lets it start without the task while Task Scheduler has it or its definition is kept, and not once uninstalling removed both", async (t) => {
+  const home = await tempHome(t);
+  const name = taskName();
+  const failed = `${schtasks()} /Run /TN ${name} failed: ERROR: The system cannot find the file specified.`;
   const { calls, runner } = fakeSchtasks();
-  assert.equal(taskGone("no daemon answered within 15 seconds", runner), undefined, "there, maybe disabled: the daemon starts detached");
-  assert.deepEqual(calls, [step("/Query", "/TN", taskName())]);
-  const gone = taskGone(`${schtasks()} /Run /TN ${taskName()} failed: ERROR: The system cannot find the file specified.`, fakeSchtasks(["/Query"]).runner);
+  assert.equal(taskGone("no daemon answered within 15 seconds", runner, home), undefined, "there, maybe disabled: the daemon starts detached");
+  assert.deepEqual(calls, [step("/Query", "/TN", name)]);
+  await installService(serviceFile("schtasks", spec, home, {}), fakeSchtasks().runner);
+  // Task Scheduler failing, as /Run just did: schtasks exits 1 for any error, so the kept definition decides.
+  assert.equal(taskGone(failed, fakeSchtasks(["/Query"], "ERROR: Access is denied.").runner, home), undefined, "an outage: the daemon starts detached");
+  // cns up --uninstall deletes the task, then its definition.
+  assert.equal(await uninstallService("schtasks", fakeSchtasks().runner, home, {}), true);
+  const gone = taskGone(failed, fakeSchtasks(["/Query"]).runner, home);
   assert.ok(gone instanceof TaskGone);
-  assert.equal(gone.message, `The scheduled task ${taskName()} is gone, as after cns up --uninstall (${schtasks()} /Run /TN ${taskName()} failed: ERROR: The system cannot find the file specified).`);
+  assert.equal(gone.failure, failed);
+  assert.equal(gone.message, `The scheduled task ${name} is gone, as after cns up --uninstall (${schtasks()} /Run /TN ${name} failed: ERROR: The system cannot find the file specified).`);
 });
 
 test("when schtasks refuses to register the task, the error says what failed and what to run next", async (t) => {

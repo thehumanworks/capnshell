@@ -471,7 +471,12 @@ async function install(options: UpOptions): Promise<boolean> {
   // The restart's own process stops the daemon and starts the service's, as cns daemon restart does.
   if (running) { await restart({ state, reload: true }); return true; }
   if (kind !== "schtasks") { (await awaitControl(options.state, undefined, serviceFailure(kind, state))).close(); return false; }
-  const started = await startTask(state);
+  let started: ControlConnection | undefined;
+  try { started = await startTask(state); }
+  catch (error) {
+    if (!(error instanceof TaskGone)) throw error;
+    throw new Error(`Installed the scheduled task, but it and its definition were removed before it started the daemon (${error.failure.replace(/\.$/, "")}). Run cns up --install again, or cns up to start the daemon without it.`, { cause: error });
+  }
   if (started) { started.close(); return false; }
   const daemon = await startDaemon({ bind: settings.bind, port: settings.port, url: endpointUrl(settings.bind, settings.port), state });
   throw new Error(`The daemon runs without the task for now (pid ${daemon.pid}). cns up --install tries the task again; cns up --uninstall removes it.`);
@@ -494,11 +499,8 @@ async function uninstall(options: UpOptions): Promise<void> {
   const state = task && (task.state ?? daemonStatePath(options.state));
   if (!(await uninstallService(kind))) { console.log(`No ${serviceName(kind)} is installed.`); return; }
   if (state && await serviceDaemonAt(state)) {
-    let pid: number | undefined;
-    try { ({ pid } = await stopDaemon(state)); } catch (error) { console.error(`Stopping the daemon: ${errorMessage(error)}`); }
+    try { await stopDaemon(state); } catch (error) { console.error(`Stopping the daemon: ${errorMessage(error)}`); }
     if (await serviceDaemonAt(state)) throw new Error(`Removed the ${serviceName(kind)}, but its daemon still runs. Stop it with cns stop --state "${state}".`);
-    // Gone, not only stopping, before this says it is stopped.
-    if (pid !== undefined && !(await processExited(pid, 10_000))) throw new Error(`Removed the ${serviceName(kind)}, but its daemon (pid ${pid}) has not exited yet.`);
   }
   // One the task did not start, as cns up starts one where the task cannot run, is left running.
   const other = state ? await daemonAt(state) : undefined;

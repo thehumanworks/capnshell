@@ -408,17 +408,27 @@ export async function runTask(state: string, supervision: Supervision = {}): Pro
 }
 
 /** Refuses to start the daemon without the scheduled task once the task is gone: see taskGone. */
-export class TaskGone extends Error {}
+export class TaskGone extends Error {
+  /** Why the task did not start the daemon. */
+  readonly failure: string;
+  constructor(failure: string) {
+    super(`The scheduled task ${taskName()} is gone, as after cns up --uninstall (${failure.replace(/\.$/, "")}).`);
+    this.failure = failure;
+  }
+}
 
 /**
  * Why the daemon must not start without the scheduled task, which did not start it (`failure`
  * says why): the task is gone since, as cns up --uninstall leaves it, which stops the daemon and
  * says so. A restart still under way would otherwise bring the daemon back after that. Undefined
- * while Task Scheduler has the task, also disabled: then the daemon starts without it.
+ * while Task Scheduler has the task, also disabled, and while its definition is still in ~/.cns:
+ * then the daemon starts without it. schtasks exits 1 for every error, and runCommand gives 127
+ * when it cannot run schtasks, so a failed /Query alone may be Task Scheduler failing, as /Run just
+ * did; uninstalling deletes the definition right after the task.
  */
-export function taskGone(failure: string, runner: Runner = runCommand): TaskGone | undefined {
-  if (runner(schtasks(), ["/Query", "/TN", taskName()]).code === 0) return undefined;
-  return new TaskGone(`The scheduled task ${taskName()} is gone, as after cns up --uninstall (${failure.replace(/\.$/, "")}).`);
+export function taskGone(failure: string, runner: Runner = runCommand, home?: string): TaskGone | undefined {
+  if (runner(schtasks(), ["/Query", "/TN", taskName()]).code === 0 || existsSync(servicePath("schtasks", home))) return undefined;
+  return new TaskGone(failure);
 }
 
 /** Restart the systemd service's daemon, or start it if it is not running, with the command the unit and its drop-ins give it now. */
