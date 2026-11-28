@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { generateIdentity } from "../identity.js";
-import { savePairedPeer } from "../peers.js";
+import { revokeDevice, savePairedPeer } from "../peers.js";
 import { CNS_VERSION } from "../version.js";
 import { commandLine, fleet, installPath, reachDevice, reportLine, shellWord, statusFacts, upgrade, upgradeDevice, upgradeExitCode, type Device, type Outcome, type Reach } from "./upgrade.js";
 
@@ -200,34 +200,46 @@ test("--all leaves out the cns gateway, with a line for it, and names the mesh e
   assert.equal(upgradeExitCode(skipped), 0);
 });
 
-test("cns upgrade --all reaches the saved devices but never the cns gateway", async (t) => {
+test("cns upgrade reaches the saved devices, never the cns gateway or a device removed here", async (t) => {
   const dir = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-upgrade-fleet-")));
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.json({ tag_name: `v${CNS_VERSION}` }) });
-  const saved = { CNS_CONFIG_DIR: process.env.CNS_CONFIG_DIR, CNS_RELEASES: process.env.CNS_RELEASES, exitCode: process.exitCode };
+  const saved = { CNS_CONFIG_DIR: process.env.CNS_CONFIG_DIR, CNS_RELEASES: process.env.CNS_RELEASES };
   t.after(async () => {
     for (const name of ["CNS_CONFIG_DIR", "CNS_RELEASES"] as const) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; }
-    process.exitCode = saved.exitCode;
     server.stop(true);
     await rm(dir, { recursive: true, force: true });
   });
   process.env.CNS_CONFIG_DIR = dir;
   process.env.CNS_RELEASES = `http://127.0.0.1:${server.port}/latest`;
-  const record = (more: { mesh?: string; gateway?: true } = {}) => ({ publicKey: generateIdentity().publicKey, addresses: ["ws://127.0.0.1:9"], pairedAt: new Date().toISOString(), grants: { incoming: [], outgoing: ["shell" as const] }, ...more });
-  savePairedPeer("gw", record({ mesh: "home", gateway: true }));
-  savePairedPeer("nas", record({ mesh: "home" }));
-  savePairedPeer("studio", record());
+  const record = (publicKey: string, more: { mesh?: string; gateway?: true } = {}) => ({ publicKey, addresses: ["ws://127.0.0.1:9"], pairedAt: new Date().toISOString(), grants: { incoming: [], outgoing: ["shell" as const] }, ...more });
+  savePairedPeer("gw", record(generateIdentity().publicKey, { mesh: "home", gateway: true }));
+  savePairedPeer("nas", record(generateIdentity().publicKey, { mesh: "home" }));
+  savePairedPeer("studio", record(generateIdentity().publicKey));
+  // Removed here, its record left over, as from a backup.
+  const lost = generateIdentity();
+  savePairedPeer("phone", record(lost.publicKey));
+  revokeDevice(lost.fingerprint, lost.publicKey);
   const printed: string[] = [];
   t.mock.method(console, "log", (line: string) => printed.push(line));
   t.mock.method(console, "error", (line: string) => printed.push(line));
   const reached: string[] = [];
-  await upgrade(undefined, { all: true }, async (name) => { reached.push(name); throw new Error(`Cannot connect to ${name}.`); });
+  const reach: Reach = async (name) => { reached.push(name); throw new Error(`Cannot connect to ${name}.`); };
+
+  assert.equal(await upgrade(undefined, { all: true }, reach), 1);
   assert.deepEqual(reached.sort(), ["nas", "studio"]);
   assert.deepEqual(printed.slice(0, 2), [
     "gw: not upgraded here: it is the cns gateway, a Worker to deploy again after upgrading cns (gateway/README.md)",
     `Upgrading nas (from mesh home), studio to cns ${CNS_VERSION}, the latest release.`,
   ]);
   assert.deepEqual(printed.slice(2).sort(), ["nas: unreachable (Cannot connect to nas). Later, run cns upgrade nas", "studio: unreachable (Cannot connect to studio). Later, run cns upgrade studio"]);
-  assert.equal(process.exitCode, 1);
+
+  // Named, the gateway is still not dialed, and the removed device is refused as other commands refuse it.
+  reached.length = 0;
+  printed.length = 0;
+  assert.equal(await upgrade("gw", {}, reach), 0);
+  assert.deepEqual(printed, ["gw: not upgraded here: it is the cns gateway, a Worker to deploy again after upgrading cns (gateway/README.md)"]);
+  await assert.rejects(upgrade("phone", {}, reach), /^Error: phone was removed from this device \(cns peer remove\), so cns does not connect to it\. To delete the record of it left here, run: cns peer remove phone\./);
+  assert.deepEqual(reached, []);
 });
 
 test("a device that does not answer a step is given up on soon after the step's limit", async () => {

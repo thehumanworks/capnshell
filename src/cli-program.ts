@@ -445,7 +445,7 @@ export function createCli(): Command {
     ].join("\n"))
     .action(async (name: string | undefined, { device, ...options }: { device?: string; all?: boolean; dryRun?: boolean; endSessions?: boolean }) => {
       const { upgrade } = await import("./commands/upgrade.js");
-      await upgrade(oneDevice("upgrade", name, device), options);
+      process.exitCode = await upgrade(oneDevice("upgrade", name, device), options);
     });
   program.command("identity")
     .description("Show this device's identity for pairing, creating it on first use")

@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { AuthError } from "../auth.js";
-import { errorMessage, printable } from "../errors.js";
-import { explainDenial, listPeers, resolvePeer, type PeerEntry } from "../peers.js";
+import { errorMessage, printable, strictlyPrintable } from "../errors.js";
+import { explainDenial, getPeer, reachablePeers, resolvePeer, type PeerEntry } from "../peers.js";
 import { latestRelease } from "../releases.js";
 import type { RunResult } from "../shell.js";
 import { plain } from "../terminal.js";
@@ -94,13 +94,6 @@ export type Outcome =
   /** Not a device cns upgrades, such as the cns gateway. */
   | { device: string; result: "skipped"; reason: string };
 
-/**
- * A line safe to print: devices chose much of it, so no control, format or separator characters
- * (such as bidi overrides) that would make it read as something else. As audit-cli's tableSafe;
- * the shared printable() keeps format characters for right-to-left text elsewhere.
- */
-const lineSafe = (text: string) => text.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, "?");
-
 /** The report's line for one device. */
 export function reportLine(outcome: Outcome): string {
   const { device } = outcome;
@@ -114,7 +107,8 @@ export function reportLine(outcome: Outcome): string {
       case "skipped": return `${device}: not upgraded here: ${outcome.reason}`;
     }
   })();
-  return lineSafe(line);
+  // Devices chose much of it: each character shows as itself.
+  return strictlyPrintable(line);
 }
 
 /** As for cns peer remove --everywhere: 1 when a device did not answer or a step failed, else 4 when one is left for a person, else 0. */
@@ -300,14 +294,23 @@ export function fleet(peers: readonly Pick<PeerEntry, "name" | "mesh" | "gateway
   };
 }
 
-/** `cns upgrade DEVICE` or `cns upgrade --all`: upgrade cns there to the latest release, and say what became of each device. */
-export async function upgrade(name: string | undefined, options: { all?: boolean; dryRun?: boolean; endSessions?: boolean }, reach: Reach = reachDevice): Promise<void> {
+/** The saved record of the device a command names, refused as resolvePeer refuses it: not saved, or removed here. */
+function namedPeer(name: string): PeerEntry {
+  resolvePeer(name);
+  return getPeer(name)!;
+}
+
+/**
+ * `cns upgrade DEVICE` or `cns upgrade --all`: upgrade cns there to the latest release, and say what
+ * became of each device. Returns the exit status, as upgradeExitCode gives it.
+ */
+export async function upgrade(name: string | undefined, options: { all?: boolean; dryRun?: boolean; endSessions?: boolean }, reach: Reach = reachDevice): Promise<number> {
   if ((name === undefined) === !options.all) throw new Error("Name one paired device, or --all for every one: cns upgrade DEVICE, or cns upgrade --all.");
-  const peers = name === undefined ? listPeers() : [resolvePeer(name)];
-  if (!peers.length) { console.error("No paired devices. Run cns pair to pair with another device."); return; }
+  const peers = name === undefined ? reachablePeers() : [namedPeer(name)];
+  if (!peers.length) { console.error("No paired devices. Run cns pair to pair with another device."); return 0; }
   const { devices, named, skipped } = fleet(peers);
   for (const outcome of skipped) console.log(reportLine(outcome));
-  if (!devices.length) return;
+  if (!devices.length) return 0;
   let target: string;
   // Always asked: what cns peers learned may be a day old.
   try { target = await latestRelease(); }
@@ -320,5 +323,5 @@ export async function upgrade(name: string | undefined, options: { all?: boolean
     return outcome;
   }));
   if (compareVersions(CNS_VERSION, target) < 0) console.error(`This device runs cns ${CNS_VERSION}: upgrade it here too, then restart its daemon (cns status says how).`);
-  process.exitCode = upgradeExitCode(outcomes);
+  return upgradeExitCode(outcomes);
 }
