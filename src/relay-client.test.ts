@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -97,9 +97,12 @@ test("a hostile relay cannot crash the daemon or make it open connections withou
       message(ws) {
         if (ws.data.kind !== "accept" || ws.data.n === 1) return;
         ws.send(JSON.stringify({ t: "ready" }));
-        // Then a flood: unique ids, one id repeated, and ids that are not ids at all.
-        for (let index = 0; index < 100; index++) ws.send(JSON.stringify({ t: "incoming", id: `id${String(index).padStart(20, "0")}` }));
+        // JSON that is not an object.
+        ws.send("null");
+        // Then a flood: one id repeated, before the cap could hide a second answer to it, then
+        // unique ids, and ids that are not ids at all.
         for (let index = 0; index < 50; index++) ws.send(JSON.stringify({ t: "incoming", id: "B".repeat(22) }));
+        for (let index = 0; index < 100; index++) ws.send(JSON.stringify({ t: "incoming", id: `id${String(index).padStart(20, "0")}` }));
         for (const id of ["../../etc", "x", "A".repeat(500), 7]) ws.send(JSON.stringify({ t: "incoming", id }));
       },
       close(ws) { if (ws.data.kind === "accept" && ws.data.n === 1) badChallengeClosed = true; },
@@ -122,4 +125,8 @@ test("a hostile relay cannot crash the daemon or make it open connections withou
   const status = await cli(["status", "--json", "--state", state]);
   assert.equal(status.code, 0, "the daemon still answers");
   assert.equal(JSON.parse(status.stdout).daemon.relayRegistered, true);
+  // Nothing the relay sent threw in the daemon.
+  const logs = (await readdir(dir)).filter((name) => name.startsWith("daemon.json.") && name.endsWith(".log"));
+  assert.equal(logs.length, 1);
+  assert.doesNotMatch(await readFile(path.join(dir, logs[0]!), "utf8"), /TypeError/);
 });
