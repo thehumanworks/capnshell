@@ -1,13 +1,14 @@
 import { spawn, type SpawnOptionsWithoutStdio } from "node:child_process";
 import { EventEmitter, once } from "node:events";
-import { chmod, cp, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import type { TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
-import { connectControl, stopDaemon } from "./commands/daemon.js";
+import { connectControl, processExited, stopDaemon } from "./commands/daemon.js";
 import { makePrivateDirectory } from "./config.js";
+import { holderDirectory } from "./held-sessions.js";
 import { KeyboardModes } from "./kitty-keyboard.js";
 import { selfInvocation } from "./runtime.js";
 
@@ -32,9 +33,32 @@ export async function daemonHome(t: TestContext, prefix = "cns-daemon-"): Promis
   const statePath = path.join(home, ".cns", "daemon.json");
   t.after(async () => {
     try { await stopDaemon(statePath); } catch { /* Not running. */ }
+    await endHolders(statePath);
     await rm(home, { force: true, recursive: true });
   });
   return { home, statePath };
+}
+
+/**
+ * End the holders of the named sessions a test's daemon started, which outlive the daemon
+ * (held-sessions.ts): each hangs up its program and removes its record on SIGTERM.
+ */
+export async function endHolders(statePath: string): Promise<void> {
+  const dir = holderDirectory(statePath);
+  let files: string[];
+  try { files = (await readdir(dir)).filter((file) => file.endsWith(".json")); } catch { return; }
+  const pids: number[] = [];
+  for (const file of files) {
+    try {
+      const { pid } = JSON.parse(await readFile(path.join(dir, file), "utf8")) as { pid: number };
+      if (pid === process.pid) continue;
+      process.kill(pid, "SIGTERM");
+      pids.push(pid);
+    } catch { /* Gone already. */ }
+  }
+  for (const pid of pids) {
+    if (!(await processExited(pid, 5000))) try { process.kill(pid, "SIGKILL"); } catch { /* Gone. */ }
+  }
 }
 
 /**
@@ -152,6 +176,7 @@ export async function testDevices(t: TestContext, prefix = "cns-devices-") {
   t.after(async () => {
     for (const device of daemons.reverse()) {
       try { await stopDaemon(device.state); } catch { /* Not running. */ }
+      await endHolders(device.state);
     }
     await rm(root, { recursive: true, force: true });
   });

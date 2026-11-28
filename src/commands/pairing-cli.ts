@@ -717,6 +717,8 @@ export async function status(options: StatusOptions): Promise<void> {
         version: reportedVersion(info.version) ?? null, executable: info.executable ? printable(info.executable) : null, warning: drift ?? null,
         // What a restart would end, for cns upgrade on another device; null from a daemon too old to say.
         sessions: Array.isArray(info.sessions) ? info.sessions.map(printable) : null,
+        // Whether its named sessions outlive a restart; false for a daemon from before holders.
+        keepsSessions: info.keepsSessions === true,
       };
       for (const [fingerprint, link] of await standingLinks(control)) links.push({ name: link.name, fingerprint, address: link.via, hostname: link.hostname, version: link.version ?? null });
     } finally { control.close(); }

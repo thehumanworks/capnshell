@@ -358,9 +358,10 @@ export function createCli(): Command {
   const stopCommand = (command: Command) => command
     .option("-S, --state <path>", "Local daemon state file")
     .action(async (options: { state?: string }) => {
-      const { stopDaemon } = await import("./commands/daemon.js");
-      await stopDaemon(options.state);
+      const { keptSessions, stopDaemonKeeping } = await import("./commands/daemon.js");
+      const { sessions } = await stopDaemonKeeping(options.state);
       console.log("Daemon stopped.");
+      if (sessions.length) console.log(keptSessions(sessions));
     });
   startCommand(daemon.command("start").description("Run this device as a paired peer: start its daemon, or report the running one (also cns up)"));
   stopCommand(daemon.command("stop").description("Stop the daemon and its peer connections; a service starts it again at the next login or cns daemon start (also cns stop)"));
