@@ -52,10 +52,10 @@ const statusSchema = z.object({
   version: z.unknown().transform((value) => reportedVersion(value)),
   daemon: z.object({
     executable: z.string().max(4096).nullish(),
-    // Absent before cns 2.9.0, whose daemon cannot say which named sessions a restart would end.
+    // Absent from a cns too old to report them, whose daemon cannot say which named sessions a restart would end.
     sessions: z.array(z.string().max(200)).max(1000).nullish(),
   }).nullish(),
-  // Absent before cns 2.9.0: that cns cannot say whether its service runs another one.
+  // Absent from a cns too old to report it, which cannot say whether its service runs another one.
   service: z.object({ managedByNix: z.boolean(), runsThis: z.boolean() }).nullish(),
 });
 
@@ -205,7 +205,7 @@ export async function upgradeDevice(name: string, target: string, reach: Reach, 
     if (fresh.version !== target) {
       return { device: name, result: "failed", reason: `the cns mise gave for ${target}, ${printable(path)}, is cns ${fresh.version}`, next: `There, mise ls ${MISE_TOOL} lists what mise has; run mise install --force ${tool}, ${RESTART_THERE}.` };
     }
-    // Sessions started while mise worked: a daemon from 2.9.0 on names them again now.
+    // Sessions started while mise worked: this daemon names its sessions, as the first look showed.
     const current = fresh.daemon?.sessions?.map(printable);
     if (!options.endSessions && current?.length) return sessionsLeft(name, current, from);
     // A service keeps the cns it names, so only cns up --install, from the new cns, moves it onto that one.
@@ -227,7 +227,7 @@ function sessionsLeft(name: string, sessions: string[] | null | undefined, from:
   return {
     device: name, result: "manual",
     reason: `its daemon, ${describeVersion(from)}, cannot say whether it holds named sessions, which restarting it would end`,
-    next: `To end any and upgrade, run cns upgrade ${name} --end-sessions. Once is enough: a daemon from cns 2.9.0 on names its sessions.`,
+    next: `To end any and upgrade, run cns upgrade ${name} --end-sessions. Once is enough: the new cns names its sessions.`,
   };
 }
 

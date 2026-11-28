@@ -167,7 +167,7 @@ test("a daemon with named sessions, or too old to say, is left alone unless --en
 
   const old = device({ sessions: null });
   assert.equal(reportLine(await upgradeDevice("pi", "2.9.0", old.reach, quick)),
-    "pi: needs a manual step: its daemon, cns 2.7.0, cannot say whether it holds named sessions, which restarting it would end. To end any and upgrade, run cns upgrade pi --end-sessions. Once is enough: a daemon from cns 2.9.0 on names its sessions.");
+    "pi: needs a manual step: its daemon, cns 2.7.0, cannot say whether it holds named sessions, which restarting it would end. To end any and upgrade, run cns upgrade pi --end-sessions. Once is enough: the new cns names its sessions.");
   assert.match(reportLine(await upgradeDevice("pi", "2.9.0", old.reach, { ...quick, dryRun: true, endSessions: true })), /, which ends any named sessions it holds and any open shells$/);
 
   // A session started while mise installed the release: the new cns sees it, and nothing restarts.
