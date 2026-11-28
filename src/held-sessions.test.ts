@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { chmod, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
@@ -99,9 +99,23 @@ async function until(check: () => boolean | Promise<boolean>, what: string, time
   }
 }
 
+/** The holders' directories of every test, whose holders this process kills as it exits, should a test time out before its hooks end them. */
+const holderDirs = new Set<string>();
+process.once("exit", () => {
+  for (const dir of holderDirs) {
+    for (const file of existsSync(dir) ? readdirSync(dir).filter((name) => name.endsWith(".json")) : []) {
+      try {
+        const record = holderRecordSchema.safeParse(JSON.parse(readFileSync(path.join(dir, file), "utf8")));
+        if (record.success) process.kill(record.data.pid, "SIGKILL");
+      } catch { /* Gone. */ }
+    }
+  }
+});
+
 /** A daemon's sessions in a directory of their own; hooks end every holder still running, a stopped one too. */
 async function holders(t: TestContext, options: ConstructorParameters<typeof HeldSessions>[2] = {}) {
   const dir = path.join(await realpath(await mkdtemp(path.join(TEST_TMP, "cns-held-"))), "daemon-sessions");
+  holderDirs.add(dir);
   const sessions = new HeldSessions(dir, () => {}, options);
   await sessions.adopt();
   const records = async () => {
