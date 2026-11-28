@@ -1,16 +1,21 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import type { LinkMode } from "./auth.js";
 import { connectControl } from "./commands/daemon.js";
-import { savePairedPeer, type Permission } from "./peers.js";
-import { launchCli, unusedPort } from "./test-support.js";
+import { GrantedShell } from "./granted-shell.js";
+import { generateIdentity, type Identity, type PublicKey } from "./identity.js";
+import { savePairedPeer, type LanCard, type Permission } from "./peers.js";
+import { connectFirst, rpcSession, type SecureChannel } from "./secure.js";
+import { ShellApi } from "./shell.js";
+import { launchCli, testDevices, unusedPort } from "./test-support.js";
 import { lanCards } from "./wake.js";
 
 const posix = process.platform !== "win32";
 
-test("daemons on a standing link tell each other where they are, what they grant and their network cards, and both save it", { skip: posix ? false : "daemons need POSIX state files", timeout: 60000 }, async (t) => {
+test("daemons on a standing link tell each other where they are and what they grant, the one that grants its network cards too, and both save it", { skip: posix ? false : "daemons need POSIX state files", timeout: 60000 }, async (t) => {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-exchange-")));
   const cleanups: Array<() => Promise<unknown>> = [];
   t.after(async () => { for (const cleanup of cleanups.reverse()) await cleanup(); await rm(root, { recursive: true, force: true }); });
@@ -66,9 +71,61 @@ test("daemons on a standing link tell each other where they are, what they grant
   await eventually(async () => (await saved(laptop.dir, "studio")).grants.outgoing.length === 1, "laptop saves its current access");
   assert.deepEqual((await saved(laptop.dir, "studio")).grants, { incoming: [], outgoing: ["shell"] });
   assert.deepEqual((await saved(studio.dir, "laptop")).grants, { incoming: ["shell"], outgoing: [] });
-  // Each saves the other's network cards, for cns wake once it sleeps: here both are this machine's.
-  for (const [dir, name] of [[laptop.dir, "studio"], [studio.dir, "laptop"]] as const) {
+  // Laptop saves studio's network cards, for cns wake once studio sleeps: here they are this
+  // machine's. Laptop grants studio nothing, so it tells studio none.
+  for (const [dir, name, cards] of [[laptop.dir, "studio", lanCards()], [studio.dir, "laptop", []]] as const) {
     await eventually(async () => (await saved(dir, name)).lan !== undefined, `${name}'s network cards are saved`);
-    assert.deepEqual((await saved(dir, name)).lan, lanCards());
+    assert.deepEqual((await saved(dir, name)).lan, cards);
   }
+});
+
+test("a daemon tells its network cards only over a standing link from a device it grants something, and saves only cards told right", { skip: posix ? false : "daemons need POSIX state files", timeout: 60000 }, async (t) => {
+  const devices = await testDevices(t, "cns-lan-");
+  const studio = await devices.device("studio");
+  const studioKey = JSON.parse((await devices.cli(studio, ["identity", "--json"])).stdout).publicKey as PublicKey;
+  const [laptop, reader, gateway] = [generateIdentity(), generateIdentity(), generateIdentity()];
+  const gone = await unusedPort("127.0.0.1");
+  const save = (name: string, publicKey: PublicKey, incoming: Permission[], gatewayRecord = false) => {
+    process.env.CNS_CONFIG_DIR = studio.dir;
+    try { savePairedPeer(name, { publicKey, addresses: [], pairedAt: new Date().toISOString(), grants: { incoming, outgoing: [] }, ...gatewayRecord ? { gateway: true as const } : {} }); }
+    finally { delete process.env.CNS_CONFIG_DIR; }
+  };
+  // Studio lets laptop and the gateway run commands, and reader nothing.
+  save("laptop", laptop.publicKey, ["shell"]);
+  save("reader", reader.publicKey, []);
+  save("gw", gateway.publicKey, ["shell"], true);
+  const port = await devices.up(studio);
+  const saved = async (name: string) => JSON.parse(await readFile(path.join(studio.dir, "peers", name), "utf8")) as { addresses: string[]; lan?: unknown };
+  const channels: SecureChannel[] = [];
+  t.after(() => { for (const channel of channels) channel.close(); });
+  /** Connect to studio as `identity`, telling it `cards` when asked; what studio says its cards are. */
+  const cardsFrom = async (identity: Identity, mode: LinkMode, cards: unknown = []) => {
+    const { channel } = await connectFirst([`ws://127.0.0.1:${port}`], identity, { expect: studioKey, mode });
+    channels.push(channel);
+    const here = new GrantedShell(new ShellApi(), [], "studio", null, () => [`ws://127.0.0.1:${gone}`], () => [], () => [], undefined, () => {}, () => cards as LanCard[]);
+    return await rpcSession<GrantedShell>(channel, here).lan();
+  };
+  const eventually = async (check: () => Promise<boolean>, label: string) => {
+    const until = Date.now() + 20000;
+    while (Date.now() < until) { if (await check()) return; await new Promise((resolve) => setTimeout(resolve, 200)); }
+    assert.fail(`Timed out: ${label}`);
+  };
+
+  // One command's connection learns none, even from a device granted the shell.
+  assert.deepEqual(await cardsFrom(laptop, "client"), []);
+  // Nor does a device granted nothing here, or the cns gateway, on a standing link.
+  assert.deepEqual(await cardsFrom(reader, "daemon", [{ mac: "00:11:22:33:44:55; id", cidr: "192.168.9.9/24" }]), []);
+  assert.deepEqual(await cardsFrom(gateway, "daemon"), []);
+  // A daemon studio grants something is told them.
+  assert.deepEqual(await cardsFrom(laptop, "daemon", [{ mac: "00:11:22:33:44:55", cidr: "192.168.9.9/24" }]), lanCards());
+  // Studio saves where each daemon said it is, and only the cards that are cards: what reader
+  // said is neither saved nor shown in studio's log.
+  await eventually(async () => (await saved("reader")).addresses.length > 0 && (await saved("laptop")).lan !== undefined, "studio saves what reader and laptop said");
+  assert.equal((await saved("reader")).lan, undefined);
+  assert.deepEqual((await saved("laptop")).lan, [{ mac: "00:11:22:33:44:55", cidr: "192.168.9.9/24" }]);
+  const logs = (await readdir(studio.dir)).filter((file) => file.startsWith("daemon.json.") && file.endsWith(".log"));
+  const log = (await Promise.all(logs.map((file) => readFile(path.join(studio.dir, file), "utf8")))).join("");
+  assert.match(log, /reader is reachable at /);
+  assert.match(log, /laptop's network cards, for cns wake: 00:11:22:33:44:55 \(192\.168\.9\.9\/24\); saved\./);
+  assert.doesNotMatch(log, /reader's network cards|; id/);
 });

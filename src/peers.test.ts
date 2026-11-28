@@ -193,8 +193,9 @@ test("every field of a record says what a cns that does not know it does with it
   const base = (fields: Record<string, string>) => Object.keys(fields).filter((key) => fields[key] === "base").sort();
   expect(base(PEER_FIELDS.record)).toEqual(["addresses", "grants", "mesh", "needs", "pairedAt", "publicKey", "version"]);
   expect(base(PEER_FIELDS.grants)).toEqual(["incoming", "outgoing"]);
-  // grants is the only object inside a record; another one needs a table of its own. The walk
-  // looks through every wrapper, and stops at a kind of schema it does not know.
+  // An object inside a record needs a table of its own, as grants has, unless the whole field is
+  // informational, as lan is (below). The walk looks through every wrapper, and stops at a kind of
+  // schema it does not know.
   type Def = { type: string; shape?: Record<string, z.core.$ZodType>; innerType?: z.core.$ZodType; element?: z.core.$ZodType; options?: z.core.$ZodType[]; in?: z.core.$ZodType; out?: z.core.$ZodType };
   const objects = (schema: z.core.$ZodType, at: string): string[] => {
     const def = schema._zod.def as Def;
