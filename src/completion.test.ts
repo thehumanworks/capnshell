@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { createCli } from "./cli-program.js";
-import { complete, completeCommand, LOOKUP_MS, MAX_CANDIDATES, quote, SHELLS, unquote, type Borrowed, type Lookups } from "./completion.js";
+import { complete, completeCommand, localLookups, LOOKUP_MS, MAX_CANDIDATES, quote, SHELLS, unquote, type Borrowed, type Lookups } from "./completion.js";
+import { makePrivateDirectory } from "./config.js";
 import type { FileKind } from "./files.js";
-import { PERMISSIONS, type Permission } from "./peers.js";
+import { fingerprint, generateIdentity } from "./identity.js";
+import { PERMISSIONS, revokeDevice, savePairedPeer, type Permission } from "./peers.js";
 
 /** A device as completion sees it through the local daemon's link: its files by absolute directory, and its sessions. */
 interface FakeDevice {
@@ -197,6 +202,27 @@ test("cns __complete quotes for the shell, takes the words as the shell gives th
   assert.deepEqual(await printed(["fish", "cp", "studio:it"], fake), ["studio:it's $(id).txt"]);
   assert.deepEqual(await printed(["bash"], fake), (await complete(program, [""], fake)));
   for (const args of [[], ["tcsh", ""], ["bash", "cp", ":x"], ["bash", "--", "-V"], ["bash", "ui", "/"]]) assert.deepEqual(await printed(args, fake), [], args.join(" "));
+});
+
+test("device names are the records here, without removed devices, and a bad record is skipped quietly", (t) => {
+  const dir = realpathSync(mkdtempSync(path.join(os.tmpdir(), "cns-complete-peers-")));
+  makePrivateDirectory(dir);
+  const saved = process.env.CNS_CONFIG_DIR;
+  process.env.CNS_CONFIG_DIR = dir;
+  t.after(() => { if (saved === undefined) delete process.env.CNS_CONFIG_DIR; else process.env.CNS_CONFIG_DIR = saved; rmSync(dir, { recursive: true, force: true }); });
+  const add = (name: string) => {
+    const { publicKey } = generateIdentity();
+    savePairedPeer(name, { publicKey, addresses: [], pairedAt: new Date().toISOString(), grants: { incoming: [], outgoing: ["files"] } });
+    return publicKey;
+  };
+  add("studio");
+  // A record left behind after cns peer remove, as from a backup.
+  revokeDevice(fingerprint(add("lost")));
+  writeFileSync(path.join(dir, "peers", "junk"), "not a record", { mode: 0o600 });
+  const error = process.stderr.write;
+  process.stderr.write = (() => { throw new Error("completion wrote to stderr"); }) as typeof process.stderr.write;
+  try { assert.deepEqual(localLookups().devices(), [{ name: "studio", outgoing: ["files"] }]); }
+  finally { process.stderr.write = error; }
 });
 
 test("quoting for bash and PowerShell reads back as the name it quotes", () => {
