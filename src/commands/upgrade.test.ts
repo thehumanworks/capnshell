@@ -109,6 +109,8 @@ interface Simulated {
   executable: string;
   /** The daemon's named sessions; null for a daemon too old to say. */
   sessions: string[] | null;
+  /** The daemon's named sessions outlive a restart, as daemon.keepsSessions says. */
+  keepsSessions: boolean;
   service: object | null;
   /** The name mise's config gives the tool that installed cns there, such as a [tool_alias], and the backend mise says it comes from. */
   tool: string;
@@ -145,7 +147,7 @@ function device(overrides: Partial<Simulated> = {}) {
   const sessions = overrides.sessions === undefined ? [] : overrides.sessions;
   const status = (version: string, extra: object = {}) => ({
     code: 0,
-    stdout: JSON.stringify({ version, daemon: { version: state.version, executable: overrides.executable ?? old, ...sessions ? { sessions } : {} }, ...extra }),
+    stdout: JSON.stringify({ version, daemon: { version: state.version, executable: overrides.executable ?? old, ...sessions ? { sessions } : {}, ...overrides.keepsSessions ? { keepsSessions: true } : {} }, ...extra }),
   });
   const answer = (command: string): { code: number; stdout?: string; stderr?: string } => {
     for (const [prefix, result] of Object.entries(overrides.answers ?? {})) if (command.includes(prefix)) return result;
@@ -423,6 +425,19 @@ test("a daemon with named sessions, or too old to say, is left alone unless --en
   assert.equal(reportLine(started), "studio: needs a manual step: restarting its daemon would end its named sessions agent. To end them and upgrade, run cns upgrade studio --end-sessions.");
   assert.equal(late.state.pid, 100, "not restarted");
   assert.equal(late.state.commands.length, 7);
+});
+
+test("a daemon whose named sessions outlive the restart is upgraded with them, and the plan says they outlive it", async () => {
+  const kept = device({ sessions: ["build", "shell-1"], keepsSessions: true });
+  assert.match(reportLine(await upgradeDevice("studio", "2.9.0", kept.reach, { ...quick, dryRun: true })),
+    /, then cns up --install from the new cns if a service runs the old one, else cns daemon restart, which its named sessions outlive$/);
+  assert.equal(reportLine(await upgradeDevice("studio", "2.9.0", kept.reach, quick)), "studio: upgraded from 2.7.0 to 2.9.0");
+  assert.equal(kept.state.pid, 101, "restarted");
+  // One that does not keep them, as under a systemd unit without KillMode=process, is still held back.
+  const ends = device({ sessions: ["build"], keepsSessions: false });
+  assert.equal(reportLine(await upgradeDevice("studio", "2.9.0", ends.reach, quick)),
+    "studio: needs a manual step: restarting its daemon would end its named sessions build. To end them and upgrade, run cns upgrade studio --end-sessions.");
+  assert.equal(ends.state.pid, 100, "not restarted");
 });
 
 test("the cns mise gives must be the release, or nothing restarts", async () => {

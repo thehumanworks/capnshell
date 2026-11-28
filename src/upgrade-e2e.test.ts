@@ -3,6 +3,7 @@ import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { connectControl } from "./commands/daemon.js";
+import { HOLDERS } from "./held-sessions.js";
 import { CNS_VERSION } from "./version.js";
 import { cliInvocation, cnsAs, fakeSystemctl, testDevices } from "./test-support.js";
 
@@ -43,9 +44,10 @@ async function script(file: string, body: string): Promise<string> {
  * A device whose daemon, once started with `old`, runs cns 2.7.0 that mise installed as `tool`, as
  * far as cns upgrade can tell: the cns on its PATH says so, mise lists it there and says it comes
  * from github:thehumanworks/capnshell, and its mise "installs" this cns as the latest release,
- * which the releases URL it returns, for CNS_RELEASES, names.
+ * which the releases URL it returns, for CNS_RELEASES, names. `daemon` is what that cns says of its
+ * daemon's named sessions.
  */
-async function miseDevice(t: TestContext, devices: Awaited<ReturnType<typeof testDevices>>, name: string, tool = "github:thehumanworks/capnshell") {
+async function miseDevice(t: TestContext, devices: Awaited<ReturnType<typeof testDevices>>, name: string, { tool = "github:thehumanworks/capnshell", daemon = { sessions: [] } }: { tool?: string; daemon?: object } = {}) {
   const tools = path.join(devices.root, `${name}-tools`);
   const bin = path.join(tools, "bin");
   // As mise names the directory: installs/github-thehumanworks-capnshell, or installs/cns for a [tool_alias] cns.
@@ -54,7 +56,7 @@ async function miseDevice(t: TestContext, devices: Awaited<ReturnType<typeof tes
   const fresh = await script(path.join(installs, CNS_VERSION, "cns"), `exec ${self().map(sh).join(" ")} "$@"`);
   const miseLog = path.join(tools, "mise.log");
   await writeFile(miseLog, "");
-  await script(path.join(bin, "cns"), `echo ${sh(JSON.stringify({ version: "2.7.0", daemon: { version: "2.7.0", executable: path.join(installs, "2.7.0", "cns"), sessions: [] } }))}`);
+  await script(path.join(bin, "cns"), `echo ${sh(JSON.stringify({ version: "2.7.0", daemon: { version: "2.7.0", executable: path.join(installs, "2.7.0", "cns"), ...daemon } }))}`);
   // What mise 2026.11.14 prints for these, cut to what cns reads.
   const source = { type: "mise.toml", path: path.join(devices.root, name, ".config", "mise", "config.toml") };
   const listing = { [tool]: [{ version: "2.7.0", requested_version: "2.7.0", install_path: path.join(installs, "2.7.0"), source, installed: true, active: true }] };
@@ -126,7 +128,7 @@ test("cns upgrade --all upgrades a device through mise and restarts its daemon, 
 test("a paired device's cns up --install hands the restart to a process of its own, and cns upgrade moves the service onto the new cns, through a mise tool alias", { skip: process.platform !== "linux", timeout: 120000 }, async (t) => {
   const devices = await testDevices(t, "cns-upgrade-service-");
   // [tool_alias] cns = "github:thehumanworks/capnshell" in mise's config there.
-  const { device: studio, old, bin, miseLog, log, releases } = await miseDevice(t, devices, "studio", "cns");
+  const { device: studio, old, bin, miseLog, log, releases } = await miseDevice(t, devices, "studio", { tool: "cns" });
   await fakeSystemctl(bin);
   const laptop = await devices.device("laptop");
   await devices.up(studio, undefined, old);
@@ -162,7 +164,30 @@ test("a paired device's cns up --install hands the restart to a process of its o
   assert.equal(again.code, 0, again.output);
 });
 
-test("cns status --json names the named sessions its daemon runs, which cns upgrade leaves alone without --end-sessions", { timeout: 60000 }, async (t) => {
+test("cns upgrade restarts a daemon whose named sessions outlive it, and the session runs on with its pid", { skip: !HOLDERS, timeout: 120000 }, async (t) => {
+  const devices = await testDevices(t, "cns-upgrade-kept-");
+  const { device: studio, old, log, releases } = await miseDevice(t, devices, "studio", { daemon: { sessions: ["build"], keepsSessions: true } });
+  const laptop = await devices.device("laptop");
+  await devices.up(studio, undefined, old);
+  await devices.pair(studio, laptop);
+  const started = await devices.cli(laptop, ["shell", "studio", "--name", "build", "--", "sleep 300"]);
+  assert.equal(started.code, 0, started.output);
+  const listed = async () => JSON.parse((await devices.cli(laptop, ["sessions", "studio", "--json"])).stdout) as Array<{ name: string; pid: number; startedAt: string }>;
+  const [before] = await listed();
+  const daemon = await daemonAt(studio.state);
+
+  const upgraded = await devices.cli({ ...laptop, env: { ...laptop.env, CNS_RELEASES: releases } }, ["upgrade", "studio"]);
+  assert.equal(upgraded.code, 0, `${upgraded.output}\nThe restart's log:\n${await log()}`);
+  assert.equal(upgraded.stdout, `studio: upgraded from 2.7.0 to ${CNS_VERSION}\n`);
+  assert.equal((await replaced(studio.state, daemon.pid, log)).version, CNS_VERSION);
+  for (const deadline = Date.now() + 20000; ; await new Promise((resolve) => setTimeout(resolve, 200))) {
+    const after = await listed().catch(() => []);
+    if (after.length) { assert.deepEqual(after.map(({ name, pid, startedAt }) => ({ name, pid, startedAt })), [{ name: "build", pid: before!.pid, startedAt: before!.startedAt }]); break; }
+    if (Date.now() > deadline) assert.fail("laptop never listed studio's sessions again");
+  }
+});
+
+test("cns status --json names the named sessions its daemon runs, and whether they outlive a restart", { timeout: 60000 }, async (t) => {
   const devices = await testDevices(t, "cns-upgrade-sessions-");
   const studio = await devices.device("studio");
   const laptop = await devices.device("laptop");
@@ -177,6 +202,8 @@ test("cns status --json names the named sessions its daemon runs, which cns upgr
   const started = await devices.cli(laptop, ["shell", "studio", "--name", "build", "--", "sleep 300"]);
   assert.equal(started.code, 0, started.output);
   assert.deepEqual(await sessions(), ["build"]);
+  const status = JSON.parse((await devices.cli(studio, ["status", "--json", "--state", studio.state])).stdout) as { daemon: { keepsSessions: boolean } };
+  assert.equal(status.daemon.keepsSessions, HOLDERS);
 });
 
 test("cns peers names a device behind the latest release, learned at most once a day, and exits 0 whether GitHub answers or not", { timeout: 60000 }, async (t) => {
