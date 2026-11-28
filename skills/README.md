@@ -9,7 +9,7 @@ the [Agent Skills](https://agentskills.io) format: a `SKILL.md` with a `name` an
 | [cns-remote](cns-remote/SKILL.md) | Run commands, copy files and drive terminal programs on another device |
 | [cns-skills](cns-skills/SKILL.md) | Find, read and copy skills kept on any paired device |
 | [cns-secrets](cns-secrets/SKILL.md) | Give commands mesh secrets without printing them |
-| [cns-access](cns-access/SKILL.md) | Pairing, grants, denials, meshes, bots and gateway approvals |
+| [cns-access](cns-access/SKILL.md) | Pairing, grants, denials, meshes, bots, gateway approvals and the audit log |
 | [cns-troubleshoot](cns-troubleshoot/SKILL.md) | Offline devices, exit statuses, version drift and the relay |
 
 The skills tell agents to leave access changes, pairing and secret values to you: they
