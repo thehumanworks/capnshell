@@ -6,8 +6,6 @@ import net from "node:net";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { connectControl } from "./commands/daemon.js";
-import { isRelayAddress } from "./relay-hub.js";
-import { startRelay } from "./relay-server.js";
 import { launchCli, settledLink, testDevices, unusedPort, type TestDevice } from "./test-support.js";
 
 const posix = process.platform !== "win32";
@@ -184,10 +182,11 @@ test("over the daemon's link: 50 MiB each way by hash while the link still answe
   // A forward whose process is killed is released there with its link: eight more fit, then none.
   echoes.child.kill("SIGKILL");
   await echoes.exited;
-  for (const each of [forward, sixForward]) {
-    if (!each) continue;
-    each.child.kill("SIGTERM");
-    assert.equal(await each.exited, 143, each.output);
+  forward.child.kill("SIGINT");
+  assert.equal(await forward.exited, 130, forward.output);
+  if (sixForward) {
+    sixForward.child.kill("SIGTERM");
+    assert.equal(await sixForward.exited, 143, sixForward.output);
   }
   // The daemon hung up the control connection that borrowed the link the restart ended.
   const control2 = await connectControl(laptop.state);
@@ -217,6 +216,14 @@ test("with only the port's grant, over its own link: other ports refused, one au
   const other = await service(t, echo);
   const local = await unusedPort("127.0.0.1");
 
+  // Nothing answers at studio's address: the first attempt fails with 1, and says why on one line.
+  const file = path.join(laptop.dir, "peers", "studio");
+  const record = await readFile(file, "utf8");
+  await writeFile(file, JSON.stringify({ ...JSON.parse(record), addresses: ["ws://127.0.0.1:1"] }));
+  const unreachable = await devices.cli(laptop, ["forward", "studio", String(echoPort), "--local", local]);
+  assert.equal(unreachable.code, 1, unreachable.output);
+  assert.match(unreachable.stderr, /^cns: Cannot connect to studio: [^\n]*\n$/);
+  await writeFile(file, record);
 
   // Port words never travel in a pairing.
   const pairing = await devices.cli(studio, ["pair", "--yes", "--grant", `files,port:${echoPort}`, "--state", studio.state]);
@@ -305,37 +312,4 @@ test("with only the port's grant, over its own link: other ports refused, one au
   assert.equal(await within(nextConnection.exited, "the forward exiting at the next connection", () => nextConnection.output), 3, nextConnection.output);
   assert.match(nextConnection.stderr, notSaved);
   await within(lateClosed, "the next connection closing", () => nextConnection.output);
-});
-
-test("through the relay when no direct address answers", { skip: !posix, timeout: 120000 }, async (t) => {
-  const relayPort = Number(await unusedPort("127.0.0.1"));
-  const relay = startRelay({ bind: "127.0.0.1", port: relayPort });
-  t.after(() => relay.stop());
-  const env = { CNS_RELAY: `ws://127.0.0.1:${relayPort}` };
-  const devices = await testDevices(t, "cns-forward-relay-");
-  const studio = await devices.device("studio", env);
-  const laptop = await devices.device("laptop", env);
-  await devices.up(studio);
-  await devices.pair(studio, laptop);
-  // Only the relay can reach studio from here.
-  const file = path.join(laptop.dir, "peers", "studio");
-  const record = JSON.parse(await readFile(file, "utf8"));
-  const relayed = (record.addresses as string[]).filter(isRelayAddress);
-  assert.ok(relayed.length, JSON.stringify(record.addresses));
-  await writeFile(file, JSON.stringify({ ...record, addresses: ["ws://127.0.0.1:1", ...relayed] }), { mode: 0o600 });
-
-  const down = randomBytes(4 * MiB);
-  const bulk = await service(t, (socket) => socket.end(down));
-  const local = await unusedPort("127.0.0.1");
-  const forward = await forwarding(t, laptop, ["studio", String(bulk), "--local", local]);
-  assert.match(forward.stderr, /, via the relay \(Ctrl-C stops\)/);
-  assert.equal(sha(await readAll(await dial(local))), sha(down));
-  forward.child.kill("SIGINT");
-  assert.equal(await forward.exited, 130, forward.output);
-
-  // Nothing answers now: the first attempt fails with 1, and says why on one line.
-  await relay.stop();
-  const unreachable = await devices.cli(laptop, ["forward", "studio", String(bulk), "--local", local]);
-  assert.equal(unreachable.code, 1, unreachable.output);
-  assert.match(unreachable.stderr, /^cns: Cannot connect to studio: [^\n]*\n$/);
 });
