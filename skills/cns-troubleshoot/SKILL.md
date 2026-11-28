@@ -21,7 +21,7 @@ Follow what they print: when something is wrong they name the command that fixes
 
 | Symptom | Cause and next step |
 | --- | --- |
-| `cns peers` says `offline` | That device's daemon is not running, or no path reaches it. `cns doctor NAME`. If every address is `unreachable`, the user must start cns there (`cns up`, or its service). |
+| `cns peers` says `offline` | That device's daemon is not running, or no path reaches it. `cns doctor NAME`. If every address is `unreachable`, the user must start cns there (`cns up`, or its service). A desktop or NAS that sleeps: `cns wake NAME` has a device on its network wake it, and says what to do when cns cannot. |
 | `unreachable` for direct addresses only | Normal for a device in WSL or behind NAT: its own daemon links out, and commands use that link. Fine while `cns peers` shows it `online`. |
 | Each command takes a second or two | It goes through the relay: `CONNECTION` says `relay`. Keep both daemons running so a standing link exists. |
 | Exit 3, `identity-changed` | Another key answers at that address. The device was reinstalled, or it is not that device. Stop and tell the user; they must check the fingerprint and pair again. |

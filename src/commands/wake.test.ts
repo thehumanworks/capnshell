@@ -7,7 +7,7 @@ import { fingerprint, generateIdentity } from "../identity.js";
 import { revokeDevice, savePairedPeer, type LanCard } from "../peers.js";
 import type { SendPacket } from "../wake.js";
 import { commandLine, type Device, type Reach } from "./upgrade.js";
-import { planWake, reportLine, wake, wakeArguments, wakeExitCode } from "./wake.js";
+import { planWake, reportLine, wake, wakeArguments, wakeExitCode, type Outcome } from "./wake.js";
 
 const key = () => generateIdentity().publicKey;
 const card = (mac: string, cidr: string): LanCard => ({ mac, cidr });
@@ -51,9 +51,9 @@ test("only a checked MAC address and IPv4 address go on the sending device's com
 });
 
 test("the exit status is 0 when a packet went out, 4 when each sender refused this device, else 1", () => {
-  const sent = { from: "nas", result: "sent", macs: [STUDIO_ETH.mac] } as const;
-  const refused = { from: "pi", result: "failed", reason: "Permission denied", refused: true } as const;
-  const away = { from: "pi", result: "failed", reason: "unreachable" } as const;
+  const sent: Outcome = { from: "nas", result: "sent", macs: [STUDIO_ETH.mac] };
+  const refused: Outcome = { from: "pi", result: "failed", reason: "Permission denied", refused: true };
+  const away: Outcome = { from: "pi", result: "failed", reason: "unreachable" };
   assert.equal(wakeExitCode([refused, sent]), 0);
   assert.equal(wakeExitCode([refused, refused]), 4);
   assert.equal(wakeExitCode([refused, away]), 1);

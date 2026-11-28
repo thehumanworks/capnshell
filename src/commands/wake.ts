@@ -37,17 +37,14 @@ export function planWake(sleeper: Pick<PeerEntry, "name" | "publicKey" | "lan">,
   }
   if (via !== undefined) return [{ device: via, cards }];
   const on = (mine: readonly LanCard[]) => cards.filter((card) => mine.some((own) => holds(own.cidr, cardAddress(card))));
-  const senders: Sender[] = [];
-  if (on(here).length) senders.push({ device: null, cards: on(here) });
-  for (const peer of peers) {
-    if (peer.publicKey === sleeper.publicKey || peer.gateway || !on(peer.lan ?? []).length) continue;
-    senders.push({ device: peer.name, cards: on(peer.lan ?? []) });
-  }
-  if (!senders.length) {
+  const senders: Sender[] = [{ device: null, cards: on(here) }];
+  for (const peer of peers) if (peer.publicKey !== sleeper.publicKey && !peer.gateway) senders.push({ device: peer.name, cards: on(peer.lan ?? []) });
+  const chosen = senders.filter((sender) => sender.cards.length);
+  if (!chosen.length) {
     throw new Error(`No device cns knows to be on ${name}'s network (${networks(cards)}) can send the packet: this device is not on it, and no paired device has said it is. ` +
       `Name one that is: cns wake ${name} --via DEVICE. A device says which networks it is on when its daemon links to this one's, both running a cns that has cns wake; cns peers shows which are online.`);
   }
-  return senders;
+  return chosen;
 }
 
 /** What became of one sender. Every text in it is strictlyPrintable when reportLine prints it. */
