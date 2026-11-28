@@ -4,7 +4,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { launchCli, unusedPort } from "./test-support.js";
+import { endHolders, launchCli, unusedPort } from "./test-support.js";
 
 const posix = process.platform !== "win32";
 
@@ -27,7 +27,7 @@ test("an attached session survives losing the connection and reports what it mis
   };
   const port = await unusedPort("127.0.0.1");
   assert.equal((await cli(studio, ["up", "--bind", "127.0.0.1", "--port", port, "--state", studio.state])).code, 0);
-  cleanups.push(() => cli(studio, ["stop", "--state", studio.state]));
+  cleanups.push(async () => { await cli(studio, ["stop", "--state", studio.state]); await endHolders(studio.state); });
   const inviting = launchCli(t, ["pair", "--yes", "--name", "laptop", "--grant", "all", "--state", studio.state], { env: studio.env });
   inviting.child.stdin.end();
   await inviting.waitFor("Invite: cns1:");

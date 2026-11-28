@@ -8,7 +8,7 @@ import test, { type TestContext } from "node:test";
 import { Client, type CallToolResult } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { Terminal as Screen } from "@xterm/headless";
-import { cliEnvironment, cliInvocation, kittyKeyboard, launchCli, unusedPort } from "./test-support.js";
+import { cliEnvironment, cliInvocation, endHolders, kittyKeyboard, launchCli, unusedPort } from "./test-support.js";
 
 const posix = process.platform !== "win32";
 const decoder = new TextDecoder();
@@ -160,7 +160,7 @@ async function pairedStudio(t: TestContext) {
   const studio = await device("studio");
   const port = await unusedPort("127.0.0.1");
   assert.equal((await cli(studio, ["up", "--bind", "127.0.0.1", "--port", port, "--state", studio.state])).code, 0);
-  cleanups.push(() => cli(studio, ["stop", "--state", studio.state]));
+  cleanups.push(async () => { await cli(studio, ["stop", "--state", studio.state]); await endHolders(studio.state); });
   /** Pair another device with studio, which grants it `grant`. */
   const pair = async (name: string, grant: string) => {
     const dev = await device(name);
