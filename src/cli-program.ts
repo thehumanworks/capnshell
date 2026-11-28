@@ -60,6 +60,11 @@ export function createCli(): Command {
     process.exitCode = await sessionsEverywhere(config);
   });
   const daemon = addDaemonCommand(program, async (config) => {
+    if (config.service && process.platform === "win32") {
+      // Task Scheduler restarts only a task it cannot start, so the task's process supervises the daemon.
+      const { superviseDaemon, supervised } = await import("./service.js");
+      if (!supervised()) { process.exitCode = await superviseDaemon({ state: config.state, bind: config.bind, port: config.port }); return; }
+    }
     const { startPeer } = await import("./commands/peer.js");
     await startPeer(config);
   });
@@ -318,7 +323,7 @@ export function createCli(): Command {
     .option("-b, --bind <address>", "Interface to listen on (default: every interface; CNS_BIND)")
     .option("-p, --port <port>", "TCP port (default: 47381; CNS_PORT)")
     .option("-S, --state <path>", "Local daemon state file")
-    .option("-i, --install", "Run the daemon as a service that starts at login and restarts if it fails: a launchd agent on macOS, a systemd user service on Linux")
+    .option("-i, --install", "Run the daemon as a service that starts at login and restarts if it fails: a launchd agent on macOS, a systemd user service on Linux, a scheduled task on Windows")
     .option("-u, --uninstall", "Stop the service's daemon and remove the service")
     .addHelpText("after", "\nOnly paired devices can connect, after authenticating; each gets what cns pair granted it.\nThe daemon also registers at the relay built into cns, so paired devices on other networks reach it\nwith nothing to set up. Links are encrypted end to end, directly or through the relay. Pair with cns pair.\n--install keeps the running daemon's --bind and --port unless given; run it again to change them.")
     .action(async (options) => { const { up } = await import("./commands/pairing-cli.js"); await up(options); });
@@ -335,7 +340,7 @@ export function createCli(): Command {
     .description("Stop the daemon and start it again as it runs now, also when a paired device runs this, which drops its link")
     .option("-S, --state <path>", "Local daemon state file")
     .addOption(new Option("--worker <ms>").hideHelp())
-    .addHelpText("after", "\nThe daemon comes back through its service when one runs it (systemd restarts it, launchd starts it\nagain), else detached with the same --bind and --port, running this cns. A paired device can run it:\n  cns run studio -- cns daemon restart\nIt then returns at once, the daemon restarts a second later, and the link comes back within seconds.\nRestarting ends the named sessions the daemon holds. A daemon that was not running is started.")
+    .addHelpText("after", "\nThe daemon comes back through its service when one runs it (systemd restarts it, launchd or Task\nScheduler starts it again), else detached with the same --bind and --port, running this cns. A paired device can run it:\n  cns run studio -- cns daemon restart\nIt then returns at once, the daemon restarts a second later, and the link comes back within seconds.\nRestarting ends the named sessions the daemon holds. A daemon that was not running is started.")
     .action(async (options: { state?: string; worker?: string }) => { const { restart } = await import("./commands/pairing-cli.js"); await restart(options); });
   startCommand(program.command("up").description("Run this device as a paired peer: start its daemon, or report the running one (also cns daemon start)"));
   program.command("pair")

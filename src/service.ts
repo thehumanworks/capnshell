@@ -1,15 +1,20 @@
-import { spawnSync } from "node:child_process";
-import { lstat, mkdir, rename, unlink, writeFile } from "node:fs/promises";
+import { spawn, spawnSync } from "node:child_process";
+import { appendFile, lstat, mkdir, open, rename, unlink, writeFile } from "node:fs/promises";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { configDirectory } from "./config.js";
+import { selfInvocation } from "./runtime.js";
 
 /** The launchd label and the systemd unit name of the installed daemon. */
 export const SERVICE_LABEL = "com.thehumanworks.cns";
 export const SERVICE_UNIT = "cns.service";
 
-export type ServiceKind = "launchd" | "systemd";
+/** The Windows scheduled task's name: one per account, since all accounts' tasks share one folder. */
+export const taskName = (user = os.userInfo().username) => `cns-${user}`;
+
+/** schtasks is a Windows Task Scheduler task that starts at sign-in. */
+export type ServiceKind = "launchd" | "systemd" | "schtasks";
 
 /** What the service runs: the daemon in the foreground, as `cns up` would start it. */
 export interface ServiceSpec {
@@ -19,6 +24,8 @@ export interface ServiceSpec {
   env: Record<string, string>;
   /** Where launchd writes the daemon's output; systemd sends it to the journal. */
   log: string;
+  /** The account a scheduled task runs as, and whose sign-in starts it: its SID, from accountSid. */
+  user?: string;
 }
 
 export interface ServiceFile {
@@ -31,11 +38,17 @@ export interface ServiceFile {
 export function serviceKind(platform: NodeJS.Platform = process.platform): ServiceKind | undefined {
   if (platform === "darwin") return "launchd";
   if (platform === "linux") return "systemd";
+  if (platform === "win32") return "schtasks";
   return undefined;
 }
 
-/** launchd and systemd run on macOS and Linux, so their paths are POSIX ones on every platform. */
+/**
+ * launchd and systemd run on macOS and Linux, so their paths are POSIX ones on every platform. Task
+ * Scheduler keeps its tasks to itself; cns keeps the definition it registered, which only Windows
+ * reads, so that path has this platform's separators.
+ */
 export function servicePath(kind: ServiceKind, home = os.homedir(), env: NodeJS.ProcessEnv = process.env): string {
+  if (kind === "schtasks") return path.join(home, ".cns", "service.xml");
   if (kind === "launchd") return path.posix.join(home, "Library", "LaunchAgents", `${SERVICE_LABEL}.plist`);
   const config = env.XDG_CONFIG_HOME && path.posix.isAbsolute(env.XDG_CONFIG_HOME) ? env.XDG_CONFIG_HOME : path.posix.join(home, ".config");
   return path.posix.join(config, "systemd", "user", SERVICE_UNIT);
@@ -130,8 +143,76 @@ export function systemdUnit(spec: ServiceSpec): string {
   ].join("\n");
 }
 
+/** One word of a Windows command line, always quoted, as programs that parse it like the C runtime read it back. */
+export function windowsQuote(value: string): string {
+  return `"${value.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, "$1$1")}"`;
+}
+
+/**
+ * The scheduled task: started at this account's sign-in, as this account and unelevated, so that
+ * registering it needs no administrator. cns is a console program, which Windows would show a
+ * console window for, so conhost --headless runs it, as the pseudo-console API does. Task Scheduler
+ * restarts only a task it could not start, so `cns daemon --service` supervises the daemon itself
+ * on Windows (superviseDaemon). It passes no environment: the daemon gets the account's.
+ */
+export function scheduledTask(spec: ServiceSpec): string {
+  const args = [spec.program.file, ...spec.program.args];
+  if (!spec.user) throw new Error("A scheduled task needs the account it runs as.");
+  refuseNewlines([...args, spec.user]);
+  // Task Scheduler expands %NAME% in a command line, and has no escape for it.
+  if (args.some((value) => /%[^%]+%/.test(value))) throw new Error("Task Scheduler would expand %NAME% in a service setting. Use paths without percent signs.");
+  const user = xml(spec.user);
+  return `<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>cns peer daemon for paired devices</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <UserId>${user}</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>${user}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>5</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>10</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>%SystemRoot%\\System32\\conhost.exe</Command>
+      <Arguments>--headless ${xml(args.map(windowsQuote).join(" "))}</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+`;
+}
+
 export function serviceFile(kind: ServiceKind, spec: ServiceSpec, home?: string, env?: NodeJS.ProcessEnv): ServiceFile {
-  return { kind, path: servicePath(kind, home, env), contents: kind === "launchd" ? launchdPlist(spec) : systemdUnit(spec) };
+  const contents = kind === "launchd" ? launchdPlist(spec) : kind === "systemd" ? systemdUnit(spec) : scheduledTask(spec);
+  return { kind, path: servicePath(kind, home, env), contents };
+}
+
+/** schtasks reads a task's definition as UTF-16, as Task Scheduler writes one. */
+const encodeService = (file: ServiceFile) => file.kind === "schtasks" ? Buffer.from(`\ufeff${file.contents}`, "utf16le") : file.contents;
+const readService = (kind: ServiceKind, file: string) => readFileSync(file, kind === "schtasks" ? "utf16le" : "utf8");
+
+/** One word of the daemon's command as the service file writes it, so that it never matches part of another word. */
+function serviceWord(kind: ServiceKind, value: string): string {
+  if (kind === "launchd") return `<string>${xml(value)}</string>`;
+  return kind === "systemd" ? systemdQuote(value) : xml(windowsQuote(value));
 }
 
 /** Runs the service manager; tests replace it. */
@@ -143,9 +224,19 @@ export const runCommand: Runner = (file, args) => {
   return { code: result.status ?? 1, output: `${result.stdout ?? ""}${result.stderr ?? ""}`.trim() };
 };
 
-function must(runner: Runner, file: string, args: string[]): void {
+function must(runner: Runner, file: string, args: string[], next?: string): void {
   const result = runner(file, args);
-  if (result.code !== 0) throw new Error(`${[file, ...args].join(" ")} failed${result.output ? `: ${result.output}` : ` (exit ${result.code})`}`);
+  if (result.code === 0) return;
+  const failed = `${[file, ...args].join(" ")} failed${result.output ? `: ${result.output}` : ` (exit ${result.code})`}`;
+  throw new Error(next ? `${failed.replace(/\.$/, "")}. ${next}` : failed);
+}
+
+/** This account's SID, which its scheduled task runs as and whose sign-in starts it. */
+export function accountSid(runner: Runner = runCommand): string {
+  const result = runner("whoami", ["/user", "/fo", "csv", "/nh"]);
+  const sid = /"(S-1-[0-9-]+)"\s*$/.exec(result.output)?.[1];
+  if (result.code !== 0 || !sid) throw new Error(`Cannot tell this account's SID for its scheduled task (whoami /user: ${result.output || `exit ${result.code}`}). Run cns up to start the daemon without a service.`);
+  return sid;
 }
 
 const launchdDomain = () => `gui/${process.getuid?.() ?? 0}`;
@@ -158,9 +249,14 @@ export async function installService(file: ServiceFile, runner: Runner = runComm
   try { if ((await lstat(file.path)).isSymbolicLink()) throw new Error(`Refusing to replace the symbolic link at ${file.path}.`); }
   catch (error) { if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error; }
   const temporary = `${file.path}.${process.pid}.tmp`;
-  await writeFile(temporary, file.contents, { mode: 0o600, flag: "wx" });
+  await writeFile(temporary, encodeService(file), { mode: 0o600, flag: "wx" });
   await rename(temporary, file.path);
-  if (file.kind === "launchd") {
+  if (file.kind === "schtasks") {
+    must(runner, "schtasks", ["/Create", "/TN", taskName(), "/XML", file.path, "/F"], "Run cns up to start the daemon without a service.");
+    // End a run that still supervises the old command, so that this one starts; it fails when none runs, which is fine.
+    runner("schtasks", ["/End", "/TN", taskName()]);
+    must(runner, "schtasks", ["/Run", "/TN", taskName()], "The task starts the daemon at your next sign-in; run cns up to start it now.");
+  } else if (file.kind === "launchd") {
     // Replace a loaded copy; bootout fails when none is loaded, which is fine.
     runner("launchctl", ["bootout", `${launchdDomain()}/${SERVICE_LABEL}`]);
     must(runner, "launchctl", ["bootstrap", launchdDomain(), file.path]);
@@ -174,6 +270,14 @@ export async function installService(file: ServiceFile, runner: Runner = runComm
 /** Stop the daemon through the service manager and remove the service file. Returns whether one was installed. */
 export async function uninstallService(kind: ServiceKind, runner: Runner = runCommand, home?: string, env?: NodeJS.ProcessEnv): Promise<boolean> {
   const file = servicePath(kind, home, env);
+  if (kind === "schtasks") {
+    // Ending the task ends its supervisor, not the daemon, which the caller stops first.
+    runner("schtasks", ["/End", "/TN", taskName()]);
+    const deleted = runner("schtasks", ["/Delete", "/TN", taskName(), "/F"]).code === 0;
+    const recorded = existsSync(file);
+    if (recorded) await unlink(file);
+    return deleted || recorded;
+  }
   if (!existsSync(file)) return false;
   if (kind === "launchd") runner("launchctl", ["bootout", `${launchdDomain()}/${SERVICE_LABEL}`]);
   else runner("systemctl", ["--user", "disable", "--now", SERVICE_UNIT]);
@@ -182,16 +286,20 @@ export async function uninstallService(kind: ServiceKind, runner: Runner = runCo
   return true;
 }
 
-/** The installed service's file, if there is one on this platform and it runs the daemon with this state file. */
-export function installedService(state: string, home?: string, env?: NodeJS.ProcessEnv): { kind: ServiceKind; path: string } | undefined {
-  const kind = serviceKind();
+/**
+ * The installed service's file, if there is one on this platform and it runs the daemon with this
+ * state file. A scheduled task counts only while Task Scheduler still has it.
+ */
+export function installedService(state: string, home?: string, env?: NodeJS.ProcessEnv, runner: Runner = runCommand, platform = process.platform): { kind: ServiceKind; path: string } | undefined {
+  const kind = serviceKind(platform);
   if (!kind) return undefined;
   const file = servicePath(kind, home, env);
   let contents: string;
-  try { contents = readFileSync(file, "utf8"); }
+  try { contents = readService(kind, file); }
   catch { return undefined; }
-  const needle = kind === "launchd" ? `<string>${xml(state)}</string>` : systemdQuote(state);
-  return contents.includes(needle) ? { kind, path: file } : undefined;
+  if (!contents.includes(serviceWord(kind, state))) return undefined;
+  if (kind === "schtasks" && runner("schtasks", ["/Query", "/TN", taskName()]).code !== 0) return undefined;
+  return { kind, path: file };
 }
 
 /**
@@ -200,17 +308,16 @@ export function installedService(state: string, home?: string, env?: NodeJS.Proc
  */
 export function installedServiceRuns(service: { kind: ServiceKind; path: string }, executable: string, store = "/nix/store/"): { managedByNix: boolean; runsThis: boolean } {
   let contents = "";
-  try { contents = readFileSync(service.path, "utf8"); } catch { /* Gone since it was found: it runs nothing. */ }
+  try { contents = readService(service.kind, service.path); } catch { /* Gone since it was found: it runs nothing. */ }
   let target = service.path;
   try { target = realpathSync(service.path); } catch { /* A broken link: not the Nix store's. */ }
-  const needle = service.kind === "launchd" ? `<string>${xml(executable)}</string>` : systemdQuote(executable);
-  return { managedByNix: target.startsWith(store), runsThis: contents.includes(needle) };
+  return { managedByNix: target.startsWith(store), runsThis: contents.includes(serviceWord(service.kind, executable)) };
 }
 
 /**
  * The systemd drop-ins whose ExecStart runs something other than `executable`. Whatever the unit
  * file says, every restart then brings back what they name, such as a runtime drop-in left under
- * /run/user/UID/systemd/user/cns.service.d from an earlier recovery. Empty for launchd, and when
+ * /run/user/UID/systemd/user/cns.service.d from an earlier recovery. Empty for launchd and Task Scheduler, and when
  * systemd cannot say.
  */
 export function serviceOverrides(kind: ServiceKind, executable: string, runner: Runner = runCommand): string[] {
@@ -230,6 +337,7 @@ export function serviceOverrides(kind: ServiceKind, executable: string, runner: 
 /** Start an installed daemon that is not running, as after cns stop. */
 export function startService(kind: ServiceKind, runner: Runner = runCommand): void {
   if (kind === "launchd") must(runner, "launchctl", ["kickstart", `${launchdDomain()}/${SERVICE_LABEL}`]);
+  else if (kind === "schtasks") must(runner, "schtasks", ["/Run", "/TN", taskName()], "Run cns up --install to register the task again.");
   else must(runner, "systemctl", ["--user", "start", SERVICE_UNIT]);
 }
 
@@ -251,7 +359,7 @@ export function serviceFailed(kind: ServiceKind, runner: Runner = runCommand): b
 
 /** Where to read the installed daemon's output. */
 export function serviceLog(kind: ServiceKind, state: string): string {
-  return kind === "launchd" ? path.join(path.dirname(state), "service.log") : "journalctl --user -u cns";
+  return kind === "systemd" ? "journalctl --user -u cns" : path.join(path.dirname(state), "service.log");
 }
 
 /** Whether systemd keeps this user's services running without a login session. */
@@ -263,9 +371,45 @@ export function lingering(runner: Runner = runCommand): boolean | undefined {
 }
 
 export function serviceName(kind: ServiceKind): string {
-  return kind === "launchd" ? "launchd agent" : "systemd user service";
+  return kind === "launchd" ? "launchd agent" : kind === "systemd" ? "systemd user service" : "scheduled task";
 }
 
 export function describeService(kind: ServiceKind): string {
   return `a ${serviceName(kind)}`;
+}
+
+/** Set for the daemon superviseDaemon starts. */
+const SUPERVISED = "CNS_SERVICE_SUPERVISED";
+
+/** Whether superviseDaemon started this daemon. Takes the marker out, so that what the daemon runs does not inherit it. */
+export function supervised(env: NodeJS.ProcessEnv = process.env): boolean {
+  const value = env[SUPERVISED];
+  delete env[SUPERVISED];
+  return value === "1";
+}
+
+/**
+ * What the scheduled task's `cns daemon --service` does: run the daemon, and start it again 5
+ * seconds after it fails, as launchd and systemd do, since Task Scheduler restarts only a task it
+ * could not start. The daemon runs detached, as cns up starts it, and appends its output to
+ * service.log. Returns 0 once the daemon exits with status 0, as after cns stop.
+ */
+export async function superviseDaemon(daemon: { state: string; bind: string; port: number }, launch: typeof spawn = spawn, delayMs = 5000): Promise<number> {
+  const program = selfInvocation(["daemon", "--service", "--state", daemon.state, "--bind", daemon.bind, "--port", String(daemon.port)]);
+  const log = serviceLog("schtasks", daemon.state);
+  await mkdir(path.dirname(log), { recursive: true, mode: 0o700 });
+  for (;;) {
+    const output = await open(log, "a", 0o600);
+    let ended: number | string;
+    try {
+      const child = launch(program.file, program.args, { detached: true, windowsHide: true, stdio: ["ignore", output.fd, output.fd], env: { ...process.env, [SUPERVISED]: "1" } });
+      ended = await new Promise<number | string>((resolve) => {
+        child.once("error", (error) => resolve(error.message));
+        child.once("exit", (code, signal) => resolve(code ?? signal ?? "unknown"));
+      });
+    } finally { await output.close(); }
+    if (ended === 0) return 0;
+    await appendFile(log, `[cns: the daemon ended (${ended}); starting it again in ${delayMs / 1000} seconds]\n`);
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
 }

@@ -26,7 +26,7 @@ import { RefusingShell } from "../refusing-shell.js";
 import { connectControl, daemonStatePath, processExited, removeStaleState, runsUnder, startDaemon, stopDaemon, type ControlConnection, type DaemonStatus } from "./daemon.js";
 import { selfInvocation, selfPath } from "../runtime.js";
 import { CNS_VERSION, daemonDrift, describeVersion, reportedVersion, restartAdvice, versionOrder } from "../version.js";
-import { describeService, installService, installedService, installedServiceRuns, lingering, restartService, serviceEnvironment, serviceFailed, serviceFile, serviceKind, serviceLog, serviceName, serviceOverrides, startService, uninstallService, type ServiceKind } from "../service.js";
+import { accountSid, describeService, installService, installedService, installedServiceRuns, lingering, restartService, serviceEnvironment, serviceFailed, serviceFile, serviceKind, serviceLog, serviceName, serviceOverrides, startService, taskName, uninstallService, type ServiceKind } from "../service.js";
 
 /** How long the invited device waits for the inviting person to decide. */
 const PROPOSAL_WAIT_MS = 10 * 60 * 1000;
@@ -307,7 +307,11 @@ async function restartNow(statePath: string | undefined, delayMs: number): Promi
   }
   if (plan.start === "systemd") restartService();
   else if (plan.start === "launchd") startService("launchd");
-  else {
+  else if (plan.start === "schtasks") {
+    // Task Scheduler ignores a run while it counts the last one as running, which ends a moment after the daemon.
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+    startService("schtasks");
+  } else {
     // Nothing else starts it again, so try more than once: its port can take a moment to come free.
     for (let attempt = 1; ; attempt++) {
       try { await startDaemon({ bind: status.bind, port: status.port, url: endpointUrl(status.bind, status.port), state }); break; }
@@ -351,11 +355,14 @@ function driftWarning(status: DaemonStatus, state?: string): string | undefined 
 
 function requireServiceKind() {
   const kind = serviceKind();
-  if (!kind) throw new Error("cns up --install supports macOS (launchd) and Linux (systemd). On this platform, start cns up from your system's startup mechanism.");
+  if (!kind) throw new Error("cns up --install supports macOS (launchd), Linux (systemd) and Windows (Task Scheduler). On this platform, start cns up from your system's startup mechanism.");
   return kind;
 }
 
-/** `cns up --install`: run the daemon as a launchd agent or systemd user service, so it starts at login and restarts after a crash. */
+/** The variables serviceEnvironment keeps that a scheduled task does not get from this shell, since it passes none. */
+const TASK_UNSEEN = ["CNS_CONFIG_DIR", "CNS_RELAY", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "SSL_CERT_DIR"];
+
+/** `cns up --install`: run the daemon as a launchd agent, systemd user service or scheduled task, so it starts at login and restarts after a crash. */
 async function install(options: UpOptions): Promise<void> {
   const kind = requireServiceKind();
   const { created } = ensureIdentity();
@@ -380,16 +387,22 @@ async function install(options: UpOptions): Promise<void> {
     program: selfInvocation(["daemon", "--service", "--state", state, "--bind", settings.bind, "--port", String(settings.port)]),
     env: serviceEnvironment(),
     log: path.join(path.dirname(state), "service.log"),
+    ...kind === "schtasks" ? { user: accountSid() } : {},
   });
   if (running) {
     await stopDaemon(state);
     console.error("Stopped the running daemon; the service runs it from now on.");
   }
   await installService(file);
-  console.error(`Installed ${describeService(kind)} at ${file.path}. It starts the daemon at login and restarts it if it fails; cns stop stops it until the next cns up or login.`);
+  const where = kind === "schtasks" ? `named ${taskName()}, defined in ${file.path}` : `at ${file.path}`;
+  console.error(`Installed ${describeService(kind)} ${where}. It starts the daemon at login and restarts it if it fails; cns stop stops it until the next cns up or login.`);
   console.error(`Its log: ${serviceLog(kind, state)}.`);
   if (kind === "systemd") {
     if (lingering() === false) console.error(`systemd stops user services when you log out. To keep the daemon running without a login, run: loginctl enable-linger ${os.userInfo().username}`);
+  }
+  const unseen = kind === "schtasks" ? TASK_UNSEEN.filter((name) => process.env[name]) : [];
+  if (unseen.length) {
+    console.error(`The task's daemon gets your account's environment, not this shell's. If ${unseen.join(", ")} ${unseen.length === 1 ? "is" : "are"} set only here, set ${unseen.length === 1 ? "it" : "each"} for your account with setx NAME VALUE, then run cns daemon restart.`);
   }
   console.error("Run cns up --install again after moving or upgrading cns to a new path, or to change --bind or --port.");
   (await awaitControl(options.state, undefined, serviceFailure(kind, state))).close();
@@ -399,8 +412,18 @@ async function install(options: UpOptions): Promise<void> {
 async function uninstall(options: UpOptions): Promise<void> {
   if (options.bind !== undefined || options.port !== undefined) throw new Error("--uninstall takes no --bind or --port.");
   const kind = requireServiceKind();
+  if (kind === "schtasks") await stopServiceDaemon(daemonStatePath(options.state));
   if (await uninstallService(kind)) console.log(`Removed the ${serviceName(kind)}; the daemon is stopped. Run cns up to start it without the service.`);
   else console.log(`No ${serviceName(kind)} is installed.`);
+}
+
+/** Stop the daemon if a service runs it. Ending a scheduled task ends its supervisor, not the daemon. */
+async function stopServiceDaemon(state: string): Promise<void> {
+  let control: ControlConnection;
+  try { control = await connectControl(state); } catch { return; }
+  let service: boolean | undefined;
+  try { service = (await control.remote.status()).service; } finally { control.close(); }
+  if (service) await stopDaemon(state);
 }
 
 /**

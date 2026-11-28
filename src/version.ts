@@ -1,4 +1,5 @@
 import manifest from "../package.json" with { type: "json" };
+import type { ServiceKind } from "./service.js";
 
 /** This cns's version, from package.json. */
 export const CNS_VERSION: string = manifest.version;
@@ -82,7 +83,7 @@ export interface RestartFacts {
   service?: boolean;
   /** The service `cns up --install` or Home Manager installed for this daemon's state file, if there is one. */
   installed?: {
-    kind: "launchd" | "systemd";
+    kind: ServiceKind;
     /** Its file is a link into the Nix store: Home Manager owns it, so cns must not rewrite it. */
     managedByNix: boolean;
     /** It runs this cns's executable. */

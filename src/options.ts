@@ -62,7 +62,7 @@ export interface DaemonConfig {
   url: string;
   /** The listener accepts connections from other machines. */
   remote: boolean;
-  /** Run in the foreground under launchd or systemd: it serves its control endpoint without a parent. */
+  /** Run in the foreground under launchd, systemd or Task Scheduler: it serves its control endpoint without a parent. */
   service: boolean;
   state: string;
 }
@@ -217,7 +217,7 @@ export function addDaemonCommand(program: Command, run: (config: DaemonConfig) =
     .addOption(new Option("--bind <address>", "Numeric interface address").hideHelp())
     .addOption(new Option("--port <port>", "TCP port").hideHelp())
     .addOption(new Option("--state <path>", "Daemon state file").hideHelp())
-    .addOption(new Option("--service", "Run in the foreground for launchd or systemd (used by cns up --install)").hideHelp());
+    .addOption(new Option("--service", "Run in the foreground for launchd, systemd or Task Scheduler (used by cns up --install)").hideHelp());
   rejectRepeatedOptions(command);
   command.action(() => {
     const given = command.opts();
