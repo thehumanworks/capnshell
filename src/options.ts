@@ -23,6 +23,7 @@ const daemonOptionsSchema = z.strictObject({
   bind: bindSchema(),
   port: portSchema(),
   service: z.boolean().default(false),
+  supervise: z.boolean().default(false),
   state: z.string().min(1),
 });
 const peerOptionsSchema = z.strictObject({
@@ -62,8 +63,10 @@ export interface DaemonConfig {
   url: string;
   /** The listener accepts connections from other machines. */
   remote: boolean;
-  /** Run in the foreground under launchd, systemd or Task Scheduler: it serves its control endpoint without a parent. */
+  /** Run in the foreground under launchd or systemd: it serves its control endpoint without a parent. */
   service: boolean;
+  /** Run the daemon with --service and start it again after it fails: the Windows scheduled task's command. */
+  supervise?: true;
   state: string;
 }
 
@@ -217,15 +220,16 @@ export function addDaemonCommand(program: Command, run: (config: DaemonConfig) =
     .addOption(new Option("--bind <address>", "Numeric interface address").hideHelp())
     .addOption(new Option("--port <port>", "TCP port").hideHelp())
     .addOption(new Option("--state <path>", "Daemon state file").hideHelp())
-    .addOption(new Option("--service", "Run in the foreground for launchd, systemd or Task Scheduler (used by cns up --install)").hideHelp());
+    .addOption(new Option("--service", "Run in the foreground for launchd or systemd (used by cns up --install)").hideHelp())
+    .addOption(new Option("--supervise", "Run the daemon with --service and restart it after a failure (used by the Windows scheduled task)").hideHelp());
   rejectRepeatedOptions(command);
   command.action(() => {
     const given = command.opts();
     const missing = ["bind", "port", "state"].filter((name) => given[name] === undefined);
-    if (missing.length === 3 && !given.service) command.help({ error: true });
+    if (missing.length === 3 && !given.service && !given.supervise) command.help({ error: true });
     if (missing.length) throw new Error(`Running the daemon needs --${missing.join(", --")}. To manage it, use cns daemon start, stop or restart.`);
-    const { bind, port, service, state } = daemonOptionsSchema.parse({ ...given });
-    return run({ role: "daemon", bind, port, url: endpointUrl(bind, port), remote: !isLoopback(bind), service, state });
+    const { bind, port, service, supervise, state } = daemonOptionsSchema.parse({ ...given });
+    return run({ role: "daemon", bind, port, url: endpointUrl(bind, port), remote: !isLoopback(bind), service, ...supervise ? { supervise: true as const } : {}, state });
   });
   return command;
 }

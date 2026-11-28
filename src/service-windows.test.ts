@@ -8,15 +8,15 @@ import path from "node:path";
 import test from "node:test";
 import { connectControl } from "./commands/daemon.js";
 import {
-  accountSid, installedService, installedServiceRuns, installService, scheduledTask, serviceFile, serviceKind, serviceLog, serviceName,
-  servicePath, startService, superviseDaemon, supervised, taskName, uninstallService, windowsQuote, type Runner, type ServiceSpec,
+  installedService, installedServiceRuns, installService, registeredTask, scheduledTask, schtasks, serviceFile, serviceKind, serviceLog, serviceName,
+  servicePath, startService, superviseDaemon, taskName, uninstallService, windowsQuote, type Runner, type ServiceSpec,
 } from "./service.js";
 import { launchCli, unusedPort } from "./test-support.js";
 
 const user = "S-1-5-21-1004336348-1177238915-682003330-1001";
 const state = "C:\\Users\\A B\\.cns\\daemon.json";
 const spec: ServiceSpec = {
-  program: { file: "C:\\Program Files\\cns & co\\cns.exe", args: ["daemon", "--service", "--state", state, "--bind", "0.0.0.0", "--port", "47381", "say \"hi\"\\", "C:\\trailing\\", "100% <sure>"] },
+  program: { file: "C:\\Program Files\\cns & co\\cns.exe", args: ["daemon", "--supervise", "--state", state, "--bind", "0.0.0.0", "--port", "47381", "say \"hi\"\\", "C:\\trailing\\", "100% <sure>"] },
   env: { PATH: "C:\\bin", CNS_RELAY: "off" },
   log: "C:\\Users\\A B\\.cns\\service.log",
   user,
@@ -92,94 +92,145 @@ test("Windows runs the daemon from a scheduled task per account, whose definitio
   assert.equal(taskName("A B"), "cns-A B");
 });
 
-test("the task runs as this account's SID, which whoami gives", () => {
-  const calls: string[][] = [];
-  assert.equal(accountSid((file, args) => { calls.push([file, ...args]); return { code: 0, output: "\"desktop-1\\a b\",\"S-1-5-21-1-2-3-1001\"" }; }), "S-1-5-21-1-2-3-1001");
-  assert.deepEqual(calls, [["whoami", "/user", "/fo", "csv", "/nh"]]);
-  assert.throws(() => accountSid(() => ({ code: 1, output: "" })), /Cannot tell this account's SID for its scheduled task \(whoami \/user: exit 1\)\. Run cns up to start the daemon without a service\./);
-});
 
-test("installing registers the task from a UTF-16 definition and runs it; it is found while Task Scheduler has it; uninstalling deletes it", async (t) => {
+/** A home for a test's service files, with CNS_CONFIG_DIR inside it. */
+async function tempHome(t: test.TestContext): Promise<string> {
   const home = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-task-")));
   t.after(() => rm(home, { recursive: true, force: true }));
   const previous = process.env.CNS_CONFIG_DIR;
   process.env.CNS_CONFIG_DIR = path.join(home, ".cns");
   t.after(() => { if (previous === undefined) delete process.env.CNS_CONFIG_DIR; else process.env.CNS_CONFIG_DIR = previous; });
-  const name = taskName();
+  return home;
+}
+
+/** A stand-in for schtasks that records its calls; `fails` names the steps that fail, as /End does when no run is going. */
+function fakeSchtasks(fails: string[] = ["/End"], output = "") {
   const calls: string[][] = [];
-  // /End fails when no run is going, as schtasks does.
-  const runner: Runner = (file, args) => { calls.push([file, ...args]); return { code: args[0] === "/End" ? 1 : 0, output: "" }; };
+  const runner: Runner = (file, args) => { calls.push([file, ...args]); return { code: fails.includes(args[0]!) ? 1 : 0, output }; };
+  return { calls, runner };
+}
+
+const step = (...args: string[]) => [schtasks(), ...args];
+
+test("installing registers the task from a UTF-16 definition and runs it; it is found while Task Scheduler has it", async (t) => {
+  const home = await tempHome(t);
+  const name = taskName();
+  const { calls, runner } = fakeSchtasks();
+  assert.equal(path.basename(schtasks()), "schtasks.exe");
+  assert.equal(path.basename(path.dirname(schtasks())), "System32");
 
   const file = serviceFile("schtasks", spec, home, {});
   await installService(file, runner);
   const bytes = await readFile(file.path);
   assert.deepEqual([...bytes.subarray(0, 2)], [0xff, 0xfe], "a UTF-16 byte order mark, as the declaration says");
   assert.equal(bytes.subarray(2).toString("utf16le"), file.contents);
-  assert.deepEqual(calls, [["schtasks", "/Create", "/TN", name, "/XML", file.path, "/F"], ["schtasks", "/End", "/TN", name], ["schtasks", "/Run", "/TN", name]]);
+  assert.deepEqual(calls, [step("/Create", "/TN", name, "/XML", file.path, "/F"), step("/End", "/TN", name), step("/Run", "/TN", name)]);
 
   calls.length = 0;
   assert.deepEqual(installedService(state, home, {}, runner, "win32"), { kind: "schtasks", path: file.path });
-  assert.deepEqual(calls, [["schtasks", "/Query", "/TN", name]]);
+  assert.deepEqual(calls, [step("/Query", "/TN", name)]);
   // Matched as a whole quoted word, never as part of another path.
   assert.equal(installedService("C:\\Users\\A B\\.cns\\daemon.jso", home, {}, runner, "win32"), undefined);
   assert.equal(installedService("C:\\other\\daemon.json", home, {}, runner, "win32"), undefined);
   // Deleted in Task Scheduler: the definition cns kept no longer counts.
-  assert.equal(installedService(state, home, {}, () => ({ code: 1, output: "ERROR: The system cannot find the file specified." }), "win32"), undefined);
+  assert.equal(installedService(state, home, {}, fakeSchtasks(["/Query"]).runner, "win32"), undefined);
   const service = { kind: "schtasks" as const, path: file.path };
   assert.deepEqual(installedServiceRuns(service, spec.program.file), { managedByNix: false, runsThis: true });
   assert.deepEqual(installedServiceRuns(service, "C:\\Program Files\\cns & co\\cns"), { managedByNix: false, runsThis: false });
   assert.deepEqual(installedServiceRuns(service, "C:\\Users\\A B\\scoop\\shims\\cns.exe"), { managedByNix: false, runsThis: false });
-
-  calls.length = 0;
-  assert.equal(await uninstallService("schtasks", runner, home, {}), true);
-  assert.deepEqual(calls, [["schtasks", "/End", "/TN", name], ["schtasks", "/Delete", "/TN", name, "/F"]]);
-  assert.equal(existsSync(file.path), false);
-  assert.equal(installedService(state, home, {}, runner, "win32"), undefined);
-  assert.equal(await uninstallService("schtasks", () => ({ code: 1, output: "ERROR: The system cannot find the file specified." }), home, {}), false);
 });
 
-test("when schtasks refuses, the error says what failed and what to run next", async (t) => {
-  const home = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-task-")));
-  t.after(() => rm(home, { recursive: true, force: true }));
-  const previous = process.env.CNS_CONFIG_DIR;
-  process.env.CNS_CONFIG_DIR = path.join(home, ".cns");
-  t.after(() => { if (previous === undefined) delete process.env.CNS_CONFIG_DIR; else process.env.CNS_CONFIG_DIR = previous; });
-  const refusing = (step: string): Runner => (_file, args) => ({ code: args[0] === step ? 1 : 0, output: "ERROR: Access is denied." });
+test("uninstalling deletes a task Task Scheduler has, and keeps its definition when the delete fails", async (t) => {
+  const home = await tempHome(t);
+  const name = taskName();
   const file = serviceFile("schtasks", spec, home, {});
-  await assert.rejects(installService(file, refusing("/Create")), /^Error: schtasks \/Create \/TN \S+.* \/F failed: ERROR: Access is denied\. Run cns up to start the daemon without a service\.$/);
-  await assert.rejects(installService(file, refusing("/Run")), /failed: ERROR: Access is denied\. The task starts the daemon at your next sign-in; run cns up to start it now\.$/);
-  assert.throws(() => startService("schtasks", () => ({ code: 1, output: "ERROR: The system cannot find the file specified." })),
-    /^Error: schtasks \/Run \/TN \S+.* failed: ERROR: The system cannot find the file specified\. Run cns up --install to register the task again\.$/);
+  await installService(file, fakeSchtasks().runner);
+
+  // No task: nothing to delete, and nothing reported removed.
+  const none = fakeSchtasks(["/Query"]);
+  assert.equal(await uninstallService("schtasks", none.runner, home, {}), false);
+  assert.deepEqual(none.calls, [step("/Query", "/TN", name)]);
+
+  const refused = fakeSchtasks(["/End", "/Delete"], "ERROR: Access is denied.");
+  await assert.rejects(uninstallService("schtasks", refused.runner, home, {}),
+    new RegExp(`failed: ERROR: Access is denied\\. Delete ${name} in Task Scheduler, or run schtasks /Delete /TN "${name}" /F\\.$`));
+  assert.equal(existsSync(file.path), true, "kept while the task is still there");
+
+  const { calls, runner } = fakeSchtasks();
+  assert.equal(await uninstallService("schtasks", runner, home, {}), true);
+  assert.deepEqual(calls, [step("/Query", "/TN", name), step("/End", "/TN", name), step("/Delete", "/TN", name, "/F")]);
+  assert.equal(existsSync(file.path), false);
 });
 
-test("the task's process restarts a daemon that fails, detached and logged, and ends when the daemon stops cleanly", async (t) => {
-  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-supervise-")));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const daemonState = path.join(root, "state", "daemon.json");
-  const launches: Array<{ file: string; args: string[]; options: { detached?: boolean; windowsHide?: boolean; env?: NodeJS.ProcessEnv } }> = [];
-  const outcomes: Array<() => [string, ...unknown[]]> = [() => ["exit", 1, null], () => ["error", new Error("spawn ENOENT")], () => ["exit", null, "SIGKILL"], () => ["exit", 0, null]];
-  const launch = ((file: string, args: string[], options: object) => {
+test("the task's daemon is found by the --state its definition names, while Task Scheduler has the task", async (t) => {
+  const home = await tempHome(t);
+  const odd = "C:\\Users\\A&B <x>\\cns state\\daemon.json";
+  const file = serviceFile("schtasks", { ...spec, program: { file: spec.program.file, args: ["daemon", "--supervise", "--state", odd, "--bind", "0.0.0.0", "--port", "47381"] } }, home, {});
+  assert.deepEqual(registeredTask(home, {}, fakeSchtasks().runner), {}, "no definition kept: the state is not known");
+  await installService(file, fakeSchtasks().runner);
+  assert.deepEqual(registeredTask(home, {}, fakeSchtasks().runner), { state: odd });
+  assert.equal(registeredTask(home, {}, fakeSchtasks(["/Query"]).runner), undefined);
+});
+
+test("starting the task ends a run Task Scheduler still counts, so that the new run is not ignored", async () => {
+  const name = taskName();
+  const { calls, runner } = fakeSchtasks();
+  startService("schtasks", runner);
+  assert.deepEqual(calls, [step("/End", "/TN", name), step("/Run", "/TN", name)]);
+  assert.throws(() => startService("schtasks", fakeSchtasks(["/End", "/Run"], "ERROR: The system cannot find the file specified.").runner),
+    /^Error: .*schtasks\.exe \/Run \/TN \S+.* failed: ERROR: The system cannot find the file specified\. Run cns up --install to register the task again\.$/);
+});
+
+test("when schtasks refuses to register or run the task, the error says what failed and what to run next", async (t) => {
+  const home = await tempHome(t);
+  const file = serviceFile("schtasks", spec, home, {});
+  await assert.rejects(installService(file, fakeSchtasks(["/Create"], "ERROR: Access is denied.").runner),
+    /^Error: .*schtasks\.exe \/Create \/TN \S+.* \/F failed: ERROR: Access is denied\. Run cns up to start the daemon without a service\.$/);
+  await assert.rejects(installService(file, fakeSchtasks(["/Run"], "ERROR: Access is denied.").runner),
+    /failed: ERROR: Access is denied\. The task starts the daemon at your next sign-in; run cns up to start it now\.$/);
+});
+
+/** A stand-in for spawn whose children end as `outcomes` say, one per launch. */
+function fakeLaunch(outcomes: Array<[string, ...unknown[]]>) {
+  const launches: Array<{ args: string[]; options: { detached?: boolean; windowsHide?: boolean } }> = [];
+  const launch = ((_file: string, args: string[], options: object) => {
     const child = new EventEmitter();
-    const [event, ...values] = outcomes[launches.length]!();
-    launches.push({ file, args, options });
+    const [event, ...values] = outcomes[launches.length]!;
+    launches.push({ args, options });
     setImmediate(() => child.emit(event, ...values));
     return child;
   }) as unknown as typeof spawn;
-  assert.equal(await superviseDaemon({ state: daemonState, bind: "127.0.0.1", port: 47381 }, launch, 0), 0);
+  return { launches, launch };
+}
+
+test("the task's supervisor restarts a failed daemon 5 seconds later, detached and logged, and ends when it stops cleanly", async (t) => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-supervise-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const daemonState = path.join(root, "state", "daemon.json");
+  const log = path.join(root, "state", "service.log");
+  const { launches, launch } = fakeLaunch([["exit", 1, null], ["error", new Error("spawn ENOENT")], ["exit", null, "SIGKILL"], ["exit", 0, null]]);
+  const sleeps: number[] = [];
+  const sleep = async (ms: number) => { sleeps.push(ms); };
+  const { calls, runner } = fakeSchtasks([]);
+  await superviseDaemon({ state: daemonState, bind: "127.0.0.1", port: 47381 }, { launch, sleep, runner, answers: async () => false });
   assert.equal(launches.length, 4);
+  assert.deepEqual(sleeps, [5000, 5000, 5000], "never a hot loop");
+  assert.equal(calls.length, 3, "the task is checked before each restart");
   for (const { args, options } of launches) {
     assert.deepEqual(args.slice(-8), ["daemon", "--service", "--state", daemonState, "--bind", "127.0.0.1", "--port", "47381"]);
     assert.equal(options.detached, true);
     assert.equal(options.windowsHide, true);
-    assert.equal(options.env?.CNS_SERVICE_SUPERVISED, "1");
   }
-  assert.equal(await readFile(path.join(root, "state", "service.log"), "utf8"), [1, "spawn ENOENT", "SIGKILL"].map((ended) => `[cns: the daemon ended (${ended}); starting it again in 0 seconds]\n`).join(""));
+  assert.equal(await readFile(log, "utf8"), [1, "spawn ENOENT", "SIGKILL"].map((ended) => `[cns: the daemon ended (${ended}); starting it again in 5 seconds]\n`).join(""));
 
-  // The daemon it starts knows, and does not pass the marker on.
-  const env: NodeJS.ProcessEnv = { CNS_SERVICE_SUPERVISED: "1", PATH: "C:\\bin" };
-  assert.equal(supervised(env), true);
-  assert.deepEqual(env, { PATH: "C:\\bin" });
-  assert.equal(supervised(env), false);
+  // A task deleted since, or another daemon at the state file: one failure ends the supervision.
+  for (const [reason, check] of [["its scheduled task is gone", { runner: fakeSchtasks(["/Query"]).runner, answers: async () => false }], ["a daemon answers at its state file", { runner, answers: async () => true }]] as const) {
+    await rm(log);
+    const once = fakeLaunch([["exit", 1, null]]);
+    await superviseDaemon({ state: daemonState, bind: "127.0.0.1", port: 47381 }, { launch: once.launch, sleep, ...check });
+    assert.equal(once.launches.length, 1, reason);
+    assert.equal(await readFile(log, "utf8"), `[cns: the daemon ended (1); starting it again in 5 seconds]\n[cns: not starting it again: ${reason}]\n`);
+  }
 });
 
 // Registers a real task for this account, replacing the one cns up --install made: windows.yml sets CNS_TEST_TASK_SCHEDULER.

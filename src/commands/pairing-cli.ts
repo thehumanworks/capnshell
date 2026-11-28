@@ -26,7 +26,8 @@ import { RefusingShell } from "../refusing-shell.js";
 import { connectControl, daemonStatePath, processExited, removeStaleState, runsUnder, startDaemon, stopDaemon, type ControlConnection, type DaemonStatus } from "./daemon.js";
 import { selfInvocation, selfPath } from "../runtime.js";
 import { CNS_VERSION, daemonDrift, describeVersion, reportedVersion, restartAdvice, versionOrder } from "../version.js";
-import { accountSid, describeService, installService, installedService, installedServiceRuns, lingering, restartService, serviceEnvironment, serviceFailed, serviceFile, serviceKind, serviceLog, serviceName, serviceOverrides, startService, taskName, uninstallService, type ServiceKind } from "../service.js";
+import { describeService, installService, installedService, installedServiceRuns, lingering, registeredTask, restartService, serviceEnvironment, serviceFailed, serviceFile, serviceKind, serviceLog, serviceName, serviceOverrides, startService, taskName, uninstallService, type ServiceKind } from "../service.js";
+import { windowsUserSid } from "../config.js";
 
 /** How long the invited device waits for the inviting person to decide. */
 const PROPOSAL_WAIT_MS = 10 * 60 * 1000;
@@ -286,6 +287,19 @@ async function keepHandlesHere(): Promise<void> {
   }
 }
 
+/**
+ * The daemon, started through the scheduled task, a second time if it does not answer; undefined
+ * if it still does not, and the caller starts it detached: a restart from another device must not
+ * leave this one without a daemon.
+ */
+async function startTask(state: string): Promise<ControlConnection | undefined> {
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try { startService("schtasks"); return await awaitControl(state); }
+    catch (error) { console.error(`The scheduled task did not start the daemon: ${errorMessage(error)} ${attempt === 1 ? "Trying again." : "Starting it without the task."}`); }
+  }
+  return undefined;
+}
+
 /** The restart itself, in its own process: wait `delayMs`, stop the daemon, then start it again as restartPlan says. */
 async function restartNow(statePath: string | undefined, delayMs: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -305,13 +319,11 @@ async function restartNow(statePath: string | undefined, delayMs: number): Promi
       if (plan.start !== "detached" && !(await processExited(pid, 10_000))) console.error(`The old daemon (pid ${pid}) has not exited yet.`);
     } catch (error) { console.error(`Stopping the daemon: ${errorMessage(error)}`); }
   }
+  let started: ControlConnection | undefined;
   if (plan.start === "systemd") restartService();
   else if (plan.start === "launchd") startService("launchd");
-  else if (plan.start === "schtasks") {
-    // Task Scheduler ignores a run while it counts the last one as running, which ends a moment after the daemon.
-    await new Promise((resolve) => setTimeout(resolve, 1000));
-    startService("schtasks");
-  } else {
+  else if (plan.start === "schtasks") started = await startTask(state);
+  if (plan.start === "detached" || (plan.start === "schtasks" && !started)) {
     // Nothing else starts it again, so try more than once: its port can take a moment to come free.
     for (let attempt = 1; ; attempt++) {
       try { await startDaemon({ bind: status.bind, port: status.port, url: endpointUrl(status.bind, status.port), state }); break; }
@@ -322,7 +334,7 @@ async function restartNow(statePath: string | undefined, delayMs: number): Promi
       }
     }
   }
-  const started = await awaitControl(state, undefined, plan.start === "detached" ? undefined : serviceFailure(plan.start, state));
+  started ??= await awaitControl(state, undefined, plan.start === "detached" ? undefined : serviceFailure(plan.start, state));
   try { console.error(`Restarted the daemon (pid ${(await started.remote.status()).pid}).`); } finally { started.close(); }
 }
 
@@ -384,10 +396,11 @@ async function install(options: UpOptions): Promise<void> {
     port: options.port ?? (running ? String(running.port) : undefined),
   });
   const file = serviceFile(kind, {
-    program: selfInvocation(["daemon", "--service", "--state", state, "--bind", settings.bind, "--port", String(settings.port)]),
+    // Only the scheduled task supervises: launchd and systemd restart the daemon themselves.
+    program: selfInvocation(["daemon", kind === "schtasks" ? "--supervise" : "--service", "--state", state, "--bind", settings.bind, "--port", String(settings.port)]),
     env: serviceEnvironment(),
     log: path.join(path.dirname(state), "service.log"),
-    ...kind === "schtasks" ? { user: accountSid() } : {},
+    ...kind === "schtasks" ? { user: taskUser() } : {},
   });
   if (running) {
     await stopDaemon(state);
@@ -405,25 +418,40 @@ async function install(options: UpOptions): Promise<void> {
     console.error(`The task's daemon gets your account's environment, not this shell's. If ${unseen.join(", ")} ${unseen.length === 1 ? "is" : "are"} set only here, set ${unseen.length === 1 ? "it" : "each"} for your account with setx NAME VALUE, then run cns daemon restart.`);
   }
   console.error("Run cns up --install again after moving or upgrading cns to a new path, or to change --bind or --port.");
-  (await awaitControl(options.state, undefined, serviceFailure(kind, state))).close();
+  try { (await awaitControl(options.state, undefined, serviceFailure(kind, state))).close(); }
+  catch (error) {
+    // Task Scheduler cannot say why its task's daemon did not start; the log can.
+    if (kind !== "schtasks") throw error;
+    throw new Error(`${errorMessage(error)} See ${serviceLog(kind, state)}. cns up --uninstall removes the task; cns up then starts the daemon without it.`, { cause: error });
+  }
+}
+
+/** The SID the scheduled task runs as, and whose sign-in starts it. */
+function taskUser(): string {
+  try { return windowsUserSid(); }
+  catch (error) { throw new Error(`${errorMessage(error).replace(/\.?$/, ".")} Run cns up to start the daemon without a service.`, { cause: error }); }
 }
 
 /** `cns up --uninstall`: stop the service's daemon and remove the service. */
 async function uninstall(options: UpOptions): Promise<void> {
   if (options.bind !== undefined || options.port !== undefined) throw new Error("--uninstall takes no --bind or --port.");
   const kind = requireServiceKind();
-  if (kind === "schtasks") await stopServiceDaemon(daemonStatePath(options.state));
-  if (await uninstallService(kind)) console.log(`Removed the ${serviceName(kind)}; the daemon is stopped. Run cns up to start it without the service.`);
-  else console.log(`No ${serviceName(kind)} is installed.`);
+  // Ending a scheduled task ends its supervisor, not the daemon, so stop the daemon at the state file the task names.
+  const task = kind === "schtasks" ? registeredTask() : undefined;
+  const state = task && (task.state ?? daemonStatePath(options.state));
+  if (state && await serviceDaemonAt(state)) {
+    try { await stopDaemon(state); } catch (error) { console.error(`Stopping the daemon: ${errorMessage(error)}`); }
+  }
+  if (!(await uninstallService(kind))) { console.log(`No ${serviceName(kind)} is installed.`); return; }
+  if (state && await serviceDaemonAt(state)) throw new Error(`Removed the ${serviceName(kind)}, but its daemon still runs. Stop it with cns stop --state "${state}".`);
+  console.log(`Removed the ${serviceName(kind)}; the daemon is stopped. Run cns up to start it without the service.`);
 }
 
-/** Stop the daemon if a service runs it. Ending a scheduled task ends its supervisor, not the daemon. */
-async function stopServiceDaemon(state: string): Promise<void> {
+/** Whether a daemon that a service runs answers at this state file. */
+async function serviceDaemonAt(state: string): Promise<boolean> {
   let control: ControlConnection;
-  try { control = await connectControl(state); } catch { return; }
-  let service: boolean | undefined;
-  try { service = (await control.remote.status()).service; } finally { control.close(); }
-  if (service) await stopDaemon(state);
+  try { control = await connectControl(state); } catch { return false; }
+  try { return (await control.remote.status()).service === true; } finally { control.close(); }
 }
 
 /**

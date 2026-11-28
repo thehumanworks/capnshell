@@ -60,10 +60,11 @@ export function createCli(): Command {
     process.exitCode = await sessionsEverywhere(config);
   });
   const daemon = addDaemonCommand(program, async (config) => {
-    if (config.service && process.platform === "win32") {
-      // Task Scheduler restarts only a task it cannot start, so the task's process supervises the daemon.
-      const { superviseDaemon, supervised } = await import("./service.js");
-      if (!supervised()) { process.exitCode = await superviseDaemon({ state: config.state, bind: config.bind, port: config.port }); return; }
+    if (config.supervise) {
+      // The Windows scheduled task's command: Task Scheduler restarts only a task it cannot start.
+      const { superviseDaemon } = await import("./service.js");
+      await superviseDaemon(config);
+      return;
     }
     const { startPeer } = await import("./commands/peer.js");
     await startPeer(config);
