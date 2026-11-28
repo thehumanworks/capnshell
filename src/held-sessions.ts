@@ -21,7 +21,7 @@ import { checkPrivateDirectory, isPrivateFile, makePrivateDirectory } from "./co
 import { errorMessage, printable } from "./errors.js";
 import { HOLDER_PROTOCOL, holderRecordSchema, holderSocket, LineTransport, type HolderApi, type HolderRecord, type HolderStart } from "./holder.js";
 import {
-  FINISHED_SESSION_MS, MAX_NAMED_PTYS, ptySessionOptionsSchema, revocable, sessionNameSchema,
+  FINISHED_SESSION_MS, MAX_NAMED_PTYS, programOptionsSchema, revocable, sessionNameSchema,
   type AttachOptions, type CaptureOptions, type HandleScope, type KeysOptions, type NamedPty, type PtyAttachment, type PtyExit,
   type PtySessionInfo, type PtySessionOptions, type PtySink, type SessionHandle, type SessionHost, type WaitOptions,
 } from "./pty.js";
@@ -281,7 +281,7 @@ export class HeldSessions implements SessionHost {
   async startSession(name: string, options: PtySessionOptions, owner: string | null, scope?: HandleScope): Promise<SessionHandle> {
     sessionNameSchema.parse(name);
     // Checked here, so that nothing starts for options the holder would refuse.
-    const parsed = ptySessionOptionsSchema.parse(options);
+    const parsed = programOptionsSchema.parse(options);
     if (this.#held.has(name) || this.#starting.has(name) || this.#unreachable.has(name)) throw new Error(`A PTY session named ${name} already exists. Kill it first.`);
     this.#starting.add(name);
     try {

@@ -37,7 +37,8 @@ const MAX_WAITERS = 8;
 const MAX_VIEWERS = 8;
 
 const dimension = z.int().min(1).max(1000);
-const programOptionsSchema = optionsSchema.extend({
+/** What a program in a PTY runs; a named session's options are checked with it before anything starts it. */
+export const programOptionsSchema = optionsSchema.extend({
   /** Omit to start the executing user's login shell. */
   command: commandSchema.optional(),
   cols: dimension.default(80),
@@ -55,8 +56,6 @@ export const ptyOptionsSchema = programOptionsSchema.extend({
 });
 export type PtyOptions = z.input<typeof ptyOptionsSchema>;
 export type PtySessionOptions = z.input<typeof programOptionsSchema>;
-/** What a named session runs, checked before anything starts it. */
-export const ptySessionOptionsSchema = programOptionsSchema;
 export const sessionNameSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/,
   "Session names have 1-64 letters, digits, '.', '_' or '-', and start with a letter or digit.");
 const captureOptionsSchema = z.strictObject({
