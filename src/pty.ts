@@ -725,6 +725,8 @@ export interface SessionHost {
   startSession(name: string, options: PtySessionOptions, owner: string | null, scope: HandleScope): SessionHandle | Promise<SessionHandle>;
   openSession(name: string, scope: HandleScope): SessionHandle;
   list(): PtySessionInfo[] | Promise<PtySessionInfo[]>;
+  /** The names of the sessions whose program still runs. */
+  readonly running: string[];
 }
 
 /** An unnamed PTY, owned by the caller that opened it. */
@@ -912,6 +914,7 @@ export class PtyRegistry implements SessionHost {
   list(): PtySessionInfo[] {
     return [...this.#sessions].map(([name, pty]) => describe(name, pty));
   }
+  get running(): string[] { return this.list().flatMap((session) => session.running ? [session.name] : []); }
 
   async kill(name: string, pty: Pty): Promise<PtyExit> {
     this.resolve(name, pty);
