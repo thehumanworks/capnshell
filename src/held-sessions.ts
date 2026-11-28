@@ -103,6 +103,13 @@ function processExists(pid: number): boolean {
   catch (error) { return !(error instanceof Error && "code" in error && error.code === "ESRCH"); }
 }
 
+/** `promise`, or a rejection after `ms`, so that a holder that stopped answering holds up nothing. */
+function within<T>(promise: PromiseLike<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("The session's holder did not answer.")), ms); });
+  return Promise.race([Promise.resolve(promise), late]).finally(() => clearTimeout(timer));
+}
+
 /**
  * Whether something listens at a holder's socket, without speaking to it: false when nothing
  * does, so the holder is gone; undefined when that cannot be told in time.
@@ -186,11 +193,19 @@ export class HeldSessions implements SessionHost {
   #unreachable = new Map<string, string>();
   #starting = new Set<string>();
   #closed = false;
+  #adopted: (record: HolderRecord, exited: Promise<PtyExit>) => void;
 
-  constructor(dir: string, say: (message: string) => void = () => {}, { finishedMs = FINISHED_SESSION_MS }: { finishedMs?: number } = {}) {
+  /**
+   * `adopted` hears of each session adopted while its program runs, for the audit log: a session
+   * that outlived the daemon that started it ends under this one.
+   */
+  constructor(dir: string, say: (message: string) => void = () => {}, { finishedMs = FINISHED_SESSION_MS, adopted = () => {} }: {
+    finishedMs?: number; adopted?: (record: HolderRecord, exited: Promise<PtyExit>) => void;
+  } = {}) {
     this.#dir = dir;
     this.#say = say;
     this.#finishedMs = finishedMs;
+    this.#adopted = adopted;
   }
 
   /** Every session's name, running or finished. */
@@ -247,10 +262,12 @@ export class HeldSessions implements SessionHost {
       if (kept) this.#say(`Two holders run a session named ${name}, pids ${kept.record.pid} and ${pid}: this daemon reaches the first. kill ${pid} ends the other.`);
       return;
     }
-    this.#keep(record.data, connection);
+    const held = this.#keep(record.data, connection);
+    // Only one that still runs: a finished one's end was heard by the daemon it ended under, or by none.
+    try { if ((await within(held.base.info(), 3000)).running) this.#adopted(record.data, held.exited); } catch { /* Gone already, or not answering. */ }
   }
 
-  #keep(record: HolderRecord, connection: { main: RpcStub<HolderApi>; close(): void }) {
+  #keep(record: HolderRecord, connection: { main: RpcStub<HolderApi>; close(): void }): Held {
     const { main } = connection;
     const exited = Promise.resolve(main.exited());
     const held: Held = { record, main, base: main.handle(), exited, close: connection.close };
@@ -258,6 +275,7 @@ export class HeldSessions implements SessionHost {
     this.#held.set(record.name, held);
     // The holder ended, or this daemon lost it: the session is gone from here.
     main.onRpcBroken(() => { if (this.#held.get(record.name) === held) this.#held.delete(record.name); connection.close(); });
+    return held;
   }
 
   async startSession(name: string, options: PtySessionOptions, owner: string | null, scope?: HandleScope): Promise<SessionHandle> {
@@ -299,8 +317,9 @@ export class HeldSessions implements SessionHost {
     if (this.#held.get(name) !== held) throw new Error(`PTY session ${name} no longer exists.`);
   }
 
-  async list(): Promise<PtySessionInfo[]> {
-    const infos = await Promise.allSettled([...this.#held.values()].map(async (held) => await held.base.info()));
+  /** Each session's info. One whose holder does not answer within listMs, such as a stopped process, is left out rather than hold up the rest. */
+  async list(listMs = 3000): Promise<PtySessionInfo[]> {
+    const infos = await Promise.allSettled([...this.#held.values()].map((held) => within(held.base.info(), listMs)));
     return infos.flatMap((info) => info.status === "fulfilled" ? [info.value] : []);
   }
 

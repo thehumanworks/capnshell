@@ -73,6 +73,11 @@ test("a named session outlives cns daemon restart, a killed daemon and cns stop,
   assert.ok(await processExited(holder), "cns kill ends the holder");
   assert.deepEqual(await records(), [], "and its record goes");
   assert.equal(await work(), undefined);
+  // The daemon it ended under records its end once, as laptop's, though an earlier daemon started it.
+  const audited = (await readFile(path.join(studio.dir, "audit.log"), "utf8")).trim().split("\n").map((line) => JSON.parse(line) as { action: string; target: string; peer: string; signal?: string });
+  // The kill's line comes once the call returns, so either may be first.
+  assert.deepEqual(audited.filter((entry) => entry.target === "work" && entry.action.startsWith("session.")).map((entry) => `${entry.action} ${entry.peer} ${entry.signal ?? ""}`).sort(),
+    ["session.end laptop SIGHUP", "session.kill laptop ", "session.start laptop "]);
 });
 
 test("the daemon adopts its holders before it accepts links, leaves the ones it cannot reach running and removes the records of holders that are gone", { skip: !HOLDERS, timeout: 120000 }, async (t) => {

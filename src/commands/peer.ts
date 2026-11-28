@@ -6,7 +6,7 @@ import { builtInRelay } from "../relay-config.js";
 import { serve, type Server, type ServerWebSocket } from "bun";
 import { z } from "zod";
 import { PtyRegistry, ShellApi, type ShellInfo } from "../shell.js";
-import type { SessionHost } from "../pty.js";
+import type { PtyExit, SessionHost } from "../pty.js";
 import { HeldSessions, HOLDERS, holderDirectory, keepsSessions, socketsTooLong } from "../held-sessions.js";
 import type { ConnectionController } from "../console.js";
 import { errorMessage, printable, strictlyPrintable } from "../errors.js";
@@ -101,7 +101,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
   // sockets' paths would be too long, they live here.
   const holderDir = daemon && HOLDERS ? holderDirectory(daemonStatePath(daemon.state)) : undefined;
   const tooLong = holderDir && socketsTooLong(holderDir);
-  const holders = holderDir && !tooLong ? new HeldSessions(holderDir, announce) : undefined;
+  const holders = holderDir && !tooLong ? new HeldSessions(holderDir, announce, { adopted: auditEnd }) : undefined;
   const ptys: SessionHost & Disposable = holders ?? new PtyRegistry();
   /** Whether they outlive this daemon: not when systemd stops them with it (keepsSessions). */
   const keeps = !!holders && keepsSessions(!!daemon?.service);
@@ -119,6 +119,23 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
   const localSecrets = secretsHere(identity);
   /** What paired devices do here, one line each in the audit log (audit.ts). */
   const audit = auditLog();
+  /**
+   * The end of a session a paired device started under an earlier daemon, as its GrantedShell
+   * would have recorded it there: the device by its name here now, or its fingerprint.
+   */
+  function auditEnd(record: { name: string; owner: string | null; startedAt: string }, exited: Promise<PtyExit>) {
+    const { owner } = record;
+    if (owner === null) return;
+    void exited.then((exit) => {
+      const peer = listPeers().find((entry) => fingerprint(entry.publicKey) === owner)?.name ?? owner;
+      try {
+        audit({
+          start: record.startedAt, end: new Date().toISOString(), peer, fingerprint: owner, action: "session.end", target: record.name,
+          exitCode: exit.exitCode, ...exit.signal ? { signal: exit.signal } : {}, ...exit.timedOut ? { timedOut: true } : {},
+        });
+      } catch { /* Lost; the audit log reports why. */ }
+    }, () => {});
+  }
   // The relay built into cns: the daemon registers there, and paired devices are dialed there after their direct addresses.
   const relay = builtInRelay();
   /**
