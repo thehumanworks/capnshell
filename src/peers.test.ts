@@ -205,7 +205,7 @@ test("every field of a record says what a cns that does not know it does with it
       case "array": return objects(def.element!, at);
       case "union": return def.options!.flatMap((option) => objects(option, at));
       case "pipe": return [...objects(def.in!, at), ...objects(def.out!, at)];
-      case "string": case "literal": case "enum": case "number": case "boolean": return [];
+      case "string": case "literal": case "enum": case "number": case "boolean": case "custom": return [];
       default: throw new Error(`${at} is a ${def.type} schema; teach this test to look inside it.`);
     }
   };

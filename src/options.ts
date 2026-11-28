@@ -1,5 +1,5 @@
 import { isIP } from "node:net";
-import { resolvePeer, type Permission } from "./peers.js";
+import { resolvePeer, type Grant } from "./peers.js";
 import { Command, Option } from "commander";
 import { z } from "zod";
 import { MAX_SCREEN_HISTORY, MAX_TIMEOUT_MS, sessionNameSchema } from "./shell.js";
@@ -12,7 +12,7 @@ const roles = ["run", "shell", "cp", "sessions", "keys", "screen", "kill"] as co
 const sessionRoles = new Set<PeerRole>(["keys", "screen", "kill"]);
 type PeerRole = typeof roles[number];
 /** A paired device a command reaches: the identity it must prove and every address saved for it. */
-export type ExpectedPeer = { name: string; publicKey: string; outgoing: Permission[]; addresses: string[] };
+export type ExpectedPeer = { name: string; publicKey: string; outgoing: Grant[]; addresses: string[] };
 const portSchema = (name = "--port") => z.string().regex(/^\d+$/, `${name} requires an integer.`)
   .transform(Number).pipe(z.int().min(1).max(65535));
 const bindSchema = (name = "--bind") => z.string().refine((value) => isIP(value) !== 0,

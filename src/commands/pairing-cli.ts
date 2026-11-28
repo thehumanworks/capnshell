@@ -16,7 +16,7 @@ import { endpointUrl } from "../options.js";
 import { decisionSchema, decodeInvite, DEFAULT_INVITE_MS, INVITE_PREFIX, MAX_INVITE_MS, suggestedName, type Decision, type Invite, type PairingApi, type Proposal } from "../pairing.js";
 import { hostCode, inviteForCode, isPairingCode, MAX_WRONG_CODES, PairingCodeError, parseCode, type HostedCode } from "../pairing-code.js";
 import { peerFileExists, peerNamePattern, removePeerFile, validatePeerUrl } from "../peer-files.js";
-import { describeGrants, expandGrants, findPairedPeer, getPeer, isRevoked, listPeers, refuseRemoved, revokeDevice, revokedDevices, savedKey, savePairedPeer, updatePairedPeer, PERMISSIONS, type Permission } from "../peers.js";
+import { describeGrants, expandGrants, findPairedPeer, getPeer, heldGrantsSchema, isRevoked, listPeers, refuseRemoved, revokeDevice, revokedDevices, savedKey, savePairedPeer, updatePairedPeer, PERMISSIONS, type Grant, type Permission } from "../peers.js";
 import { plain } from "../terminal.js";
 import { selfCheck, type SelfFacts } from "../self-check.js";
 import type { ShellApi } from "../shell.js";
@@ -817,7 +817,7 @@ export async function doctor(name: string | undefined, options: DoctorOptions): 
   report.link = control ? (linked ? "online" : "offline") : "no-daemon";
   const attempts: Array<{ address: string; result: string; detail?: string }> = [];
   /** What the device says this one may use there now, from the first address that answers. */
-  let live: Permission[] | undefined;
+  let live: Grant[] | undefined;
   /** The cns version the device runs, from the first address that answers; undefined for one too old to say. */
   let version: string | undefined;
   let answered = false;
@@ -876,7 +876,9 @@ export async function doctor(name: string | undefined, options: DoctorOptions): 
 }
 
 /** What a paired device says this one may use on it, or undefined if it does not say in a form this cns reads. */
-async function liveAccess(remote: RpcStub<ShellApi>): Promise<Permission[] | undefined> {
+async function liveAccess(remote: RpcStub<ShellApi>): Promise<Grant[] | undefined> {
+  // A list, port words too; a cns from before granted() says only the text below.
+  try { const granted = heldGrantsSchema.safeParse(await (remote as unknown as { granted(): Promise<unknown> }).granted()); if (granted.success) return granted.data; } catch { /* Older. */ }
   try {
     const text: unknown = await (remote as unknown as { grants: Promise<unknown> }).grants;
     return typeof text === "string" && text.length <= 256 ? parseGrants(text.replaceAll(" ", ""), []) : undefined;
@@ -899,9 +901,9 @@ function notMeshMember(name: string, then: string): void {
 /** `cns peer grant NAME GRANTS`: let a paired device do more here, at once and without interrupting its links. */
 export async function grant(name: string, words: string[], options: { state?: string }): Promise<void> {
   notMeshMember(name, "");
-  const added = expandGrants(words.flatMap((word) => word.split(",")).map((word) => word.trim()).filter(Boolean));
-  if (!added.length) throw new Error(`Name what to grant: ${["shell", "files", "sessions", "all", ...PERMISSIONS].join(", ")}.`);
-  const updated = updatePairedPeer(name, (peer) => ({ ...peer, grants: { ...peer.grants, incoming: expandGrants([...peer.grants.incoming, ...added]) } }));
+  const added = expandGrants(words.flatMap((word) => word.split(",")).map((word) => word.trim()).filter(Boolean), { ports: true });
+  if (!added.length) throw new Error(`Name what to grant: ${["shell", "files", "sessions", "all", ...PERMISSIONS, "port:N"].join(", ")}.`);
+  const updated = updatePairedPeer(name, (peer) => ({ ...peer, grants: { ...peer.grants, incoming: expandGrants([...peer.grants.incoming, ...added], { ports: true }) } }));
   await refresh(name, options.state);
   console.log(`${name} may use this device's: ${describeGrants(updated.grants.incoming)}.`);
 }
@@ -909,8 +911,9 @@ export async function grant(name: string, words: string[], options: { state?: st
 /** `cns peer revoke NAME [GRANTS]`: take access away, now, ending what used it; without grants, all of it. */
 export async function revoke(name: string, words: string[], options: { state?: string }): Promise<void> {
   notMeshMember(name, "");
-  const removed = words.length ? new Set(expandGrants(words.flatMap((word) => word.split(",")).map((word) => word.trim()).filter(Boolean))) : new Set(PERMISSIONS);
-  const updated = updatePairedPeer(name, (peer) => ({ ...peer, grants: { ...peer.grants, incoming: peer.grants.incoming.filter((permission) => !removed.has(permission)) } }));
+  // Without grants, everything goes, port words too.
+  const removed = words.length ? new Set<Grant>(expandGrants(words.flatMap((word) => word.split(",")).map((word) => word.trim()).filter(Boolean), { ports: true })) : undefined;
+  const updated = updatePairedPeer(name, (peer) => ({ ...peer, grants: { ...peer.grants, incoming: removed ? peer.grants.incoming.filter((grant) => !removed.has(grant)) : [] } }));
   await refresh(name, options.state);
   console.log(`${name} may use this device's: ${describeGrants(updated.grants.incoming)}.`);
 }

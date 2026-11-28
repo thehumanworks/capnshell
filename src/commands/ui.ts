@@ -2,7 +2,7 @@ import { openDeviceLink, type DeviceLink } from "../device-link.js";
 import { errorMessage, printable } from "../errors.js";
 import { listEverywhere, LIST_TIMEOUT_MS, type FleetDevice } from "../fleet-sessions.js";
 import { ensureIdentity, type Identity } from "../identity.js";
-import { explainDenial, reachablePeers, resolvePeer, type Permission } from "../peers.js";
+import { explainDenial, reachablePeers, resolvePeer, type Grant } from "../peers.js";
 import { secureReady } from "../secure.js";
 import { describeExit } from "../session-text.js";
 import { sessionNameSchema, type PtySessionInfo } from "../shell.js";
@@ -22,7 +22,7 @@ const PREVIEW_MS = 120;
 // What a session may have left set, reset before the switcher draws.
 const RESET_MODES = "\x1b[0m\x1b[?25h\x1b[?1l\x1b>\x1b[?2004l\x1b[?1004l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l";
 
-interface UiDevice extends FleetDevice { publicKey: string; addresses: string[]; outgoing: Permission[] }
+interface UiDevice extends FleetDevice { publicKey: string; addresses: string[]; outgoing: Grant[] }
 
 export interface UiOptions {
   /** DEVICE to open the switcher on, or DEVICE/NAME to open that session at once. */

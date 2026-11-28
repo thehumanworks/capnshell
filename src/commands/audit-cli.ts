@@ -26,9 +26,14 @@ function result(entry: AuditEntry): string {
   if (entry.error !== undefined) return "failed";
   // Still running, or its daemon stopped first.
   if (entry.phase === "start") return "no end recorded";
+  const took = entry.end ? Date.parse(entry.end) - Date.parse(entry.start) : NaN;
+  // A forward's end line: what it carried.
+  if (typeof entry.connections === "number") {
+    const carried = `${entry.connections} connection${entry.connections === 1 ? "" : "s"}, ${entry.bytesIn ?? 0} bytes in, ${entry.bytesOut ?? 0} out`;
+    return Number.isNaN(took) ? carried : `${carried}, ${span(took)}`;
+  }
   if (entry.exitCode === undefined && entry.signal === undefined) return "ok";
   const exit = describeExit({ exitCode: entry.exitCode ?? null, signal: entry.signal ?? null, timedOut: entry.timedOut === true });
-  const took = entry.end ? Date.parse(entry.end) - Date.parse(entry.start) : NaN;
   return Number.isNaN(took) ? exit : `${exit} after ${span(took)}`;
 }
 

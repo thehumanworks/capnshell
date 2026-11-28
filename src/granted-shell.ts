@@ -3,7 +3,8 @@ import { RpcTarget } from "capnweb";
 import { z } from "zod";
 import { clip, type AuditEntry, type AuditLog } from "./audit.js";
 import { errorMessage } from "./errors.js";
-import { describeGrants, type LanCard, type Permission } from "./peers.js";
+import { portSchema, type ForwardSink, type PortForward } from "./forward.js";
+import { describeGrants, type Grant, type LanCard, type Permission } from "./peers.js";
 import { envSchema, MAX_ENV_VARIABLES } from "./platform.js";
 import { programExited, sessionOwner, type SessionAttachment, type SessionHandle, type SessionHost } from "./pty.js";
 import {
@@ -123,7 +124,7 @@ function audited<T>(record: Recorder, given: Pick<AuditEntry, "action" | "target
  * The grants a peer holds, which the daemon may widen while the peer is connected.
  * It is held privately: nothing a peer can call reaches it.
  */
-export interface GrantHolder { current: readonly Permission[] }
+export interface GrantHolder { current: readonly Grant[] }
 
 export class GrantedShell extends RpcTarget {
   #shell: ShellApi<SessionHost>;
@@ -147,7 +148,7 @@ export class GrantedShell extends RpcTarget {
    * `audit` takes an entry for each command, terminal, session, file and skill file the peer uses (audit.ts).
    * `lan` says which network cards this device has on which local networks, for cns wake (wake.ts).
    */
-  constructor(shell: ShellApi<SessionHost>, grants: readonly Permission[] | GrantHolder, peer: string, owner: string | null = null, addresses: () => string[] = () => [], meshes: (offered: unknown) => unknown[] = () => [], secrets: (offered: unknown) => unknown[] = () => [], secretsHere: SecretsHere = noSecrets, audit: AuditLog = () => {}, lan: () => LanCard[] = () => []) {
+  constructor(shell: ShellApi<SessionHost>, grants: readonly Grant[] | GrantHolder, peer: string, owner: string | null = null, addresses: () => string[] = () => [], meshes: (offered: unknown) => unknown[] = () => [], secrets: (offered: unknown) => unknown[] = () => [], secretsHere: SecretsHere = noSecrets, audit: AuditLog = () => {}, lan: () => LanCard[] = () => []) {
     super();
     this.#shell = shell;
     this.#grants = Array.isArray(grants) ? { current: [...grants] } : grants as GrantHolder;
@@ -204,7 +205,7 @@ export class GrantedShell extends RpcTarget {
    */
   secrets(offered: unknown): unknown[] { return this.#secrets(offered); }
   /** What the peer may do here right now, so it can show current access rather than what it was granted at pairing. It needs no grant. */
-  granted(): Permission[] { return [...this.#grants.current]; }
+  granted(): Grant[] { return [...this.#grants.current]; }
   /** What the peer may do here, as people read it. */
   get grants(): string { return describeGrants([...this.#grants.current]); }
   #require(...permissions: Permission[]) { require(this.#grants, this.#peer, permissions); }
@@ -300,11 +301,39 @@ export class GrantedShell extends RpcTarget {
     if (!any) this.#require("sessions:view");
     return new GrantedNamedPty(this.#shell.ptySession(...args), this.#grants, this.#peer, this.#owner, text(args[0]), this.#record);
   }
+  /**
+   * cns forward to `port` on localhost here needs `shell`, which reaches every port anyway, or the
+   * port word for it, such as `port:5432`; each connection is checked again. A forward is recorded
+   * when it starts and when it ends, with its connections and bytes each way, never per connection.
+   */
+  forward(port: number) {
+    let inner: PortForward;
+    return audited(this.#record, { action: "port.forward", target: `localhost:${Number.isInteger(port) ? port : "(invalid)"}` }, () => {
+      const valid = portSchema.parse(port);
+      const check = () => { if (!this.#grants.current.includes("shell")) require(this.#grants, this.#peer, [`port:${valid}`]); };
+      check();
+      inner = this.#shell.forward(valid);
+      return new GrantedForward(inner, check);
+    }, { starts: true, after: () => inner.ended.then((stats) => ({ end: new Date().toISOString(), ...stats })) });
+  }
   /** Closing the view closes the shell behind it: its commands end and its handles are revoked. */
   [Symbol.dispose]() { this.#shell[Symbol.dispose](); }
 }
 
-function require(grants: GrantHolder, peer: string, permissions: readonly Permission[]) {
+/** A forward as a paired device holds it: each connection checks the grant again. */
+class GrantedForward extends RpcTarget {
+  #inner: PortForward;
+  #check: () => void;
+  constructor(inner: PortForward, check: () => void) {
+    super();
+    this.#inner = inner;
+    this.#check = check;
+  }
+  connect(sink: ForwardSink) { this.#check(); return this.#inner.connect(sink); }
+  [Symbol.dispose]() { this.#inner[Symbol.dispose](); }
+}
+
+function require(grants: GrantHolder, peer: string, permissions: readonly Grant[]) {
   const missing = permissions.filter((permission) => !grants.current.includes(permission));
   if (missing.length) throw new Error(`Permission denied: ${missing.join(", ")} not granted to ${peer}.`);
 }

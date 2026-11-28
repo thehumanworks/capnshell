@@ -1,6 +1,6 @@
 import { AuthError } from "./auth.js";
 import { errorMessage, printable } from "./errors.js";
-import { explainDenial, type Permission } from "./peers.js";
+import { explainDenial, type Grant } from "./peers.js";
 import { describeExit } from "./session-text.js";
 import type { PtySessionInfo } from "./shell.js";
 
@@ -17,7 +17,7 @@ export const LIST_TIMEOUT_MS = 10_000;
 export interface FleetDevice {
   name: string;
   /** What the device said it lets this one do; the daemon refreshes it whenever it links. */
-  outgoing: readonly Permission[];
+  outgoing: readonly Grant[];
 }
 
 export type DeviceSessions =
