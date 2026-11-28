@@ -299,6 +299,8 @@ test("a killed session's name stays taken until its holder's connection has gone
   t.after(() => next[Symbol.dispose]());
   await next.adopt();
   process.kill(record.pid, "SIGSTOP");
+  // Its record no longer names it, so the hooks would not end it should the test fail.
+  t.after(() => { if (childOfThisProcess(record.pid)) process.kill(record.pid, "SIGKILL"); });
   let ended = false;
   const killing = next.openSession("work", new HandleScope()).kill().finally(() => { ended = true; });
   await decoyEnded;
