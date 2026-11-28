@@ -66,7 +66,8 @@ interface Held {
   close(): void;
 }
 
-const looseRecordSchema = z.object({ protocol: z.int(), name: z.string(), pid: z.int().positive(), socket: z.string().optional() });
+/** What any record must hold, whatever its protocol, for the daemon to act on it. */
+const looseRecordSchema = z.object({ protocol: z.int(), name: sessionNameSchema, pid: z.int().positive(), socket: z.string() });
 
 /** Whether a connection failed because nothing listens there: the holder is gone. */
 const gone = (error: unknown) => error instanceof Error && "code" in error && (error.code === "ECONNREFUSED" || error.code === "ENOENT");
@@ -74,6 +75,19 @@ const gone = (error: unknown) => error instanceof Error && "code" in error && (e
 function processExists(pid: number): boolean {
   try { process.kill(pid, 0); return true; }
   catch (error) { return !(error instanceof Error && "code" in error && error.code === "ESRCH"); }
+}
+
+/**
+ * Whether something listens at a holder's socket, without speaking to it: false when nothing
+ * does, so the holder is gone; undefined when that cannot be told in time.
+ */
+function listening(socket: string, timeoutMs = 3000): Promise<boolean | undefined> {
+  return new Promise((resolve) => {
+    const connection = net.connect(socket);
+    const timer = setTimeout(() => finish(undefined), timeoutMs);
+    function finish(answer: boolean | undefined) { clearTimeout(timer); connection.destroy(); resolve(answer); }
+    connection.once("connect", () => finish(true)).once("error", (error) => finish(gone(error) ? false : undefined));
+  });
 }
 
 /** Connect to a holder with its record's token. It answers with its protocol, or closes on a caller without the token. */
@@ -87,7 +101,11 @@ export async function connectHolder(record: Pick<HolderRecord, "socket" | "token
       const onData = (chunk: string) => {
         buffer += chunk;
         const end = buffer.indexOf("\n");
-        if (end >= 0) finish(undefined, buffer.slice(end + 1));
+        if (end < 0) return;
+        let protocol: unknown;
+        try { protocol = (JSON.parse(buffer.slice(0, end)) as { protocol?: unknown }).protocol; } catch { /* Refused below. */ }
+        if (protocol !== HOLDER_PROTOCOL) finish(new Error(`The session's holder answered with protocol ${printable(String(protocol)).slice(0, 20)}, not ${HOLDER_PROTOCOL}.`));
+        else finish(undefined, buffer.slice(end + 1));
       };
       const onClose = () => finish(new Error("The session's holder refused the connection."));
       function finish(error?: Error, rest = "") {
@@ -96,7 +114,7 @@ export async function connectHolder(record: Pick<HolderRecord, "socket" | "token
         if (error) reject(error); else resolve(rest);
       }
       socket.on("data", onData).once("error", finish).once("close", onClose);
-      socket.once("connect", () => socket.write(`${JSON.stringify({ token: record.token, protocol: HOLDER_PROTOCOL })}\n`));
+      socket.once("connect", () => socket.write(`${JSON.stringify({ token: record.token })}\n`));
     });
     const main = new RpcSession<HolderApi>(new LineTransport(socket, rest)).getRemoteMain() as unknown as RpcStub<HolderApi>;
     return { main, close: () => { main[Symbol.dispose](); socket.destroy(); } };
@@ -169,30 +187,41 @@ export class HeldSessions implements SessionHost {
       if (!isPrivateFile(await lstat(file))) throw new Error("it is not a private file of this user");
       raw = JSON.parse(await readFile(file, "utf8"));
       found = looseRecordSchema.parse(raw);
-    } catch (error) { this.#say(`Ignored ${file}: ${errorMessage(error)}.`); return; }
-    // Only files in this directory: a record never makes the daemon remove anything else.
-    const remove = () => Promise.all([file, found.socket].map((leftover) => leftover && path.dirname(leftover) === this.#dir ? unlink(leftover).catch(() => {}) : undefined));
-    const name = printable(found.name);
-    if (found.protocol !== HOLDER_PROTOCOL) {
-      if (!processExists(found.pid)) { await remove(); return; }
-      const why = `The session ${name} runs in a holder (pid ${found.pid}) of another cns, protocol ${found.protocol}, which cns ${CNS_VERSION} cannot reach. It keeps running: run the daemon from that cns to reach it, or end it with kill ${found.pid}.`;
-      this.#unreachable.set(found.name, why);
-      this.#say(why);
+      // Only sockets in this directory: a record never makes the daemon reach or remove anything else.
+      if (path.dirname(found.socket) !== this.#dir) throw new Error(`its socket is not in ${this.#dir}`);
+    } catch (error) { this.#say(`Ignored ${printable(file)}: ${printable(errorMessage(error))}.`); return; }
+    const { name, pid, protocol, socket } = found;
+    const remove = () => Promise.all([file, socket].map((leftover) => unlink(leftover).catch(() => {})));
+    /** Names the pid to kill only once its socket answered and the pid runs: a pid alone may be another process by now. */
+    const unreachable = (why: string, answered: boolean | undefined) => {
+      const confirmed = answered && processExists(pid);
+      const message = `${why} ${confirmed ? `It keeps running; kill ${pid} ends it.` : `Its name stays taken while its record, ${printable(file)}, is there.`}`;
+      this.#unreachable.set(name, message);
+      this.#say(message);
+    };
+    if (protocol !== HOLDER_PROTOCOL) {
+      // Nothing listens: its holder has gone, as after a reboot.
+      const answered = await listening(socket);
+      if (answered === false) { await remove(); return; }
+      unreachable(`The session ${name} runs in a holder (pid ${pid}) of another cns, protocol ${protocol}, which cns ${CNS_VERSION} cannot reach: run the daemon from that cns to reach it.`, answered);
       return;
     }
     const record = holderRecordSchema.safeParse(raw);
-    if (!record.success) { this.#say(`Ignored ${file}: ${errorMessage(record.error)}.`); return; }
-    try {
-      const connection = await connectHolder(record.data);
-      if (this.#held.has(record.data.name) || this.#closed) { connection.close(); return; }
-      this.#keep(record.data, connection);
-    } catch (error) {
-      // Nothing listens: its holder has gone, as after a reboot.
+    if (!record.success) { this.#say(`Ignored ${printable(file)}: ${printable(errorMessage(record.error))}.`); return; }
+    let connection: Awaited<ReturnType<typeof connectHolder>>;
+    try { connection = await connectHolder(record.data); }
+    catch (error) {
       if (gone(error)) { await remove(); return; }
-      const why = `Cannot reach the holder of the session ${name} (pid ${found.pid}): ${errorMessage(error)} It keeps running; kill ${found.pid} ends it.`;
-      this.#unreachable.set(found.name, why);
-      this.#say(why);
+      unreachable(`Cannot reach the holder of the session ${name} (pid ${pid}): ${errorMessage(error)}`, await listening(socket));
+      return;
     }
+    const kept = this.#held.get(name);
+    if (kept || this.#closed) {
+      connection.close();
+      if (kept) this.#say(`Two holders run a session named ${name}, pids ${kept.record.pid} and ${pid}: this daemon reaches the first. kill ${pid} ends the other.`);
+      return;
+    }
+    this.#keep(record.data, connection);
   }
 
   #keep(record: HolderRecord, connection: { main: RpcStub<HolderApi>; close(): void }) {
