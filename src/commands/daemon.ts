@@ -284,7 +284,8 @@ export function listenFailure(error: unknown, daemon: { bind: string; port: numb
   const code = error instanceof Error && "code" in error ? error.code : undefined;
   if (code !== "EADDRINUSE" && code !== "EACCES") return undefined;
   const word = (value: string) => (platform === "win32" ? /^[\w./:\\@+=~-]+$/ : /^[\w./:@+,=~-]+$/).test(value) ? value
-    : platform === "win32" ? `'${value.replaceAll("'", "''")}'` : `'${value.replaceAll("'", "'\\''")}'`;
+    // PowerShell also ends a string at the typographic single quotes, U+2018 to U+201B; doubling escapes each, as shellWord does.
+    : platform === "win32" ? `'${value.replace(/['‘-‛]/g, "$&$&")}'` : `'${value.replaceAll("'", "'\\''")}'`;
   const options = `${daemon.bind === "0.0.0.0" ? "" : ` --bind ${word(daemon.bind)}`}${daemon.state === daemonStatePath() ? "" : ` --state ${word(daemon.state)}`}`;
   // A service, which cns up --install or a NixOS or Home Manager module sets up, has its port where it is configured.
   const instead = daemon.service ? "change the port where its service is configured (cns up --install --port PORT if cns installed it)"

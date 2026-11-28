@@ -509,6 +509,12 @@ test("the command a listen failure suggests pastes as it reads", () => {
   // PowerShell: a backslash is part of a word, and a quote inside single quotes is doubled.
   assert.equal(suggested("C:\\Users\\ann\\daemon.json", "win32"), "cns up --bind 127.0.0.1 --state C:\\Users\\ann\\daemon.json --port PORT");
   assert.equal(suggested("C:\\Users\\o'brien\\$(id)\\daemon.json", "win32"), "cns up --bind 127.0.0.1 --state 'C:\\Users\\o''brien\\$(id)\\daemon.json' --port PORT");
+  // PowerShell ends a single-quoted string at each typographic single quote too.
+  assert.equal(suggested("C:\\Users\\O\u2019$(calc)\u2018x\u201a\u201b\\daemon.json", "win32"),
+    "cns up --bind 127.0.0.1 --state 'C:\\Users\\O\u2019\u2019$(calc)\u2018\u2018x\u201a\u201a\u201b\u201b\\daemon.json' --port PORT");
+  // A backslash escapes in a POSIX shell, and a comma makes a list in PowerShell: neither is left bare there.
+  assert.equal(suggested("/h/a\\b/daemon.json", "linux"), "cns up --bind 127.0.0.1 --state '/h/a\\b/daemon.json' --port PORT");
+  assert.equal(suggested("C:\\Users\\a,b\\daemon.json", "win32"), "cns up --bind 127.0.0.1 --state 'C:\\Users\\a,b\\daemon.json' --port PORT");
 });
 
 test("a daemon's log ending is its last lines, printable and short", async (t) => {
