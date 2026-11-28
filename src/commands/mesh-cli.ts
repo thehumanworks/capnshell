@@ -7,10 +7,11 @@ import { meshFiles, peerNamePattern } from "../peer-files.js";
 import { DEFAULT_INVITE_MS, MAX_INVITE_MS, suggestedName } from "../pairing.js";
 import { botTokenForCode, hostCode, MAX_WRONG_CODES, PairingCodeError, parseCode } from "../pairing-code.js";
 import { builtInRelay } from "../relay-config.js";
-import { describeGrants, expandGrants, getPeer, listPeers, resolvePeer, savePairedPeer, type Permission } from "../peers.js";
+import { describeGrants, expandGrants, getPeer, listPeers, resolvePeer, revokedDevices, savePairedPeer, type Permission } from "../peers.js";
 import { heldSecrets } from "../secrets.js";
 import { connectDevice } from "./connect-device.js";
 import { connectControl } from "./daemon.js";
+import { unpair } from "./pairing-cli.js";
 
 interface StateOption { state?: string }
 
@@ -244,8 +245,7 @@ export async function removeMembers(name: string, devices: string[], options: St
   const live = await settle(options, identity.publicKey);
   console.log(`Removed ${devices.join(", ")} from the mesh ${name} (version ${list.version}). The other members drop ${keys.length === 1 ? "it" : "them"} when they get this list.`);
   for (const peer of paired) {
-    // Imported here: remove-everywhere.ts uses this module's settle.
-    if (options.unpair) await (await import("./remove-everywhere.js")).removePeer(peer.name, options, peer.publicKey);
+    if (options.unpair) { await unpair(peer.name, peer.publicKey, options.state); console.log(`Removed ${peer.name}.`); }
     else console.log(`Still paired with this device: ${peer.name}. To unpair: cns peer remove ${peer.name}.`);
   }
   if (!live) console.log("Start this device's daemon so members get the new list: cns up.");
@@ -377,6 +377,7 @@ export function listMeshesCommand(name: string | undefined, options: { json?: bo
   const { identity } = ensureIdentity();
   const states = name === undefined ? listMeshes() : [requireMesh(name)];
   const here = new Map(listPeers(() => {}).map((peer) => [peer.publicKey, peer.name]));
+  const revoked = revokedDevices();
   const rows = states.map((state) => ({
     name: state.name,
     admin: state.admin === identity.publicKey ? "this device" : adminName(state),
@@ -389,6 +390,8 @@ export function listMeshesCommand(name: string | undefined, options: { json?: bo
       admin: member.key === state.admin,
       gateway: member.gateway === true,
       limit: member.limit ?? null,
+      // Removed here (cns peer remove): it gets no record here from this mesh, and lists it signs are not taken.
+      revoked: revoked.has(fingerprint(member.key)),
     })),
   }));
   if (options.json) { console.log(JSON.stringify(rows, null, 2)); return; }
@@ -396,7 +399,7 @@ export function listMeshesCommand(name: string | undefined, options: { json?: bo
   for (const row of rows) {
     console.log(`${row.name}: run by ${row.admin}, version ${row.version}${row.allow ? `; members may use here: ${describeGrants(row.allow)}` : ""}`);
     for (const member of row.members) {
-      console.log(`  ${member.name}${member.admin ? " (admin)" : member.gateway ? " (gateway)" : ""}\t${member.fingerprint}${member.limit ? `\tlimited to ${describeGrants(member.limit)}` : ""}`);
+      console.log(`  ${member.name}${member.admin ? " (admin)" : member.gateway ? " (gateway)" : ""}${member.revoked ? " (revoked)" : ""}\t${member.fingerprint}${member.limit ? `\tlimited to ${describeGrants(member.limit)}` : ""}`);
     }
   }
 }

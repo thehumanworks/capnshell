@@ -1,11 +1,12 @@
 import readline from "node:readline";
-import { errorMessage } from "../errors.js";
+import { errorMessage, printable } from "../errors.js";
 import { describeGrants, expandGrants } from "../peers.js";
 import { loadIdentity } from "../identity.js";
 import { INVITE_PREFIX } from "../pairing.js";
 import { OWNER_HEADER, ownerProof } from "../owner-proof.js";
 import { TOOL_NAMES, type ToolName } from "../mcp/server.js";
 import { CNS_VERSION, describeVersion, reportedVersion, versionOrder } from "../version.js";
+import type { Place } from "./remove-everywhere.js";
 
 /**
  * `cns gateway`: administer the gateway (gateway/), the MCP server Claude's connectors use to
@@ -150,13 +151,8 @@ export async function remove(name: string, options: GatewayOptions): Promise<voi
   print(options, answer, () => `The gateway forgot ${name}; no connector reaches it now. To end the pairing on ${name} too, run there: cns peer remove gateway`);
 }
 
-/** What became of a lost device at the gateway; `fingerprint` is the gateway's own, when it answered. */
-export interface GatewayForget {
-  outcome: "removed" | "would remove" | "already gone" | "not permitted" | "not used" | "unreachable" | "failed";
-  detail: string;
-  next?: string;
-  fingerprint?: string;
-}
+/** What became of a lost device at the gateway, as a place in the report; `fingerprint` is the gateway's own, when it answered. */
+export type GatewayForget = Pick<Place, "outcome" | "detail" | "next"> & { fingerprint?: string };
 
 /**
  * For `cns peer remove --everywhere`: make the gateway forget the device with fingerprint `fp`, as
@@ -165,28 +161,31 @@ export interface GatewayForget {
  * checks this device's signature against its OWNER_KEYS, as for every owner command.
  */
 export async function forgetAtGateway(fp: string, dryRun: boolean): Promise<GatewayForget> {
-  if (!process.env.CNS_GATEWAY) return { outcome: "not used", detail: `CNS_GATEWAY is not set here, so no gateway was asked. If this device owns a gateway, run: cns gateway status, then cns gateway remove NAME (fingerprint ${fp})` };
+  // OWNER_KEYS is a Cloudflare secret, so no device changes it. An owner the gateway never paired
+  // with can still approve connectors, so this is said whatever the gateway answered.
+  const owners = "; if it was one of the gateway's owners too, it can still approve connectors until its key is out of OWNER_KEYS (cd gateway && npx wrangler secret put OWNER_KEYS); cns gateway grants lists the connectors, and cns gateway revoke ID stops one";
+  // Text the gateway sent, such as a device's name or an error, is made printable here.
+  const place = (outcome: GatewayForget["outcome"], detail: string, more: Omit<GatewayForget, "outcome" | "detail"> = {}): GatewayForget => ({ outcome, detail: `${printable(detail)}${owners}`, ...more });
+  if (!process.env.CNS_GATEWAY) return place("not used", `CNS_GATEWAY is not set here, so no gateway was asked. If this device owns a gateway, run: cns gateway status, then cns gateway remove NAME (fingerprint ${fp})`);
   const options: GatewayOptions = {};
   const later = `Later, run: cns peer remove --fingerprint ${fp} --everywhere`;
-  // OWNER_KEYS is a Cloudflare secret, so no device changes it: said once the gateway removed the device.
-  const owners = "; if it was one of the gateway's owners too, it can still approve connectors until its key is out of OWNER_KEYS (cd gateway && npx wrangler secret put OWNER_KEYS); cns gateway grants lists the connectors, and cns gateway revoke ID stops one";
   try {
     const signal = AbortSignal.timeout(15_000);
     const status = await call<GatewayStatus>(options, "status", {}, signal);
     const url = gatewayUrl(options);
     const device = status.devices.find((candidate) => candidate.fingerprint === fp);
-    const answer = (outcome: GatewayForget["outcome"], detail: string): GatewayForget => ({ outcome, detail, fingerprint: status.fingerprint });
-    if (!device) return answer("already gone", `${url} has no device with this fingerprint`);
-    if (dryRun) return answer("would remove", `${url} has it as ${device.name}`);
+    const gateway = { fingerprint: status.fingerprint };
+    if (!device) return place("already gone", `${url} has no device with this fingerprint`, gateway);
+    if (dryRun) return place("would remove", `${url} has it as ${device.name}`, gateway);
     await call(options, "remove", { name: device.name }, signal);
-    return answer("removed", `${url} had it as ${device.name}; no connector reaches it now${owners}`);
+    return place("removed", `${url} had it as ${device.name}; no connector reaches it now`, gateway);
   } catch (error) {
     const detail = errorMessage(error);
-    if (error instanceof GatewayError && error.status === undefined) return { outcome: "unreachable", detail, next: later };
+    if (error instanceof GatewayError && error.status === undefined) return place("unreachable", detail, { next: later });
     if (error instanceof GatewayError && (error.status === 401 || error.status === 503)) {
-      return { outcome: "not permitted", detail, next: "Run this on one of the gateway's owners, with CNS_GATEWAY set to its address" };
+      return place("not permitted", detail, { next: "Run this on one of the gateway's owners, with CNS_GATEWAY set to its address" });
     }
-    return { outcome: "failed", detail, next: later };
+    return place("failed", detail, { next: later });
   }
 }
 

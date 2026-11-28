@@ -17,7 +17,7 @@ import { ensureIdentity, fingerprint, type Identity, type PublicKey } from "../i
 import { GrantedShell, type GrantHolder } from "../granted-shell.js";
 import { createInvite, decisionSchema, PairingApi, suggestedName } from "../pairing.js";
 import { InviteBook } from "../invites.js";
-import { advertisedSchema, describeGrants, explainDenial, findPairedPeer, getPeer, grantsSchema, learnAddresses, listPeers, savePairedPeer, updatePairedPeer } from "../peers.js";
+import { advertisedSchema, describeGrants, explainDenial, findPairedPeer, getPeer, grantsSchema, learnAddresses, listPeers, revokedDevices, savePairedPeer, updatePairedPeer } from "../peers.js";
 import { listeningAddresses } from "../addresses.js";
 import { serveControl, type PairingController } from "./daemon-server.js";
 import { removeStaleState } from "./daemon.js";
@@ -325,7 +325,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
   function meshesFrom(from: PublicKey, offered: unknown): SignedList[] {
     if (!daemon || stopping) return [];
     const states = listMeshes();
-    const newer = newerLists(states, offered);
+    const newer = newerLists(states, offered, revokedDevices());
     const dropped = droppedBy(from, identity.publicKey, states, offered);
     for (const state of newer) {
       if (state.list.members.some((member) => member.key === identity.publicKey)) {

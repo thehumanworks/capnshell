@@ -128,6 +128,8 @@ test("a lost device the gateway cannot be asked about is reported as not used, u
   t.after(() => { if (previousGateway === undefined) delete process.env.CNS_GATEWAY; else process.env.CNS_GATEWAY = previousGateway; });
   const fp = "aaaa-bbbb-cccc-dddd-eeee-ffff";
   const later = `Later, run: cns peer remove --fingerprint ${fp} --everywhere`;
+  // Said whatever the gateway answered: a lost owner the gateway never paired can still approve connectors.
+  const owners = "; if it was one of the gateway's owners too, it can still approve connectors until its key is out of OWNER_KEYS (cd gateway && npx wrangler secret put OWNER_KEYS); cns gateway grants lists the connectors, and cns gateway revoke ID stops one";
   let asked = 0;
   const answering = (status: number, body: string) => {
     const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => { asked++; return new Response(body, { status, headers: { "Content-Type": "application/json" } }); } });
@@ -136,23 +138,24 @@ test("a lost device the gateway cannot be asked about is reported as not used, u
   };
   // With no CNS_GATEWAY, no gateway is asked, not even the default one.
   delete process.env.CNS_GATEWAY;
-  assert.deepEqual(await forgetAtGateway(fp, false), { outcome: "not used", detail: `CNS_GATEWAY is not set here, so no gateway was asked. If this device owns a gateway, run: cns gateway status, then cns gateway remove NAME (fingerprint ${fp})` });
+  assert.deepEqual(await forgetAtGateway(fp, false), { outcome: "not used", detail: `CNS_GATEWAY is not set here, so no gateway was asked. If this device owns a gateway, run: cns gateway status, then cns gateway remove NAME (fingerprint ${fp})${owners}` });
   assert.deepEqual(await forgetAtGateway(fp, true), await forgetAtGateway(fp, false));
   const closed = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
   process.env.CNS_GATEWAY = `http://127.0.0.1:${closed.port}`;
   await closed.stop(true);
   const gone = await forgetAtGateway(fp, false);
   assert.equal(gone.outcome, "unreachable");
-  assert.match(gone.detail, /^Cannot reach the gateway at http:\/\/127\.0\.0\.1:\d+/);
+  assert.match(gone.detail!, /^Cannot reach the gateway at http:\/\/127\.0\.0\.1:\d+.*; if it was one of the gateway's owners too/);
   assert.equal(gone.next, later);
   process.env.CNS_GATEWAY = answering(401, JSON.stringify({ error: "Device x is not an owner of this gateway." }));
   const refused = await forgetAtGateway(fp, false);
   assert.equal(refused.outcome, "not permitted");
-  assert.match(refused.detail, /^Device x is not an owner of this gateway\. This device's public key is \S+\.$/);
+  assert.match(refused.detail!, /^Device x is not an owner of this gateway\. This device's public key is \S+\.; if it was one of the gateway's owners too/);
   assert.equal(refused.next, "Run this on one of the gateway's owners, with CNS_GATEWAY set to its address");
   process.env.CNS_GATEWAY = answering(503, JSON.stringify({ error: "This gateway has no owners yet." }));
   assert.equal((await forgetAtGateway(fp, false)).outcome, "not permitted");
-  process.env.CNS_GATEWAY = answering(502, "<html>Bad gateway</html>");
-  assert.deepEqual(await forgetAtGateway(fp, true), { outcome: "failed", detail: "The gateway answered 502: <html>Bad gateway</html>", next: later });
+  // What the gateway sends is made printable where the place is made, for the report and --json alike.
+  process.env.CNS_GATEWAY = answering(502, "<html>Bad\u009b31m gateway\u202e</html>");
+  assert.deepEqual(await forgetAtGateway(fp, true), { outcome: "failed", detail: `The gateway answered 502: <html>Bad?31m gateway?</html>${owners}`, next: later });
   assert.equal(asked, 3);
 });

@@ -251,10 +251,13 @@ export function savePairedPeer(name: string, peer: Omit<PairedPeer, "version">):
   const existing = findPairedPeer(peer.publicKey);
   if (existing) throw new Error(`This device is already paired as ${existing.name}.`);
   const record: PairedPeer = pairedPeerSchema.parse({ version: 2, ...peer });
-  createPeerFile(name, recordText(record));
-  // Pairing with a removed device again is the way back for it (revokeDevice); a mesh's record is not.
+  // Pairing with a removed device again is the way back for it (revokeDevice); a mesh's record is
+  // not. Looked up first, so that a revoked directory that cannot be read stops the pairing; the
+  // entry goes only once the pairing is saved, so a pairing that fails leaves the device revoked.
   const fp = fingerprint(record.publicKey);
-  if (record.mesh === undefined && revokedFiles.exists(fp)) revokedFiles.remove(fp);
+  const back = record.mesh === undefined && revokedFiles.exists(fp);
+  createPeerFile(name, recordText(record));
+  if (back) revokedFiles.remove(fp);
 }
 
 /** Change a paired device's record, for example its grants or addresses. Fields this cns does not know stay as they were. */

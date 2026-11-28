@@ -16,7 +16,7 @@ import { endpointUrl } from "../options.js";
 import { decisionSchema, decodeInvite, DEFAULT_INVITE_MS, INVITE_PREFIX, MAX_INVITE_MS, suggestedName, type Decision, type Invite, type PairingApi, type Proposal } from "../pairing.js";
 import { hostCode, inviteForCode, isPairingCode, MAX_WRONG_CODES, PairingCodeError, parseCode, type HostedCode } from "../pairing-code.js";
 import { peerFileExists, peerNamePattern, removePeerFile, validatePeerUrl } from "../peer-files.js";
-import { describeGrants, expandGrants, findPairedPeer, getPeer, listPeers, savedKey, savePairedPeer, updatePairedPeer, PERMISSIONS, type Permission } from "../peers.js";
+import { describeGrants, expandGrants, findPairedPeer, getPeer, listPeers, revokeDevice, savedKey, savePairedPeer, updatePairedPeer, PERMISSIONS, type Permission } from "../peers.js";
 import { plain } from "../terminal.js";
 import { selfCheck, type SelfFacts } from "../self-check.js";
 import type { ShellApi } from "../shell.js";
@@ -880,12 +880,16 @@ export async function address(name: string, urls: string[], options: { remove?: 
 }
 
 /**
- * Forget the device saved as `name`, which must still name the key `publicKey`, and have the
- * running daemon end its links at once. `cns peer remove` (remove-everywhere.ts) calls it.
+ * Unpair the device saved as `name`, which must still name the key `publicKey`: put it on the
+ * revoked list, so no mesh gives it a record here again (revokeDevice), then forget it, and have
+ * the running daemon end its links at once. `cns peer remove` (remove-everywhere.ts) and
+ * `cns mesh remove --unpair` call it.
  */
 export async function unpair(name: string, publicKey: string, state?: string): Promise<void> {
   // Found by key, then removed by name: never a different device now saved under that name.
   if (savedKey(name) !== publicKey) throw new Error(`The pairing for ${name} changed; it was not removed. Check cns peer list.`);
+  // Revoked first, so that no mesh list arriving meanwhile gives it a record once its pairing is gone.
+  revokeDevice(fingerprintOf(publicKey), publicKey);
   removePeerFile(name);
   const control = await daemonIfRunning(state);
   if (control) { try { await control.remote.forget(publicKey); } finally { control.close(); } }

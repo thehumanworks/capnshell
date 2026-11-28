@@ -131,7 +131,7 @@ test("a trusted device removes a lost one everywhere it may, and the lost one ca
     [null, "the gateway", "not permitted"],
   ]);
   assert.match(outcome(attack.places, "hub", "")!.detail!, /^hub does not let this device run commands$/);
-  assert.match(outcome(attack.places, "nas", "")!.detail!, /^Permission denied/);
+  assert.equal(outcome(attack.places, "nas", "")!.detail, "nas does not let this device run commands", "refused by nas itself");
   for (const of of [hub, studio, tv, nas, box]) assert.ok(has(of!, "laptop") && !revoked(of!, laptopFp), `${of!.name} still has laptop`);
   assert.ok(await listed("laptop"));
 
@@ -179,10 +179,12 @@ test("a trusted device removes a lost one everywhere it may, and the lost one ca
   const kept = "no mesh gives it a record here again, until this device pairs with it directly";
   assert.match(text.stdout, new RegExp(`^Removing phone \\(fingerprint ${lost.fingerprint}\\) everywhere this device may:\n {2}removed {8}this device: its pairing: ${kept}\n`));
   assert.match(text.stdout, /^ {2}not permitted {2}box: /m);
-  assert.match(text.stdout, new RegExp(`^ {2}removed {8}hub: its pairing: ${kept}$`, "m"));
-  assert.match(text.stdout, /^ {2}removed {8}hub: mesh home: its list is now version \d+, without it; members drop it when they get that list$/m);
-  assert.match(text.stdout, new RegExp(`^ {2}failed {9}nas: nas runs a cns from before this: error: unknown option '--fingerprint'\\. Upgrade cns on nas, then run: cns run nas -- ${command}\\.$`, "m"));
-  assert.match(text.stdout, new RegExp(`^ {2}removed {8}studio: its pairing: ${kept}$`, "m"));
+  // Another device's answer is shown by its places and outcomes, in this cns's words only.
+  assert.match(text.stdout, /^ {2}removed {8}hub: its pairing$/m);
+  assert.match(text.stdout, /^ {2}removed {8}hub: mesh home$/m);
+  assert.match(text.stdout, new RegExp(`^ {2}failed {9}nas: nas runs a cns from before this\\. Upgrade cns on nas, then run: cns run nas -- ${command}\\.$`, "m"));
+  // hub's new list may reach studio first, which then drops phone by itself.
+  assert.match(text.stdout, /^ {2}(removed {8}studio: its pairing|already gone {3}studio)$/m);
   assert.match(text.stdout, new RegExp(`^ {2}not permitted {2}tv: tv does not let this device run commands\\. On tv, run: ${command}\\.$`, "m"));
   assert.match(text.stdout, /^ {2}removed {8}the gateway: http:\/\/127\.0\.0\.1:\d+ had it as phone-gw; no connector reaches it now; if it was one of the gateway's owners too/m);
   // On laptop, phone's command ended, and it may run none now; studio dropped it at once.

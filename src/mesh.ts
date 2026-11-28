@@ -192,13 +192,15 @@ export function openLists(offered: unknown): Array<{ signed: SignedList; list: M
 /**
  * The lists among `offered` that are newer than this device's for a mesh it is in, signed
  * by that mesh's admin, as the states to keep. Anything else offered, such as an older
- * version, another admin's list or one for a mesh this device is not in, is ignored.
+ * version, another admin's list or one for a mesh this device is not in, is ignored, and so
+ * is every list of an admin removed here (`revoked`, by fingerprint): its mesh stays at the
+ * last list this device took, as whoever has that key could list any device in a new one.
  */
-export function newerLists(states: readonly MeshState[], offered: unknown): MeshState[] {
+export function newerLists(states: readonly MeshState[], offered: unknown, revoked: ReadonlySet<string> = new Set()): MeshState[] {
   const newer = new Map<string, MeshState>();
   for (const { signed, list } of openLists(offered)) {
     const state = states.find((candidate) => candidate.name === list.mesh && candidate.admin === list.admin);
-    if (!state || list.version <= (newer.get(list.mesh) ?? state).list.version) continue;
+    if (!state || revoked.has(fingerprint(list.admin)) || list.version <= (newer.get(list.mesh) ?? state).list.version) continue;
     newer.set(list.mesh, { ...state, signed, list });
   }
   return [...newer.values()];
@@ -289,7 +291,6 @@ export function applyMeshes(self: PublicKey, now = Date.now()): MeshPlan {
   const states = listMeshes();
   const total: MeshPlan = { create: [], update: [], remove: [] };
   const kept = new Set(states.map((state) => state.name));
-  const revoked = revokedDevices();
   for (const record of listPeers(() => {})) {
     if (record.mesh === undefined || kept.has(record.mesh)) continue;
     removePeerFile(record.name);
@@ -298,7 +299,10 @@ export function applyMeshes(self: PublicKey, now = Date.now()): MeshPlan {
   for (let pass = 0; pass < 2; pass++) {
     let removed = false;
     for (const state of states) {
-      const plan = planMesh({ self, mesh: state.name, allow: state.allow, list: state.list, ...savedRecords(), revoked, now });
+      // The revoked list is read after the records: a device revoked and then removed meanwhile
+      // is either still in the records, so gets no new one, or already on the list.
+      const saved = savedRecords();
+      const plan = planMesh({ self, mesh: state.name, allow: state.allow, list: state.list, ...saved, revoked: revokedDevices(), now });
       for (const { name } of plan.remove) removePeerFile(name);
       for (const { name, incoming } of plan.update) updatePairedPeer(name, (peer) => ({ ...peer, grants: { ...peer.grants, incoming } }));
       for (const { name, record } of plan.create) savePairedPeer(name, record);
