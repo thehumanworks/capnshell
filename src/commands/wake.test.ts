@@ -25,8 +25,9 @@ test("the packet is sent from this device and from each paired device on the sle
   const gateway = peer("gateway", [card("00:11:32:aa:bb:cd", "192.168.1.11/24")], { gateway: true });
   // The sleeping device's own record, under another name, is told by its key, and never sends.
   const again = peer("studio-again", studio.lan, { publicKey: studio.publicKey });
-  // Cards on no network a broadcast reaches say nothing: a single address, or one no network gave.
-  const lone = peer("lone", [card("00:11:32:aa:bb:ce", "192.168.1.12/32"), card("00:11:32:aa:bb:cf", "169.254.1.1/16")]);
+  // Cards on no network a broadcast reaches say nothing: a single address, one no network gave, or
+  // one wider than any local network, which would hold every address.
+  const lone = peer("lone", [card("00:11:32:aa:bb:ce", "192.168.1.12/32"), card("00:11:32:aa:bb:cf", "169.254.1.1/16"), card("00:11:32:aa:bb:d0", "10.0.0.1/0")]);
   const peers = [cloud, gateway, nas, old, again, lone];
   assert.deepEqual(planWake(studio, [], peers), [{ device: "nas", cards: [STUDIO_ETH] }]);
   // This device is on that network too, by its Wi-Fi card: it sends, and nas is asked as well,
