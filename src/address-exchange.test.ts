@@ -6,10 +6,11 @@ import test from "node:test";
 import { connectControl } from "./commands/daemon.js";
 import { savePairedPeer, type Permission } from "./peers.js";
 import { launchCli, unusedPort } from "./test-support.js";
+import { lanCards } from "./wake.js";
 
 const posix = process.platform !== "win32";
 
-test("daemons on a standing link tell each other where they are and what they grant, and both save it", { skip: posix ? false : "daemons need POSIX state files", timeout: 60000 }, async (t) => {
+test("daemons on a standing link tell each other where they are, what they grant and their network cards, and both save it", { skip: posix ? false : "daemons need POSIX state files", timeout: 60000 }, async (t) => {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-exchange-")));
   const cleanups: Array<() => Promise<unknown>> = [];
   t.after(async () => { for (const cleanup of cleanups.reverse()) await cleanup(); await rm(root, { recursive: true, force: true }); });
@@ -39,7 +40,7 @@ test("daemons on a standing link tell each other where they are and what they gr
     await cli(laptop.dir, ["stop", "--state", laptop.state]);
     await cli(studio.dir, ["stop", "--state", studio.state]);
   });
-  const saved = async (dir: string, name: string) => JSON.parse(await readFile(path.join(dir, "peers", name), "utf8")) as { addresses: string[]; grants: { incoming: string[]; outgoing: string[] } };
+  const saved = async (dir: string, name: string) => JSON.parse(await readFile(path.join(dir, "peers", name), "utf8")) as { addresses: string[]; grants: { incoming: string[]; outgoing: string[] }; lan?: unknown };
   const record = async (dir: string, name: string) => (await saved(dir, name)).addresses;
   const eventually = async (check: () => Promise<boolean>, label: string, ms = 20000) => {
     const until = Date.now() + ms;
@@ -65,4 +66,9 @@ test("daemons on a standing link tell each other where they are and what they gr
   await eventually(async () => (await saved(laptop.dir, "studio")).grants.outgoing.length === 1, "laptop saves its current access");
   assert.deepEqual((await saved(laptop.dir, "studio")).grants, { incoming: [], outgoing: ["shell"] });
   assert.deepEqual((await saved(studio.dir, "laptop")).grants, { incoming: ["shell"], outgoing: [] });
+  // Each saves the other's network cards, for cns wake once it sleeps: here both are this machine's.
+  for (const [dir, name] of [[laptop.dir, "studio"], [studio.dir, "laptop"]] as const) {
+    await eventually(async () => (await saved(dir, name)).lan !== undefined, `${name}'s network cards are saved`);
+    assert.deepEqual((await saved(dir, name)).lan, lanCards());
+  }
 });

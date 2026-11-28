@@ -135,6 +135,23 @@ test.skipIf(process.platform === "win32")("fields this cns does not know are ign
   expect(() => getPeer("laptop")).toThrow("not a valid paired-device record");
 });
 
+test.skipIf(process.platform === "win32")("a device's network cards are kept in its record, and a value this cns cannot read is dropped, never refused", () => {
+  const studio = generateIdentity();
+  const lan = [{ mac: "3c:22:fb:12:34:56", cidr: "192.168.1.23/24" }];
+  savePairedPeer("studio", { publicKey: studio.publicKey, addresses: [], pairedAt: PAIRED_AT, grants: { incoming: [], outgoing: ["shell"] }, lan });
+  expect(JSON.parse(readRecord("studio"))).toEqual({ version: 2, publicKey: studio.publicKey, addresses: [], pairedAt: PAIRED_AT, grants: { incoming: [], outgoing: ["shell"] }, lan });
+  // Other changes keep it, as cns peer grant's does.
+  updatePairedPeer("studio", (peer) => ({ ...peer, grants: { ...peer.grants, incoming: ["files"] } }));
+  expect(getPeer("studio")?.lan).toEqual(lan);
+  // It needs nothing, so a cns that knows needs but not lan reads the record.
+  expect(JSON.parse(readRecord("studio")).needs).toBeUndefined();
+  for (const bad of [[{ mac: "3C:22:FB:12:34:56", cidr: "192.168.1.23/24" }], [{ mac: "3c:22:fb:12:34:56", cidr: "192.168.1.23/33" }], [{ mac: "3c:22:fb:12:34:56; id", cidr: "192.168.1.23/24" }], "3c:22:fb:12:34:56", Array.from({ length: 17 }, () => lan[0])]) {
+    writeRecord("studio", { ...JSON.parse(readRecord("studio")), lan: bad });
+    expect(getPeer("studio")?.lan).toBeUndefined();
+    expect(getPeer("studio")?.grants.incoming).toEqual(["files"]);
+  }
+});
+
 test.skipIf(process.platform === "win32")("a record that needs a feature this cns does not have is refused, naming it and what to run", () => {
   const studio = generateIdentity();
   const record = { version: 2, needs: ["expiry"], publicKey: studio.publicKey, addresses: [], pairedAt: PAIRED_AT, grants: { incoming: ["shell"], outgoing: [] }, expiresAt: PAIRED_AT };
@@ -191,7 +208,11 @@ test("every field of a record says what a cns that does not know it does with it
       default: throw new Error(`${at} is a ${def.type} schema; teach this test to look inside it.`);
     }
   };
-  expect(objects(pairedPeerSchema, "record")).toEqual(["record", "record.grants"]);
+  // lan's cards need none: lan is informational, so a cns that does not know it keeps it whole,
+  // and a field a newer cns adds to a card can only be lost until the device says it again, as
+  // lan itself can go stale. No field in it changes what a device may do.
+  expect(PEER_FIELDS.record.lan).toBe("informational");
+  expect(objects(pairedPeerSchema, "record")).toEqual(["record", "record.grants", "record.lan"]);
   // The walk itself finds objects behind wrappers and refuses what it cannot see into.
   expect(objects(z.object({ a: z.object({}).nullable().optional(), b: z.union([z.string(), z.array(z.object({}))]), c: z.string().pipe(z.string()) }), "x")).toEqual(["x", "x.a", "x.b"]);
   expect(() => objects(z.object({ m: z.map(z.string(), z.object({})) }), "x")).toThrow("x.m is a map schema");
