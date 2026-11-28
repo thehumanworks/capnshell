@@ -19,7 +19,6 @@ import path from "node:path";
 import { RpcSession, RpcTarget, type RpcTransport } from "capnweb";
 import { z } from "zod";
 import { HandleScope, PtyRegistry, sessionNameSchema, type NamedPty, type PtyExit } from "./pty.js";
-import { CNS_VERSION } from "./version.js";
 
 /**
  * The holder protocol: the token hello, the record below, and over Cap'n Web HolderApi with the
@@ -43,10 +42,13 @@ export const holderRecordSchema = z.object({
   startedAt: z.string(),
   socket: z.string().min(1),
   token: z.string().regex(/^[a-f0-9]{64}$/),
-  /** The cns the holder runs. */
-  version: z.string(),
 });
 export type HolderRecord = z.infer<typeof holderRecordSchema>;
+
+/** Where the holder with this id listens: the id is 16 hex digits, so every one is as long. */
+export function holderSocket(dir: string, id: string): string {
+  return path.join(dir, `${id}.sock`);
+}
 
 /** What the daemon sends a new holder over IPC, so that the program, its options and secrets are never on a command line. */
 const startSchema = z.object({
@@ -149,7 +151,7 @@ export async function hold(): Promise<void> {
   const { dir, name, options, owner, finishedMs } = parsed.data;
   const id = randomBytes(8).toString("hex");
   const file = path.join(dir, `${id}.json`);
-  const socket = process.platform === "win32" ? `\\\\.\\pipe\\cns-${randomBytes(16).toString("hex")}` : path.join(dir, `${id}.sock`);
+  const socket = holderSocket(dir, id);
   const token = randomBytes(32).toString("hex");
   let server: net.Server | undefined;
   let ending = false;
@@ -157,7 +159,7 @@ export async function hold(): Promise<void> {
     if (ending) return;
     ending = true;
     server?.close();
-    await Promise.all([unlink(file), process.platform === "win32" ? undefined : unlink(socket)].map((removed) => removed?.catch(() => {})));
+    await Promise.all([unlink(file), unlink(socket)].map((removed) => removed.catch(() => {})));
     // Let the answer to a kill reach the daemon first.
     setTimeout(() => process.exit(0), 50);
   };
@@ -173,8 +175,8 @@ export async function hold(): Promise<void> {
   try {
     server = net.createServer((connection) => serve(connection, token, () => new HolderApi(registry, name)));
     await new Promise<void>((resolve, reject) => { server!.once("error", reject); server!.listen(socket, resolve); });
-    if (process.platform !== "win32") await chmod(socket, 0o600);
-    const record: HolderRecord = { protocol: HOLDER_PROTOCOL, name, owner, pid: process.pid, startedAt: new Date().toISOString(), socket, token, version: CNS_VERSION };
+    await chmod(socket, 0o600);
+    const record: HolderRecord = { protocol: HOLDER_PROTOCOL, name, owner, pid: process.pid, startedAt: new Date().toISOString(), socket, token };
     // Written whole, then renamed, so that a daemon never reads half a record.
     await writeFile(`${file}.tmp`, JSON.stringify(record) + "\n", { mode: 0o600, flag: "wx" });
     await rename(`${file}.tmp`, file);

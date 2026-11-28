@@ -24,12 +24,19 @@ export function cliInvocation(args: string[]): { file: string; args: string[] } 
 }
 
 /**
+ * Where tests put their daemons' directories: /tmp rather than os.tmpdir(), which is 49 bytes
+ * on a Mac before a test adds to it, so that the sockets of a daemon's holders fit in macOS's
+ * 104-byte socket paths (held-sessions.ts).
+ */
+export const TEST_TMP = process.platform === "win32" ? os.tmpdir() : "/tmp";
+
+/**
  * A temporary home for a daemon that a test starts, with its state at .cns/daemon.json.
  * Hooks run in the order they were added, so one hook stops the daemon and then removes
  * the directory: removing the state file first would leave the daemon running.
  */
 export async function daemonHome(t: TestContext, prefix = "cns-daemon-"): Promise<{ home: string; statePath: string }> {
-  const home = await realpath(await mkdtemp(path.join(os.tmpdir(), prefix)));
+  const home = await realpath(await mkdtemp(path.join(TEST_TMP, prefix)));
   const statePath = path.join(home, ".cns", "daemon.json");
   t.after(async () => {
     try { await stopDaemon(statePath); } catch { /* Not running. */ }
@@ -171,7 +178,7 @@ export interface TestDevice {
  * other as people do. Hooks stop every daemon started here and then remove the directories.
  */
 export async function testDevices(t: TestContext, prefix = "cns-devices-") {
-  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), prefix)));
+  const root = await realpath(await mkdtemp(path.join(TEST_TMP, prefix)));
   const daemons: TestDevice[] = [];
   t.after(async () => {
     for (const device of daemons.reverse()) {

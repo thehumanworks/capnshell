@@ -19,7 +19,7 @@ import { RpcSession, RpcTarget, type RpcStub } from "capnweb";
 import { z } from "zod";
 import { checkPrivateDirectory, isPrivateFile, makePrivateDirectory } from "./config.js";
 import { errorMessage, printable } from "./errors.js";
-import { HOLDER_PROTOCOL, holderRecordSchema, LineTransport, type HolderApi, type HolderRecord, type HolderStart } from "./holder.js";
+import { HOLDER_PROTOCOL, holderRecordSchema, holderSocket, LineTransport, type HolderApi, type HolderRecord, type HolderStart } from "./holder.js";
 import {
   FINISHED_SESSION_MS, MAX_NAMED_PTYS, ptySessionOptionsSchema, revocable, sessionNameSchema,
   type AttachOptions, type CaptureOptions, type HandleScope, type KeysOptions, type NamedPty, type PtyAttachment, type PtyExit,
@@ -38,6 +38,21 @@ export const HOLDERS = process.platform !== "win32";
 /** Where a daemon's holders keep their records and sockets: a private directory beside its state file. */
 export function holderDirectory(state: string): string {
   return path.join(path.dirname(state), `${path.basename(state, ".json")}-sessions`);
+}
+
+/** The longest path a Unix socket takes, in bytes: sun_path holds 104 on macOS and 108 on Linux, with the NUL that ends it. */
+const SOCKET_PATH_MAX = (process.platform === "darwin" ? 104 : 108) - 1;
+
+/**
+ * Why a daemon whose holders would live in `dir` keeps its named sessions itself, as before
+ * holders: their sockets' paths would be too long to listen at. Undefined when they fit.
+ */
+export function socketsTooLong(dir: string): string | undefined {
+  const example = holderSocket(dir, "0".repeat(16));
+  const bytes = Buffer.byteLength(example);
+  if (bytes <= SOCKET_PATH_MAX) return undefined;
+  return `Named sessions run in this daemon and end when it stops or restarts: a socket of theirs, such as ${printable(example)}, ` +
+    `would be ${bytes} bytes long, over the ${SOCKET_PATH_MAX} this system allows. A shorter --state path lets them outlive the daemon.`;
 }
 
 /**
@@ -128,7 +143,7 @@ export async function connectHolder(record: Pick<HolderRecord, "socket" | "token
 function startHolder(start: HolderStart): Promise<HolderRecord> {
   const { file, args } = selfInvocation(["daemon", "hold", start.name]);
   // Its own session and process group, so that nothing that ends the daemon's ends it.
-  const child = spawn(file, args, { detached: true, windowsHide: true, stdio: ["ignore", "ignore", "inherit", "ipc"] });
+  const child = spawn(file, args, { detached: true, stdio: ["ignore", "ignore", "inherit", "ipc"] });
   return new Promise<HolderRecord>((resolve, reject) => {
     const timer = setTimeout(() => finish(new Error("The session's holder did not start within 10 seconds.")), 10_000);
     const onMessage = (message: { ready?: unknown; error?: unknown }) => {

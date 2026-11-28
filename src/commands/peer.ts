@@ -7,9 +7,9 @@ import { serve, type Server, type ServerWebSocket } from "bun";
 import { z } from "zod";
 import { PtyRegistry, ShellApi, type ShellInfo } from "../shell.js";
 import type { SessionHost } from "../pty.js";
-import { HeldSessions, HOLDERS, holderDirectory, keepsSessions } from "../held-sessions.js";
+import { HeldSessions, HOLDERS, holderDirectory, keepsSessions, socketsTooLong } from "../held-sessions.js";
 import type { ConnectionController } from "../console.js";
-import { errorMessage, printable } from "../errors.js";
+import { errorMessage, printable, strictlyPrintable } from "../errors.js";
 import type { DaemonConfig, PeerConfig } from "../options.js";
 import { RefusingShell } from "../refusing-shell.js";
 import { plain, type RemoteNamedPty } from "../terminal.js";
@@ -97,8 +97,11 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
   const sessions = new Map<string, Session>();
   const announce = (message: string) => { if (daemon) console.log(message); };
   // Named PTY sessions outlive the connection that started them. The daemon's run in holder
-  // processes of their own, which outlive it too (held-sessions.ts); on Windows they live here.
-  const holders = daemon && HOLDERS ? new HeldSessions(holderDirectory(daemonStatePath(daemon.state)), announce) : undefined;
+  // processes of their own, which outlive it too (held-sessions.ts); on Windows, or where their
+  // sockets' paths would be too long, they live here.
+  const holderDir = daemon && HOLDERS ? holderDirectory(daemonStatePath(daemon.state)) : undefined;
+  const tooLong = holderDir && socketsTooLong(holderDir);
+  const holders = holderDir && !tooLong ? new HeldSessions(holderDir, announce) : undefined;
   const ptys: SessionHost & Disposable = holders ?? new PtyRegistry();
   /** Whether they outlive this daemon: not when systemd stops them with it (keepsSessions). */
   const keeps = !!holders && keepsSessions();
@@ -732,10 +735,11 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
     await secureReady();
     if (stopping) return;
     if (daemon) {
+      if (tooLong) announce(tooLong);
       // Before any link, so that a reconnecting cns shell finds its session.
       if (holders) {
         await holders.adopt();
-        if (holders.names.length) announce(`Adopted named sessions: ${holders.names.join(", ")}.`);
+        if (holders.names.length) announce(`Adopted named sessions: ${holders.names.map(strictlyPrintable).join(", ")}.`);
         if (stopping) return;
       }
       // A port in use or one this user may not take: say so, and what to run next.

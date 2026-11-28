@@ -2,15 +2,14 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { mkdtemp, readdir, readFile, realpath, rm } from "node:fs/promises";
 import net from "node:net";
-import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 import manifest from "../package.json" with { type: "json" };
-import { connectHolder, HeldSessions, HOLDERS } from "./held-sessions.js";
+import { connectHolder, HeldSessions, HOLDERS, socketsTooLong } from "./held-sessions.js";
 import { HOLDER_CAPNWEB, HOLDER_PROTOCOL, holderRecordSchema, type HolderRecord } from "./holder.js";
 import { HandleScope, type PtyExit } from "./pty.js";
 import { OutputSink } from "./terminal.js";
-import { PROJECT_ROOT } from "./test-support.js";
+import { PROJECT_ROOT, TEST_TMP } from "./test-support.js";
 
 const running = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
@@ -19,6 +18,18 @@ test("holder protocol 1 is pinned to the Cap'n Web release it was defined with",
   // A daemon and the holders of the release before it may run different Cap'n Webs. Before moving it,
   // check that its messages are unchanged, or give the holder a new protocol (holder.ts).
   assert.deepEqual([HOLDER_PROTOCOL, manifest.dependencies.capnweb, installed.version], [1, HOLDER_CAPNWEB, HOLDER_CAPNWEB]);
+});
+
+test("holders run only where their sockets' paths fit: 103 bytes on macOS, 107 on Linux", () => {
+  const limit = process.platform === "darwin" ? 103 : 107;
+  // A socket is the directory, a slash, 16 hex digits and .sock.
+  const fits = `/${"d".repeat(limit - 23)}`;
+  assert.equal(socketsTooLong(fits), undefined);
+  assert.equal(socketsTooLong(`${fits}x`),
+    `Named sessions run in this daemon and end when it stops or restarts: a socket of theirs, such as ${fits}x/0000000000000000.sock, ` +
+    `would be ${limit + 1} bytes long, over the ${limit} this system allows. A shorter --state path lets them outlive the daemon.`);
+  // Bytes, not characters.
+  assert.match(socketsTooLong(`/${"é".repeat(60)}`) ?? "", /would be 143 bytes long/);
 });
 
 async function until(check: () => boolean | Promise<boolean>, what: string, timeoutMs = 10000) {
@@ -31,7 +42,7 @@ async function until(check: () => boolean | Promise<boolean>, what: string, time
 
 /** A daemon's sessions in a directory of their own; hooks end every holder still running. */
 async function holders(t: TestContext, finishedMs?: number) {
-  const dir = path.join(await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-held-"))), "daemon-sessions");
+  const dir = path.join(await realpath(await mkdtemp(path.join(TEST_TMP, "cns-held-"))), "daemon-sessions");
   const sessions = new HeldSessions(dir, () => {}, finishedMs ? { finishedMs } : {});
   await sessions.adopt();
   const records = async () => {

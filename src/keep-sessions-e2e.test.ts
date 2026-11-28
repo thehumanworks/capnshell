@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
 import test from "node:test";
@@ -167,4 +167,30 @@ test("a device that may only start sessions is refused, with exit 4, the ones it
   await ok(phone, ["shell", "studio", "--name", "mine", "--", program]);
   await ok(phone, ["screen", "studio", "mine", "--until", "READY"]);
   await ok(phone, ["kill", "studio", "mine"]);
+});
+
+test("a daemon whose holders' socket paths would be too long keeps its named sessions itself, says why, and ends them when it stops", { skip: !HOLDERS, timeout: 120000 }, async (t) => {
+  const devices = await testDevices(t, "cns-long-");
+  const studio = await devices.device("studio");
+  const laptop = await devices.device("laptop");
+  const deep = path.join(studio.dir, "d".repeat(100));
+  await mkdir(deep, { mode: 0o700 });
+  studio.state = path.join(deep, "daemon.json");
+  await devices.up(studio);
+  await devices.pair(studio, laptop);
+  const cli = async (device: TestDevice, args: string[]) => {
+    const result = await devices.cli(device, args);
+    assert.equal(result.code, 0, `cns ${args.join(" ")}:\n${result.output}`);
+    return result;
+  };
+  assert.equal(JSON.parse((await cli(studio, ["status", "--json", "--state", studio.state])).stdout).daemon.keepsSessions, false);
+  await cli(laptop, ["shell", "studio", "--name", "work", "--", program]);
+  const [work] = JSON.parse((await cli(laptop, ["sessions", "studio", "--json"])).stdout) as Array<{ pid: number }>;
+  assert.ok(!existsSync(holderDirectory(studio.state)), "no holder runs it");
+  const log = (await readdir(deep)).filter((file) => file.startsWith("daemon.json.") && file.endsWith(".log"));
+  const said = (await Promise.all(log.map((file) => readFile(path.join(deep, file), "utf8")))).join("");
+  assert.match(said, /Named sessions run in this daemon and end when it stops or restarts: a socket of theirs, such as \S+\.sock, would be \d+ bytes long, over the 10[37] this system allows\. A shorter --state path lets them outlive the daemon\./);
+  const stopped = await cli(studio, ["stop", "--state", studio.state]);
+  assert.doesNotMatch(stopped.stdout, /keep running/);
+  assert.ok(await processExited(work!.pid), "the session ended with the daemon");
 });
