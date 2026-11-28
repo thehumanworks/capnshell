@@ -14,7 +14,7 @@ import { ShellApi, type ExecSink, type PtyExit } from "../shell.js";
 import { cliInvocation, launchCli as launch, LOOPBACK, settledLink, testDevices } from "../test-support.js";
 import { plain } from "../terminal.js";
 import type { PeerController } from "../console.js";
-import { connectControl, removeStaleState, startDaemon, stateRemoval, stateSchema, stopDaemon } from "./daemon.js";
+import { connectControl, listenFailure, logEnding, removeStaleState, startDaemon, stateRemoval, stateSchema, stopDaemon } from "./daemon.js";
 import { serveControl } from "./daemon-server.js";
 
 async function temporaryState(t: TestContext): Promise<string> {
@@ -461,7 +461,84 @@ test("daemon startup reports a listener failure and leaves no state", { skip: pr
   const started = await devices.cli(studio, ["up", "--bind", "127.0.0.1", "--port", String(address.port), "--state", studio.state]);
   assert.equal(started.code, 1, started.output);
   assert.match(started.output, /exited during startup/);
+  // The daemon's own words, from its log: which port, and the command that uses another.
+  assert.ok(started.stderr.includes(`Port ${address.port} on 127.0.0.1 is in use. Stop what uses it, or start cns on another port: cns up --bind 127.0.0.1 --state ${studio.state} --port PORT. If it is this device's cns daemon, cns status shows it and cns stop stops it.`), started.stderr);
   await assert.rejects(() => stat(studio.state), { code: "ENOENT" });
+});
+
+test("when this device's cns daemon holds the port, cns status shows it as the failure says", { skip: process.platform === "win32", timeout: 30000 }, async (t) => {
+  const devices = await testDevices(t);
+  const studio = await devices.device("studio");
+  // This device's daemon at its default state, which cns status and cns stop reach.
+  const running = { ...studio, state: path.join(studio.dir, ".cns", "daemon.json") };
+  const port = await devices.up(running);
+  const second = await devices.cli(studio, ["up", "--bind", "127.0.0.1", "--port", port, "--state", studio.state]);
+  assert.equal(second.code, 1, second.output);
+  assert.ok(second.stderr.includes(`Port ${port} on 127.0.0.1 is in use.`), second.stderr);
+  assert.ok(second.stderr.includes("If it is this device's cns daemon, cns status shows it and cns stop stops it."), second.stderr);
+  const status = await devices.cli(studio, ["status"]);
+  assert.equal(status.code, 0, status.output);
+  assert.match(status.stdout, new RegExp(`^Daemon: .* at ws://127\\.0\\.0\\.1:${port}\\b`, "m"));
+});
+
+const DEFAULT_STATE = path.join(os.homedir(), ".cns", "daemon.json");
+const inUse = Object.assign(new Error("Failed to start server. Is port 4000 in use?"), { code: "EADDRINUSE" });
+const denied = Object.assign(new Error("permission denied 127.0.0.1:80"), { code: "EACCES" });
+
+test("a port this user may not take says why and what to run instead", () => {
+  assert.equal(listenFailure(denied, { bind: "127.0.0.1", port: 80, state: DEFAULT_STATE, service: false }, "linux"),
+    "Cannot listen on port 80 on 127.0.0.1: ports below 1024 need extra rights. Start cns on another port: cns up --bind 127.0.0.1 --port PORT.");
+  // Windows has no privileged ports, but it reserves ranges.
+  assert.equal(listenFailure(denied, { bind: "0.0.0.0", port: 80, state: DEFAULT_STATE, service: false }, "win32"),
+    "Cannot listen on port 80 on 0.0.0.0: Windows may reserve or block it (netsh interface ipv4 show excludedportrange protocol=tcp lists the reserved ranges). Start cns on another port: cns up --port PORT.");
+  // A service, also one a NixOS or Home Manager module runs, has its port where it is configured.
+  assert.equal(listenFailure(denied, { bind: "0.0.0.0", port: 80, state: "/elsewhere/daemon.json", service: true }, "darwin"),
+    "Cannot listen on port 80 on 0.0.0.0: ports below 1024 need extra rights. Change the port where its service is configured (cns up --install --port PORT if cns installed it).");
+  assert.equal(listenFailure(inUse, { bind: "0.0.0.0", port: 4000, state: DEFAULT_STATE, service: true }, "linux"),
+    "Port 4000 on 0.0.0.0 is in use. Stop what uses it, or change the port where its service is configured (cns up --install --port PORT if cns installed it). If it is this device's cns daemon, cns status shows it and cns stop stops it.");
+  assert.equal(listenFailure(new Error("unrelated"), { bind: "0.0.0.0", port: 80, state: "/elsewhere/daemon.json", service: false }), undefined);
+});
+
+test("the command a listen failure suggests pastes as it reads", () => {
+  const suggested = (state: string, platform: NodeJS.Platform) =>
+    /: (cns up .*--port PORT)\./.exec(listenFailure(inUse, { bind: "127.0.0.1", port: 4000, state, service: false }, platform)!)![1];
+  assert.equal(suggested("/h/a$(id)b/daemon.json", "linux"), "cns up --bind 127.0.0.1 --state '/h/a$(id)b/daemon.json' --port PORT");
+  assert.equal(suggested("/h/a`id`b/daemon.json", "darwin"), "cns up --bind 127.0.0.1 --state '/h/a`id`b/daemon.json' --port PORT");
+  assert.equal(suggested("/h/it's here/daemon.json", "linux"), "cns up --bind 127.0.0.1 --state '/h/it'\\''s here/daemon.json' --port PORT");
+  assert.equal(suggested("/h/plain-1.2/daemon.json", "linux"), "cns up --bind 127.0.0.1 --state /h/plain-1.2/daemon.json --port PORT");
+  // PowerShell: a backslash is part of a word, and a quote inside single quotes is doubled.
+  assert.equal(suggested("C:\\Users\\ann\\daemon.json", "win32"), "cns up --bind 127.0.0.1 --state C:\\Users\\ann\\daemon.json --port PORT");
+  assert.equal(suggested("C:\\Users\\o'brien\\$(id)\\daemon.json", "win32"), "cns up --bind 127.0.0.1 --state 'C:\\Users\\o''brien\\$(id)\\daemon.json' --port PORT");
+  // PowerShell ends a single-quoted string at each typographic single quote too.
+  assert.equal(suggested("C:\\Users\\O\u2019$(calc)\u2018x\u201a\u201b\\daemon.json", "win32"),
+    "cns up --bind 127.0.0.1 --state 'C:\\Users\\O\u2019\u2019$(calc)\u2018\u2018x\u201a\u201a\u201b\u201b\\daemon.json' --port PORT");
+  // A backslash escapes in a POSIX shell, and a comma makes a list in PowerShell: neither is left bare there.
+  assert.equal(suggested("/h/a\\b/daemon.json", "linux"), "cns up --bind 127.0.0.1 --state '/h/a\\b/daemon.json' --port PORT");
+  assert.equal(suggested("C:\\Users\\a,b\\daemon.json", "win32"), "cns up --bind 127.0.0.1 --state 'C:\\Users\\a,b\\daemon.json' --port PORT");
+});
+
+test("a daemon's log ending is its last lines, printable and short", async (t) => {
+  const log = `${await temporaryState(t)}.log`;
+  assert.equal(await logEnding(log), "", "a log that cannot be read leaves nothing out");
+  await writeFile(log, `first\nsecond\r\n\nthird \u001b[31mred\u001b[0m‮\nfourth\n\n`);
+  assert.equal(await logEnding(log), "second\nthird ?[31mred?[0m?\nfourth");
+  await writeFile(log, `${"x".repeat(3000)}\n${"y".repeat(600)}\n`);
+  assert.equal(await logEnding(log), `${"y".repeat(500)}...`);
+  // A long --state path in the suggested command is what gets cut, never what went wrong.
+  const failure = listenFailure(inUse, { bind: "127.0.0.1", port: 4000, state: `/${"deep/".repeat(120)}daemon.json`, service: false }, "linux")!;
+  await writeFile(log, `Paired devices only.\n${failure}\n`);
+  const ending = await logEnding(log);
+  assert.ok(ending.startsWith("Port 4000 on 127.0.0.1 is in use. Stop what uses it, or start cns on another port: cns up --bind 127.0.0.1 --state /deep/"), ending);
+  assert.ok(ending.endsWith("...") && ending.length === 503, ending);
+});
+
+test("a daemon that is not ready in time says why, from its log", { timeout: 15000 }, async (t) => {
+  const state = await temporaryState(t);
+  // A daemon that writes and then never tells cns up it is ready, as one stuck starting would.
+  const stuck = () => ({ file: process.execPath, args: ["-e", "console.log('Waiting for the network to come up'); setInterval(() => {}, 1000)"] });
+  await assert.rejects(startDaemon({ bind: "127.0.0.1", port: 1, url: "ws://127.0.0.1:1", state }, { invocation: stuck, readyMs: 1500 }),
+    (error: Error) => /^Daemon startup timed out\. See \S+\.log\nWaiting for the network to come up$/.test(error.message));
+  await assert.rejects(() => stat(state), { code: "ENOENT" });
 });
 
 test("concurrent daemon starts cannot replace the winner's state", { skip: process.platform === "win32", timeout: 20000 }, async (t) => {

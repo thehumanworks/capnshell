@@ -8,6 +8,7 @@ import { newWebSocketRpcSession, type RpcStub } from "capnweb";
 import { z } from "zod";
 import { closeSocket, terminateSocket } from "../connect.js";
 import { openConsole, type PeerController } from "../console.js";
+import { strictlyPrintable } from "../errors.js";
 import { selfInvocation } from "../runtime.js";
 import type { ShellApi } from "../shell.js";
 import { plain, type RemoteNamedPty } from "../terminal.js";
@@ -172,6 +173,8 @@ export interface DaemonSettings { bind: string; port: number; url: string; state
 export interface StartDaemonOptions {
   /** The executable and arguments that run `cns`; by default, this program. Embedders pass the cns executable. */
   invocation?: (args: string[]) => { file: string; args: string[] };
+  /** How long the daemon has to be ready; 10 seconds by default. */
+  readyMs?: number;
 }
 export interface StartedDaemon {
   url: string;
@@ -203,14 +206,16 @@ export async function startDaemon(config: DaemonSettings, options: StartDaemonOp
     stdio: ["ignore", log.fd, log.fd, "ipc"],
     env: { ...process.env, CNS_DAEMON_TOKEN: token },
   });
+  // A daemon that exits or hangs before it is ready says why at the end of its log.
+  let logged = false;
   try {
     const ready = new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => finish(new Error(`Daemon startup timed out. See ${logPath}`)), 10_000);
+      const timer = setTimeout(() => { logged = true; finish(new Error(`Daemon startup timed out. See ${logPath}`)); }, options.readyMs ?? 10_000);
       const onMessage = (message: unknown) => {
         if (message && typeof message === "object" && "ready" in message && message.ready === true) finish();
       };
       const onError = (error: Error) => finish(error);
-      const onExit = (code: number | null) => finish(new Error(`Daemon exited during startup (${code}). See ${logPath}`));
+      const onExit = (code: number | null) => { logged = true; finish(new Error(`Daemon exited during startup (${code}). See ${logPath}`)); };
       function finish(error?: Error) {
         clearTimeout(timer);
         child.off("message", onMessage);
@@ -238,8 +243,60 @@ export async function startDaemon(config: DaemonSettings, options: StartDaemonOp
     }
     if (child.connected) child.disconnect();
     await removeOwnedState(file, token);
-    throw error;
+    const ending = logged ? await logEnding(logPath) : "";
+    throw ending && error instanceof Error ? new Error(`${error.message}\n${ending}`, { cause: error }) : error;
   }
+}
+
+/**
+ * The last lines a daemon wrote to its log, which say why it stopped: at most three, of about 500
+ * characters in all, each safe to print; empty when the log cannot be read. The daemon has exited,
+ * but on Windows the file may stay open a moment longer: opening it to read takes no lock there,
+ * and a failed read only leaves the lines out.
+ */
+export async function logEnding(logPath: string): Promise<string> {
+  let text: string;
+  try {
+    const handle = await open(logPath, "r");
+    try {
+      const { size } = await handle.stat();
+      const start = Math.max(0, size - 2048);
+      const { buffer, bytesRead } = await handle.read(Buffer.alloc(size - start), 0, size - start, start);
+      text = buffer.subarray(0, bytesRead).toString("utf8");
+      // Leave out a line cut off where the read began.
+      if (start > 0) text = text.slice(text.indexOf("\n") + 1);
+    } finally { await handle.close(); }
+  } catch { return ""; }
+  const lines = text.split(/\r?\n/).map((line) => strictlyPrintable(line.trim())).filter(Boolean).slice(-3);
+  // The last line is the daemon's error, whose start says what went wrong; earlier lines fill what room is left.
+  let ending = lines.pop() ?? "";
+  if (ending.length > 500) ending = `${ending.slice(0, 500)}...`;
+  for (let line = lines.pop(); line !== undefined && line.length + 1 + ending.length <= 500; line = lines.pop()) ending = `${line}\n${ending}`;
+  return ending;
+}
+
+/**
+ * Why the daemon cannot listen at its address, and what to run next; undefined for other failures.
+ * The command it suggests can be pasted: a value that is not plainly one word is single-quoted, for
+ * a POSIX shell or, on Windows, for PowerShell.
+ */
+export function listenFailure(error: unknown, daemon: { bind: string; port: number; state: string; service: boolean }, platform: NodeJS.Platform = process.platform): string | undefined {
+  const code = error instanceof Error && "code" in error ? error.code : undefined;
+  if (code !== "EADDRINUSE" && code !== "EACCES") return undefined;
+  const word = (value: string) => (platform === "win32" ? /^[\w./:\\@+=~-]+$/ : /^[\w./:@+,=~-]+$/).test(value) ? value
+    // PowerShell also ends a string at the typographic single quotes, U+2018 to U+201B; doubling escapes each, as shellWord does.
+    : platform === "win32" ? `'${value.replace(/['‘-‛]/g, "$&$&")}'` : `'${value.replaceAll("'", "'\\''")}'`;
+  const options = `${daemon.bind === "0.0.0.0" ? "" : ` --bind ${word(daemon.bind)}`}${daemon.state === daemonStatePath() ? "" : ` --state ${word(daemon.state)}`}`;
+  // A service, which cns up --install or a NixOS or Home Manager module sets up, has its port where it is configured.
+  const instead = daemon.service ? "change the port where its service is configured (cns up --install --port PORT if cns installed it)"
+    : `start cns on another port: cns up${options} --port PORT`;
+  if (code === "EACCES") {
+    // Windows has no privileged ports, but it reserves ranges of them, as for Hyper-V.
+    const why = platform === "win32" ? "Windows may reserve or block it (netsh interface ipv4 show excludedportrange protocol=tcp lists the reserved ranges)"
+      : daemon.port < 1024 ? "ports below 1024 need extra rights" : "this user may not listen there";
+    return `Cannot listen on port ${daemon.port} on ${daemon.bind}: ${why}. ${instead[0]!.toUpperCase()}${instead.slice(1)}.`;
+  }
+  return `Port ${daemon.port} on ${daemon.bind} is in use. Stop what uses it, or ${instead}. If it is this device's cns daemon, cns status shows it and cns stop stops it.`;
 }
 
 /** Connect to the local daemon whose state is at `statePath`, giving up after `timeoutMs`. */
