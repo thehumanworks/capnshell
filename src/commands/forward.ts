@@ -10,7 +10,8 @@ import { secureReady } from "../secure.js";
 import { RETRY_MAX_MS, RETRY_MIN_MS } from "../shell-recovery.js";
 import type { ShellApi } from "../shell.js";
 
-const say = (message: string) => { process.stderr.write(`cns: ${strictlyPrintable(message)}\n`); };
+/** Say `message` on stderr, as cns forward says everything: it can hold the device's words. */
+export const say = (message: string) => { process.stderr.write(`cns: ${strictlyPrintable(message)}\n`); };
 
 /** A failure that ends cns forward, with its exit status. */
 export class Final extends Error {
@@ -53,7 +54,7 @@ export async function openForward(remote: RpcStub<ShellApi>, device: string, por
 const another = (port: number) => port + 10000 <= 65535 ? port + 10000 : port - 10000;
 
 /** Listen on 127.0.0.1 only, at `local`. */
-function listen(local: number, device: string, port: number): Promise<net.Server> {
+export function listen(local: number, device: string, port: number): Promise<net.Server> {
   const server = net.createServer({ allowHalfOpen: true, pauseOnConnect: true });
   return new Promise((resolve, reject) => {
     server.once("error", (error: NodeJS.ErrnoException) => {

@@ -6,7 +6,7 @@ import test, { type TestContext } from "node:test";
 import { MessageChannel } from "node:worker_threads";
 import { newMessagePortRpcSession, RpcTarget, type RpcStub } from "capnweb";
 import type { AuditEntry } from "./audit.js";
-import { Final, openForward } from "./commands/forward.js";
+import { Final, listen, openForward, say } from "./commands/forward.js";
 import { carry, CONNECTION_WINDOW, Flow, FORWARD_CHUNK_BYTES, FORWARD_WINDOW, MAX_FORWARD_CONNECTIONS, MAX_FORWARDS, PortForward, type ForwardSink, type Tunnel } from "./forward.js";
 import { GrantedShell } from "./granted-shell.js";
 import { explainDenial, expandGrants } from "./peers.js";
@@ -299,4 +299,50 @@ test("a device that runs a cns from before cns forward is named, with the comman
     assert.equal(error.code, 1);
     return true;
   });
+});
+
+test("a connection dialed after the forward ended is closed, and one written after its end is refused", async (t) => {
+  const accepted: net.Socket[] = [];
+  const port = await server(t, (socket) => accepted.push(socket));
+  const sink: ForwardSink = { data() {}, end() {}, closed() {} };
+  const forward = new PortForward(port, "ended");
+  const connecting = forward.connect(sink);
+  forward[Symbol.dispose]();
+  await assert.rejects(connecting, /^Error: This forward has ended\.$/);
+  await until(() => accepted.length === 1 && accepted[0]!.readableEnded, "the late connection closing");
+  assert.deepEqual(await forward.ended, { connections: 0, bytesIn: 0, bytesOut: 0 });
+
+  const open = new PortForward(port, "ended");
+  t.after(() => open[Symbol.dispose]());
+  const connection = await open.connect(sink);
+  connection.end();
+  await assert.rejects(connection.write(new Uint8Array(1)), /^Error: The other end sent bytes after its end\.$/);
+});
+
+test("closing a shell ends its forwards, and gives back their room", async (t) => {
+  const port = await server(t, () => {});
+  const shell = new ShellApi(undefined, { owner: "closing" });
+  const reasons: Array<string | undefined> = [];
+  await shell.forward(port).connect({ data() {}, end() {}, closed: (reason) => { reasons.push(reason); } });
+  shell[Symbol.dispose]();
+  await until(() => reasons.length === 1, "the forward's connection closing");
+  assert.equal(reasons[0], "The forward ended.");
+  const forwards = Array.from({ length: MAX_FORWARDS }, () => new PortForward(port, "closing"));
+  for (const forward of forwards) forward[Symbol.dispose]();
+});
+
+test("cns forward listens on 127.0.0.1 only, names another port when its own is taken, and says the device's words safely", async (t) => {
+  const listener = await listen(0, "studio", 5432);
+  t.after(() => listener.close());
+  const { address, family, port } = listener.address() as net.AddressInfo;
+  assert.deepEqual([address, family], ["127.0.0.1", "IPv4"]);
+  const instead = port + 10000 <= 65535 ? port + 10000 : port - 10000;
+  await assert.rejects(listen(port, "studio", 5432), new RegExp(`^Error: Port ${port} is in use on this device\\. Pick another: cns forward studio 5432 --local ${instead}$`));
+
+  const written: string[] = [];
+  const write = process.stderr.write;
+  process.stderr.write = ((chunk: string) => { written.push(String(chunk)); return true; }) as typeof process.stderr.write;
+  try { say("studio: \u001b[2Jgone‮here "); }
+  finally { process.stderr.write = write; }
+  assert.deepEqual(written, ["cns: studio: ?[2Jgone?here?\n"]);
 });
