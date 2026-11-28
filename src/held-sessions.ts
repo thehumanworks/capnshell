@@ -405,7 +405,7 @@ export class HeldSessions implements SessionHost {
       await held.gone;
       return {
         exitCode: null, signal: null, signalNumber: null, timedOut: false, elapsedMs: Date.now() - Date.parse(held.record.startedAt),
-        error: `The session's holder (pid ${held.record.pid}) did not answer, so the daemon killed it.`,
+        error: `The session's holder (pid ${held.record.pid}) did not answer, so it was killed.`,
       };
     } finally {
       if (this.#ending.get(name) === held) this.#ending.delete(name);

@@ -256,7 +256,7 @@ test("a stopped holder holds up neither the list nor a kill, which kills the hol
   await assert.rejects(sessions.startSession("stuck", { command: "true" }, null, new HandleScope()), /^Error: The PTY session stuck is still ending\. Start it again once it has\.$/);
   const exit = await killing;
   assert.ok(Date.now() - started >= 1000, "the holder had killMs to answer");
-  assert.deepEqual([exit.exitCode, exit.signal, exit.error], [null, null, `The session's holder (pid ${pid}) did not answer, so the daemon killed it.`]);
+  assert.deepEqual([exit.exitCode, exit.signal, exit.error], [null, null, `The session's holder (pid ${pid}) did not answer, so it was killed.`]);
   assert.ok(await processExited(pid), "SIGKILL ends even a stopped holder");
   await sessions.startSession("stuck", { command: "sleep 60" }, null, new HandleScope());
   assert.deepEqual(sessions.names, ["fine", "stuck"]);
