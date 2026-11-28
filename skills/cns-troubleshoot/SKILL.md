@@ -43,7 +43,8 @@ they print.
 
 - Named sessions keep running when the daemon restarts if `cns status --json` shows
   `daemon.keepsSessions: true`. Otherwise restarting ends them: check `cns sessions` first and
-  ask the user.
+  ask the user. They outlive `cns stop` too, which names each with its holder's pid;
+  `cns stop --end-sessions` ends them, so use it only when the user agrees.
 - `cns --version` older than `cns status`'s daemon: an older cns comes first on `PATH`
   (`command -v cns`, or `Get-Command cns` in PowerShell).
 - A daemon that stays old after a restart on Linux: `systemctl --user cat cns` shows a
