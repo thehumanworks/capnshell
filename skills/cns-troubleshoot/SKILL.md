@@ -32,6 +32,7 @@ Follow what they print: when something is wrong they name the command that fixes
 | `is not a function`, or a new feature missing after an upgrade | The daemon, here or there, still runs the old cns. See below. |
 | `Relay: ... (registering)` that never turns `registered` | The service cannot reach or verify the relay: read its log (`journalctl --user -u cns` on Linux, `~/.cns/service.log` on macOS and Windows). Never set `NODE_TLS_REJECT_UNAUTHORIZED=0`. |
 | `Local daemon connection timed out` | Local loopback trouble, as with WSL mirrored networking. Do not delete `~/.cns`; see docs/adr/0003-local-control-loopback.md. |
+| Tab completes device names but not a device's sessions or paths | Completion asks a device only through this device's daemon link, within 300 ms, and never dials. It needs `cns up` here, the device `online` in `cns peers` (a `relay` link can be too slow), and the `sessions` or `files` grant there. Installing it per shell: `cns completion --help`; editing the user's shell profile is theirs to approve. |
 
 ## Version drift
 
