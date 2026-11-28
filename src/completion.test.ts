@@ -83,7 +83,7 @@ test("commands and options come from the program, without hidden ones", async ()
 });
 
 test("paired devices complete wherever a command names one", async () => {
-  for (const words of [["run", ""], ["shell", ""], ["sessions", ""], ["screen", ""], ["kill", ""], ["doctor", ""], ["upgrade", ""], ["wake", ""], ["mcp", ""], ["ui", ""], ["peer", "remove", ""], ["peer", "grant", ""], ["run", "--device", ""], ["wake", "studio", "--via", ""], ["audit", "--peer", ""], ["mesh", "add", "home", "nas", ""]]) {
+  for (const words of [["run", ""], ["shell", ""], ["sessions", ""], ["screen", ""], ["kill", ""], ["doctor", ""], ["upgrade", ""], ["wake", ""], ["mcp", ""], ["ui", ""], ["peer", "remove", ""], ["peer", "grant", ""], ["run", "--device", ""], ["wake", "studio", "--via", ""], ["audit", "--peer", ""], ["mesh", "join", "--via", ""]]) {
     assert.deepEqual(await at(words), ["nas", "stash", "studio"], words.join(" "));
   }
   assert.deepEqual(await at(["run", "st"]), ["stash", "studio"]);
@@ -91,8 +91,9 @@ test("paired devices complete wherever a command names one", async () => {
   // Only the first operand is a device; after --, the command is the remote shell's.
   assert.deepEqual(await at(["run", "studio", ""]), []);
   assert.deepEqual(await at(["run", "studio", "--", ""]), []);
-  assert.deepEqual(await at(["mesh", "add", ""]), []);
   assert.deepEqual(await at(["pair", ""]), []);
+  // A mesh's members, and the devices at a gateway, are not the devices paired here.
+  for (const words of [["mesh", "add", "home", ""], ["gateway", "remove", "--device", ""], ["secret", "get", "x", "-D", ""]]) assert.deepEqual(await at(words), [], words.join(" "));
 });
 
 test("a device's named sessions complete through its link, when it lets this device list them", async () => {

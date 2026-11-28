@@ -31,10 +31,12 @@ export const MAX_NAME = 255;
 const OPERANDS: Record<string, readonly string[]> = {
   run: ["device"], shell: ["device"], sessions: ["device"], keys: ["device", "session"], screen: ["device", "session"], kill: ["device", "session"],
   cp: ["copy..."], ui: ["target"], mcp: ["device"], doctor: ["device"], upgrade: ["device"], wake: ["device"],
-  "peer remove": ["device"], "peer grant": ["device"], "peer revoke": ["device"], "peer address": ["device"], "mesh add": ["", "device..."],
+  "peer remove": ["device"], "peer grant": ["device"], "peer revoke": ["device"], "peer address": ["device"],
 };
 /** What an option's value is, by the option's name. */
 const VALUES: Record<string, string> = { device: "device", via: "device", peer: "device", session: "session", attach: "session" };
+/** Commands whose --device names what is not a device paired here: a device at the gateway, or a mesh member. */
+const OTHER_DEVICES = new Set(["gateway remove", "secret set", "secret get", "secret rm"]);
 
 /** A device's shell through the local daemon's link, as far as completion uses it. */
 export interface Borrowed {
@@ -176,7 +178,7 @@ export async function complete(program: Command, words: readonly string[], looku
     return choices;
   };
   let found: readonly string[];
-  if (pending) found = await offer(VALUES[pending.attributeName()], pending.argChoices);
+  if (pending) found = await offer(OTHER_DEVICES.has(commandPath(command)) ? undefined : VALUES[pending.attributeName()], pending.argChoices);
   else if (delimited) found = [];
   else if (current.startsWith("-")) found = help.visibleOptions(command).flatMap((option) => option.long ?? option.short ?? []);
   else if (!operands.length && command.commands.length) found = help.visibleCommands(command).map((sub) => sub.name());
