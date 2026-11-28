@@ -107,24 +107,54 @@ test("a sink that never answers stops reads: the device reads no more of the por
   assert.ok(calls.every((call) => call.byteLength <= FORWARD_CHUNK_BYTES));
   assert.ok(service.writableLength > 32 * 1024 * 1024, `the service's own buffer holds what was not read: ${service.writableLength}`);
 
-  // A second connection shares the forward's window: together they never have more than FORWARD_WINDOW unanswered.
-  let other!: net.Socket;
-  const second = await server(t, (socket) => { other = socket; });
+  // Three connections share the forward's window: their own windows would allow 12 calls
+  // unanswered, and together they never have more than FORWARD_WINDOW.
+  assert.ok(3 * CONNECTION_WINDOW > FORWARD_WINDOW);
+  const services: net.Socket[] = [];
+  const second = await server(t, (socket) => { services.push(socket); });
   const shared = new PortForward(second, "window");
   t.after(() => shared[Symbol.dispose]());
   const counted: Uint8Array[] = [];
   const quiet: ForwardSink = { data: (data) => { counted.push(data); return new Promise(() => {}); }, end() {}, closed() {} };
-  const connections = [await shared.connect(quiet)];
-  await until(() => !!other, "the first service connection");
-  const firstService = other;
-  connections.push(await shared.connect(quiet));
-  await until(() => other !== firstService, "the second service connection");
-  firstService.write(big);
-  other.write(big);
+  const connections = [];
+  for (let i = 0; i < 3; i++) {
+    connections.push(await shared.connect(quiet));
+    await until(() => services.length === i + 1, "the service's connection");
+  }
+  for (const each of services) each.write(big);
   await until(() => counted.length === FORWARD_WINDOW, "the forward's window");
   await new Promise((resolve) => setTimeout(resolve, 300));
   assert.equal(counted.length, FORWARD_WINDOW);
   for (const each of connections) each[Symbol.dispose]();
+});
+
+test("the forwarding device may not have more than the forward's window unanswered over all its connections", async (t) => {
+  const services: net.Socket[] = [];
+  // The service reads nothing, so once its buffers are full the device's writes stay unanswered.
+  const port = await server(t, (socket) => { services.push(socket); socket.pause(); });
+  const forward = new PortForward(port, "receive-window");
+  t.after(() => forward[Symbol.dispose]());
+  const closed: Array<string | undefined> = [];
+  const connections = [];
+  for (let i = 0; i < 3; i++) {
+    connections.push(await forward.connect({ data() {}, end() {}, closed: (reason) => { closed.push(reason); } }));
+    await until(() => services.length === i + 1, "the service's connection");
+  }
+  // Each connection keeps fewer than its own window unanswered, so only the forward's is passed.
+  const chunk = new Uint8Array(FORWARD_CHUNK_BYTES);
+  const pending = connections.map(() => 0);
+  let refused: string | undefined;
+  for (let round = 0; round < 6000 && refused === undefined; round++) {
+    const at = round % connections.length;
+    if (pending[at]! < CONNECTION_WINDOW - 1) {
+      pending[at]!++;
+      connections[at]!.write(chunk).then(() => { pending[at]!--; }, (error: unknown) => { refused ??= (error as Error).message; });
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.match(refused ?? "nothing was refused", new RegExp(`or ${FORWARD_WINDOW} on one forward`));
+  assert.ok(pending.every((count) => count < CONNECTION_WINDOW));
+  await until(() => closed.length >= 1, "the connection closing");
 });
 
 test("a forwarding device that sends more than the window allows is cut off", async (t) => {
