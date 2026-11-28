@@ -12,7 +12,11 @@ export function reportedVersion(value: unknown): string | undefined {
   return typeof value === "string" && VERSION_PATTERN.test(value) ? value : undefined;
 }
 
-/** Order two versions by major, minor and patch: negative when `a` is older than `b`. Suffixes such as -rc.1 are ignored. */
+/**
+ * Order two versions by major, minor and patch: negative when `a` is older than `b`. A prerelease,
+ * such as 2.9.0-rc.1, comes before its release; two prereleases of one release, and build
+ * metadata such as +abc, are not told apart.
+ */
 export function compareVersions(a: string, b: string): number {
   const parts = (version: string) => version.split(/[-+]/, 1)[0]!.split(".").map(Number);
   const [left, right] = [parts(a), parts(b)];
@@ -20,7 +24,8 @@ export function compareVersions(a: string, b: string): number {
     const difference = (left[index] ?? 0) - (right[index] ?? 0);
     if (difference) return difference;
   }
-  return 0;
+  const prerelease = (version: string) => /^[^+]*-/.test(version) ? 1 : 0;
+  return prerelease(b) - prerelease(a);
 }
 
 /**

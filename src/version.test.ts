@@ -13,7 +13,13 @@ test("this cns's version is package.json's, and its handshake reports it", () =>
 test("versions order by major, minor and patch, as numbers", () => {
   assert.ok(compareVersions("1.2.0", "1.10.0") < 0);
   assert.ok(compareVersions("2.0.0", "1.99.99") > 0);
-  assert.equal(compareVersions("1.4.0-rc.1", "1.4.0"), 0);
+  // A prerelease comes before its release, so a device on 2.9.0-rc.1 is behind 2.9.0.
+  assert.ok(compareVersions("1.4.0-rc.1", "1.4.0") < 0);
+  assert.ok(compareVersions("1.4.0", "1.4.0-rc.1") > 0);
+  assert.ok(compareVersions("1.4.0-rc.1", "1.3.9") > 0);
+  assert.equal(compareVersions("1.4.0-rc.1", "1.4.0-rc.2"), 0);
+  assert.equal(compareVersions("1.4.0+abc", "1.4.0"), 0);
+  assert.equal(versionOrder("2.9.0-rc.1", "2.9.0"), "older");
   assert.deepEqual(["1.3.0", "1.4.0", "1.5.0", undefined].map((other) => versionOrder(other, "1.4.0")), ["older", "same", "newer", "unknown"]);
 });
 

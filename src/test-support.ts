@@ -232,13 +232,18 @@ export function kittyKeyboard(screen: ModelTerminal, reply: (text: string) => vo
 /**
  * A stand-in for systemctl --user that runs the unit's ExecStart as systemd would, and stops it
  * with cns stop. It finds the unit as cns does, so it also works for the commands of the daemon
- * it started, which has only HOME and the unit's environment. FAKE_LOG, when set, logs each call.
+ * it started, which has only HOME and the unit's environment. FAKE_LOG, when set, logs each call;
+ * FAKE_SYSTEMCTL_FAIL, when set, makes that command, such as restart, fail as a broken unit's does.
  */
 const FAKE_SYSTEMCTL = String.raw`
 const { appendFileSync, readFileSync } = require("node:fs");
 const { spawn, spawnSync } = require("node:child_process");
 const args = process.argv.slice(2);
 if (process.env.FAKE_LOG) appendFileSync(process.env.FAKE_LOG, args.join(" ") + "\n");
+if (process.env.FAKE_SYSTEMCTL_FAIL && args.includes(process.env.FAKE_SYSTEMCTL_FAIL)) {
+  console.error("Job for cns.service failed because the control process exited with error code.");
+  process.exit(1);
+}
 const unitPath = (process.env.XDG_CONFIG_HOME || process.env.HOME + "/.config") + "/systemd/user/cns.service";
 const unquote = (word) => word.slice(1, -1).replace(/\\(.)/g, "$1").replace(/%%/g, "%").replace(/\$\$/g, "$");
 function unit() {

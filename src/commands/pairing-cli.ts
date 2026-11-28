@@ -26,8 +26,8 @@ import { RefusingShell } from "../refusing-shell.js";
 import { connectControl, daemonStatePath, processExited, removeStaleState, runsUnder, startDaemon, stopDaemon, type ControlConnection, type DaemonStatus } from "./daemon.js";
 import { selfInvocation, selfPath } from "../runtime.js";
 import { behindHint, CNS_VERSION, daemonDrift, describeVersion, reportedVersion, restartAdvice, versionOrder } from "../version.js";
-import { latestRelease } from "./upgrade.js";
-import { describeService, installService, installedService, installedServiceRuns, lingering, loadLaunchAgent, registeredTask, restartService, runTask, serviceEnvironment, serviceFailed, serviceFile, serviceKind, serviceLog, serviceName, serviceOverrides, SETTING_VARIABLES, startService, taskName, uninstallService, type ServiceKind } from "../service.js";
+import { knownLatestRelease } from "../releases.js";
+import { describeService, installService, installedService, installedServiceRuns, lingering, registeredTask, runTask, startInstalledService, serviceEnvironment, serviceFailed, serviceFile, serviceKind, serviceLog, serviceName, serviceOverrides, SETTING_VARIABLES, startService, taskName, uninstallService, type ServiceKind } from "../service.js";
 import { windowsUserSid } from "../config.js";
 
 /** How long the invited device waits for the inviting person to decide. */
@@ -190,7 +190,8 @@ async function report(control: ControlConnection, verb: string, state?: string):
   try {
     const status = await control.remote.status();
     const peers = await control.controller.peers();
-    const service = installedService(daemonStatePath(state));
+    // What runs it now: a daemon started without its service, as after the service failed, is not the service's.
+    const service = status.service ? installedService(daemonStatePath(state)) : undefined;
     const version = reportedVersion(status.version);
     console.log(`${verb} as ${status.identity?.fingerprint} (${version ? `cns ${version}, ` : ""}pid ${status.pid}${service ? `, ${describeService(service.kind)}` : ""}), listening at ${status.url}.`);
     if (status.addresses?.length) console.log(`Reachable at ${status.addresses.join(", ")}.`);
@@ -204,7 +205,8 @@ async function report(control: ControlConnection, verb: string, state?: string):
   } finally { control.close(); }
 }
 
-export interface RestartOptions { state?: string; worker?: string }
+/** `reload`: the service's file changed, as cns up --install rewrites it, so launchd must load it again. */
+export interface RestartOptions { state?: string; worker?: string; reload?: boolean }
 
 /** How long a restart that runs inside the daemon waits, so that this command's output reaches whoever ran it first. */
 const RESTART_DELAY_MS = 1000;
@@ -231,7 +233,7 @@ export function restartPlan(service: boolean | undefined, installed: ServiceKind
  * the daemon that answers.
  */
 export async function restart(options: RestartOptions): Promise<void> {
-  if (options.worker !== undefined) { await restartNow(options.state, Number(options.worker)); return; }
+  if (options.worker !== undefined) { await restartNow(options.state, Number(options.worker), !!options.reload); return; }
   const state = daemonStatePath(options.state);
   const { control, started } = await pairedDaemon({ state }, true);
   if (started) {
@@ -250,7 +252,7 @@ export async function restart(options: RestartOptions): Promise<void> {
   const log = path.join(path.dirname(state), "restart.log");
   await keepHandlesHere();
   const handle = await open(log, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | (constants.O_NOFOLLOW ?? 0), 0o600);
-  const invocation = selfInvocation(["daemon", "restart", "--state", state, "--worker", String(inside === false ? 0 : RESTART_DELAY_MS)]);
+  const invocation = selfInvocation(["daemon", "restart", "--state", state, "--worker", String(inside === false ? 0 : RESTART_DELAY_MS), ...options.reload ? ["--reload"] : []]);
   const worker = spawn(invocation.file, invocation.args, { detached: true, windowsHide: true, stdio: ["ignore", handle.fd, handle.fd] });
   await handle.close();
   const through = plan.start === "detached" ? "" : ` through its ${serviceName(plan.start)}`;
@@ -306,8 +308,8 @@ async function startTask(state: string): Promise<ControlConnection | undefined> 
   return undefined;
 }
 
-/** The restart itself, in its own process: wait `delayMs`, stop the daemon, then start it again as restartPlan says. */
-async function restartNow(statePath: string | undefined, delayMs: number): Promise<void> {
+/** The restart itself, in its own process: wait `delayMs`, stop the daemon, then start it again as restartPlan says, logging each step. */
+async function restartNow(statePath: string | undefined, delayMs: number, reload: boolean): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, delayMs));
   const state = daemonStatePath(statePath);
   const control = await connectControl(state);
@@ -322,24 +324,25 @@ async function restartNow(statePath: string | undefined, delayMs: number): Promi
     // Once stopped, always try to start it again: nobody may be left to run cns up on this device.
     try {
       const pid = await stopDaemon(state);
+      console.error("Stopped it.");
       // A service manager can take a process that is still exiting for one still running.
       if (plan.start !== "detached" && !(await processExited(pid, 10_000))) console.error(`The old daemon (pid ${pid}) has not exited yet.`);
     } catch (error) { console.error(`Stopping the daemon: ${errorMessage(error)}`); }
   }
   let started: ControlConnection | undefined;
-  let detached = plan.start === "detached";
+  const service = plan.start === "detached" ? undefined : plan.start;
+  let detached = !service;
   try {
-    if (plan.start === "systemd") restartService();
-    // Not a kickstart, which runs the agent launchd loaded before: cns up --install may just have rewritten its file.
-    else if (plan.start === "launchd") loadLaunchAgent(installed!.path);
-    else if (plan.start === "schtasks") detached = !(started = await startTask(state));
+    if (service === "schtasks") detached = !(started = await startTask(state));
+    else if (service) await startInstalledService(service, installed!.path, reload, { log: console.error });
   } catch (error) {
     // Stopped here, so nothing else starts it: start it without the service rather than leave the device without a daemon.
-    if (!plan.stop || plan.start === "detached") throw error;
-    console.error(`The ${serviceName(plan.start)} did not start the daemon (${errorMessage(error)}); starting it without the service.`);
+    if (!plan.stop) throw error;
+    console.error(`The ${serviceName(service!)} did not start the daemon (${errorMessage(error)}); starting it without the service.`);
     detached = true;
   }
   if (detached) {
+    console.error(`Starting it detached at ${endpointUrl(status.bind, status.port)}.`);
     // Nothing else starts it again, so try more than once: its port can take a moment to come free.
     for (let attempt = 1; ; attempt++) {
       try { await startDaemon({ bind: status.bind, port: status.port, url: endpointUrl(status.bind, status.port), state }); break; }
@@ -350,7 +353,7 @@ async function restartNow(statePath: string | undefined, delayMs: number): Promi
       }
     }
   }
-  started ??= await awaitControl(state, undefined, detached || plan.start === "detached" ? undefined : serviceFailure(plan.start, state));
+  started ??= await awaitControl(state, undefined, service && !detached ? serviceFailure(service, state) : undefined);
   try { console.error(`Restarted the daemon (pid ${(await started.remote.status()).pid}).`); } finally { started.close(); }
 }
 
@@ -410,6 +413,12 @@ async function install(options: UpOptions): Promise<boolean> {
   if (control) {
     try {
       const status = await control.remote.status();
+      // Refused before anything is written: only that manager can restart its daemon, and a user service would run a second one.
+      if (status.service && !installedService(state)) {
+        throw new Error(process.platform === "linux"
+          ? "A system service runs this daemon, such as the NixOS module's cns.service, so a user service would run a second daemon beside it. Change cns in that service's configuration instead; sudo systemctl restart cns restarts it."
+          : "A service manager cns did not install runs this daemon, so a service from cns up --install would run a second daemon beside it. Change cns where that service is configured, and restart it there.");
+      }
       running = { bind: status.bind, port: status.port };
     } finally { control.close(); }
   }
@@ -440,7 +449,7 @@ async function install(options: UpOptions): Promise<boolean> {
   }
   console.error("Run cns up --install again after moving or upgrading cns to a new path, or to change --bind or --port.");
   // The restart's own process stops the daemon and starts the service's, as cns daemon restart does.
-  if (running) { await restart({ state }); return true; }
+  if (running) { await restart({ state, reload: true }); return true; }
   if (kind !== "schtasks") { (await awaitControl(options.state, undefined, serviceFailure(kind, state))).close(); return false; }
   const started = await startTask(state);
   if (started) { started.close(); return false; }
@@ -706,6 +715,8 @@ export async function status(options: StatusOptions): Promise<void> {
       daemon = {
         pid: info.pid, url: info.url, addresses: info.addresses ?? [], relay: info.relay ?? null, relayRegistered: info.relayRegistered ?? null, startedAt: new Date(info.startedAt).toISOString(),
         version: reportedVersion(info.version) ?? null, executable: info.executable ? printable(info.executable) : null, warning: drift ?? null,
+        // What a restart would end, for cns upgrade on another device; null from a daemon too old to say.
+        sessions: Array.isArray(info.sessions) ? info.sessions.map(printable) : null,
       };
       for (const [fingerprint, link] of await standingLinks(control)) links.push({ name: link.name, fingerprint, address: link.via, hostname: link.hostname, version: link.version ?? null });
     } finally { control.close(); }
@@ -827,7 +838,7 @@ export async function doctor(name: string | undefined, options: DoctorOptions): 
   if (answered) {
     report.version = version ?? null;
     const order = versionOrder(version);
-    if (order === "older" || order === "unknown") lines.push(`  It runs ${describeVersion(version)}, older than this device's ${CNS_VERSION}: upgrade cns on ${name} and restart its daemon (cns doctor there says how).`);
+    if (order === "older" || order === "unknown") lines.push(`  It runs ${describeVersion(version)}, older than this device's ${CNS_VERSION}: cns upgrade ${name} upgrades it and restarts its daemon; add --dry-run to see how first.`);
     else if (order === "newer") lines.push(`  It runs cns ${version}, newer than this device's ${CNS_VERSION}: upgrade cns here.`);
   }
   if (live) {
@@ -949,10 +960,8 @@ export async function peers(options: PeersOptions): Promise<void> {
     console.error(`\n${left.join(", ")} ${one ? "was" : "were"} removed from this device (cns peer remove), so cns neither connects to ${one ? "it" : "them"} nor lets ${one ? "it" : "them"} in; ${one ? "its record is" : "their records are"} left over, as from a backup. To delete ${one ? "it" : "one"}: cns peer remove ${one ? left[0] : "NAME"}.`);
   }
   const linked = rows.flatMap((row) => row.status === "online" ? [{ name: row.name, ...row.version ? { version: row.version } : {} }] : []);
-  // Compared with the latest release too, when GitHub answers in time; offline, with this cns alone.
-  let latest: string | undefined;
-  if (linked.length) { try { latest = await latestRelease(2000); } catch { /* Unknown: say nothing of it. */ } }
-  const hint = behindHint(linked, latest);
+  // Compared with the latest release too, as learned within a day; unknown, as offline, with this cns alone.
+  const hint = behindHint(linked, linked.length ? await knownLatestRelease() : undefined);
   if (hint.length) console.error(`\n${hint.join("\n")}`);
 }
 

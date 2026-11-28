@@ -368,8 +368,10 @@ export function createCli(): Command {
     .description("Stop the daemon and start it again as it runs now, also when a paired device runs this, which drops its link")
     .option("-S, --state <path>", "Local daemon state file")
     .addOption(new Option("--worker <ms>").hideHelp())
+    // From cns up --install, which rewrote the service's file: launchd loads it again rather than start the copy it has.
+    .addOption(new Option("--reload").hideHelp())
     .addHelpText("after", "\nThe daemon comes back through its service when one runs it (systemd restarts it, launchd or Task\nScheduler starts it again), else detached with the same --bind and --port, running this cns. A paired device can run it:\n  cns run studio -- cns daemon restart\nIt then returns at once, the daemon restarts a second later, and the link comes back within seconds.\nRestarting ends the named sessions the daemon holds. A daemon that was not running is started.")
-    .action(async (options: { state?: string; worker?: string }) => { const { restart } = await import("./commands/pairing-cli.js"); await restart(options); });
+    .action(async (options: { state?: string; worker?: string; reload?: boolean }) => { const { restart } = await import("./commands/pairing-cli.js"); await restart(options); });
   startCommand(program.command("up").description("Run this device as a paired peer: start its daemon, or report the running one (also cns daemon start)"));
   program.command("pair")
     .description("Pair this device with another: show a pairing code, or type the code the other device shows")
@@ -426,18 +428,22 @@ export function createCli(): Command {
     .addOption(deviceOption("The paired device, in place of the DEVICE argument"))
     .option("-a, --all", "Every paired device")
     .option("-n, --dry-run", "Show what each device runs and what would run there, changing nothing")
+    .option("-E, --end-sessions", "Upgrade a device even though restarting its daemon ends its named sessions")
     .addHelpText("after", [
       "",
       "Each device is upgraded through the shell grant it gives this one, with the commands cns run would",
       "run there. A cns that mise installed gets the release by its exact version (mise use -g",
-      "github:thehumanworks/capnshell@VERSION); then the new cns restarts the daemon in a process of its own,",
-      "as cns daemon restart does, or with cns up --install where a service still runs the old cns, so the",
-      "device keeps a daemon. Restarting ends the named sessions it holds. A device whose cns Nix manages, or",
-      "that was installed another way, is left as it is, and the report says what to run there.",
+      "github:thehumanworks/capnshell@VERSION, which pins it in mise's global config there); then the new",
+      "cns restarts the daemon in a process of its own, as cns daemon restart does, or with cns up --install",
+      "where a service still runs the old cns, so the device keeps a daemon. Restarting ends the named",
+      "sessions the daemon holds, so a device with any, or whose cns is too old to say, is left as it is",
+      "unless --end-sessions. So is a device whose cns Nix manages, or that was installed another way; the",
+      "report says what to run there.",
       "The report has one line per device: upgraded, already current, needs a manual step, or unreachable,",
-      "with what to run later. Exit 1 when a device needs a manual step or did not answer.",
+      "with what to run later. Exit 1 when a device did not answer or a step failed there, else 4 when a",
+      "device needs a manual step, else 0, also for a --dry-run whose plans would all go ahead.",
     ].join("\n"))
-    .action(async (name: string | undefined, { device, ...options }: { device?: string; all?: boolean; dryRun?: boolean }) => {
+    .action(async (name: string | undefined, { device, ...options }: { device?: string; all?: boolean; dryRun?: boolean; endSessions?: boolean }) => {
       const { upgrade } = await import("./commands/upgrade.js");
       await upgrade(oneDevice("upgrade", name, device), options);
     });

@@ -452,6 +452,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
     identity: () => ({ publicKey: identity.publicKey, fingerprint: identity.fingerprint }),
     addresses: () => advertised(),
     relayRegistered: () => relay ? isRegistered(registration) : undefined,
+    sessions: () => ptys.list().flatMap((session) => session.running ? [session.name] : []),
     async invite(ttlMs) {
       const invite = createInvite(identity.publicKey, advertised(), ttlMs, suggestedName(os.hostname()));
       invites.open(invite.id, invite.secret, invite.expiresAt, ttlMs);

@@ -48,7 +48,8 @@ they print.
   drop-in or another `ExecStart` that overrides the service.
 - `cns peers` and `cns doctor NAME` show which other devices run an older cns.
   `cns upgrade NAME --dry-run` shows how cns would upgrade one from here; with the user's
-  go-ahead, `cns upgrade NAME` (or `--all`) does it, and ends each daemon's named sessions.
+  go-ahead, `cns upgrade NAME` (or `--all`) does it. It skips a daemon with named sessions,
+  or too old to say; add `--end-sessions` only when the user agrees to end them.
 
 ## Never
 

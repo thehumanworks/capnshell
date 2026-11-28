@@ -50,8 +50,8 @@ async function miseDevice(t: TestContext, devices: Awaited<ReturnType<typeof tes
   const fresh = await script(path.join(installs, "99.0.0", "cns"), `exec ${self().map(sh).join(" ")} "$@"`);
   const miseLog = path.join(tools, "mise.log");
   await writeFile(miseLog, "");
-  await script(path.join(bin, "cns"), `echo ${sh(JSON.stringify({ version: "2.7.0", daemon: { version: CNS_VERSION, executable: path.join(installs, "2.7.0", "cns") } }))}`);
-  await script(path.join(bin, "mise"), `echo "$*" >> ${sh(miseLog)}\ncase "$1" in\n  use) ;;\n  which) echo ${sh(fresh)} ;;\n  *) exit 2 ;;\nesac`);
+  await script(path.join(bin, "cns"), `echo ${sh(JSON.stringify({ version: "2.7.0", daemon: { version: CNS_VERSION, executable: path.join(installs, "2.7.0", "cns"), sessions: [] } }))}`);
+  await script(path.join(bin, "mise"), `echo "$*" >> ${sh(miseLog)}\ncase "$1" in\n  --version) echo 2026.11.3 ;;\n  use) ;;\n  which) echo ${sh(fresh)} ;;\n  *) exit 2 ;;\nesac`);
   // XDG_CONFIG_HOME: a unit goes where cns and the stand-in for systemctl look, never into this user's own systemd.
   const device = await devices.device(name, { PATH: `${bin}:${process.env.PATH}`, XDG_CONFIG_HOME: path.join(devices.root, name, ".config") });
   // The state path cns uses by default, as the commands that run there do.
@@ -79,17 +79,20 @@ test("cns upgrade --all upgrades a device through mise and restarts its daemon, 
   const plan = await devices.cli(asks, ["upgrade", "--all", "--dry-run"]);
   assert.equal(plan.code, 1, plan.output);
   assert.match(plan.stderr, /^Checking pi, studio against cns 99\.0\.0, the latest release\./);
-  assert.match(plan.stdout, /^pi: unreachable \(Cannot connect to pi: .*\)\. Later, run cns upgrade pi\n/);
-  assert.match(plan.stdout, new RegExp(`\nstudio: would upgrade from ${escaped} to 99\\.0\\.0: mise use -g github:thehumanworks/capnshell@99\\.0\\.0, then restart its daemon on the new cns`));
-  assert.equal(await readFile(miseLog, "utf8"), "");
+  // Each device's line comes as soon as it is known, so in no set order.
+  assert.equal(plan.stdout.split("\n").length, 3, plan.stdout);
+  assert.match(plan.stdout, /^pi: unreachable \(Cannot connect to pi: .*\)\. Later, run cns upgrade pi$/m);
+  assert.match(plan.stdout, new RegExp(`^studio: would upgrade from ${escaped} to 99\\.0\\.0: mise use -g github:thehumanworks/capnshell@99\\.0\\.0, which pins that version in mise's global config there, then cns up --install from the new cns if a service runs the old one, else cns daemon restart$`, "m"));
+  assert.equal(await readFile(miseLog, "utf8"), "--version\n");
   assert.equal((await daemonAt(studio.state)).pid, before.pid);
 
   const upgraded = await devices.cli(asks, ["upgrade", "--all"]);
   assert.equal(upgraded.code, 1, `${upgraded.output}\nThe restart's log:\n${await log()}`);
-  assert.match(upgraded.stdout, /^pi: unreachable \(Cannot connect to pi: .*\)\. Later, run cns upgrade pi\n/);
+  assert.equal(upgraded.stdout.split("\n").length, 3, upgraded.stdout);
+  assert.match(upgraded.stdout, /^pi: unreachable \(Cannot connect to pi: .*\)\. Later, run cns upgrade pi$/m);
   // The "cns 99.0.0" mise installed is this cns, so the daemon comes back with this version, as another process.
-  assert.match(upgraded.stdout, new RegExp(`\nstudio: upgraded from ${escaped} to ${escaped}\n$`));
-  assert.equal(await readFile(miseLog, "utf8"), "use -g github:thehumanworks/capnshell@99.0.0\nwhich cns --tool github:thehumanworks/capnshell@99.0.0\n");
+  assert.match(upgraded.stdout, new RegExp(`^studio: upgraded from ${escaped} to ${escaped}$`, "m"));
+  assert.equal(await readFile(miseLog, "utf8"), "--version\nuse -g github:thehumanworks/capnshell@99.0.0\nwhich cns --tool github:thehumanworks/capnshell@99.0.0\n");
   const after = await replaced(studio.state, before.pid, log);
   assert.equal(after.service, false, "a daemon cns up started is started again the same way");
   assert.match(await log(), new RegExp(`Restarted the daemon \\(pid ${after.pid}\\)`));
@@ -134,4 +137,55 @@ test("a paired device's cns up --install hands the restart to a process of its o
   assert.ok(rewritten.includes(`ExecStart=${command} "daemon" "--service"`), rewritten);
   const again = await devices.cli(laptop, ["run", "studio", "--", "echo back"]);
   assert.equal(again.code, 0, again.output);
+});
+
+test("cns status --json names the named sessions its daemon runs, which cns upgrade leaves alone without --end-sessions", { timeout: 60000 }, async (t) => {
+  const devices = await testDevices(t, "cns-upgrade-sessions-");
+  const studio = await devices.device("studio");
+  const laptop = await devices.device("laptop");
+  await devices.up(studio);
+  await devices.pair(studio, laptop);
+  const sessions = async () => {
+    const status = await devices.cli(studio, ["status", "--json", "--state", studio.state]);
+    assert.equal(status.code, 0, status.output);
+    return (JSON.parse(status.stdout) as { daemon: { sessions: string[] } }).daemon.sessions;
+  };
+  assert.deepEqual(await sessions(), []);
+  const started = await devices.cli(laptop, ["shell", "studio", "--name", "build", "--", "sleep 300"]);
+  assert.equal(started.code, 0, started.output);
+  assert.deepEqual(await sessions(), ["build"]);
+});
+
+test("cns peers names a device behind the latest release, learned at most once a day, and exits 0 whether GitHub answers or not", { timeout: 60000 }, async (t) => {
+  const devices = await testDevices(t, "cns-peers-release-");
+  const studio = await devices.device("studio");
+  const laptop = await devices.device("laptop");
+  await devices.up(studio);
+  await devices.up(laptop);
+  await devices.pair(studio, laptop);
+  let status = 200;
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.json({ tag_name: "v99.0.0" }, { status }) });
+  t.after(() => server.stop(true));
+  const asks = { ...laptop, env: { ...laptop.env, CNS_RELEASES: `http://127.0.0.1:${server.port}/releases/latest` } };
+  const peers = () => devices.cli(asks, ["peers", "--state", laptop.state]);
+  for (const deadline = Date.now() + 20000; !/\nstudio +online/.test((await peers()).stdout); await new Promise((resolve) => setTimeout(resolve, 200))) {
+    if (Date.now() > deadline) assert.fail("laptop's daemon never linked to studio");
+  }
+  const behind = `Older cns than the latest release, 99.0.0: studio (${CNS_VERSION}). cns upgrade studio upgrades it; add --dry-run to see how first.\nThis device runs cns ${CNS_VERSION}, older than the latest release, 99.0.0.`;
+  const served = await peers();
+  assert.equal(served.code, 0, served.output);
+  assert.ok(served.stderr.includes(behind), served.stderr);
+
+  // GitHub fails now, but laptop learned the release today.
+  status = 500;
+  const remembered = await peers();
+  assert.equal(remembered.code, 0, remembered.output);
+  assert.ok(remembered.stderr.includes(behind), remembered.stderr);
+
+  // A day on, GitHub still fails: nothing is said of the release, and cns peers still lists the devices.
+  await writeFile(path.join(laptop.dir, "latest-release.json"), JSON.stringify({ version: "99.0.0", checkedAt: Date.now() - 25 * 60 * 60_000 }));
+  const failing = await peers();
+  assert.equal(failing.code, 0, failing.output);
+  assert.doesNotMatch(failing.stderr, /latest release|Older cns/);
+  assert.match(failing.stdout, /\nstudio +online/);
 });
