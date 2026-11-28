@@ -92,7 +92,9 @@ export function createCli(): Command {
       "paired device that lets this one run commands, by that device's own cns peer remove. Each place",
       "is reported with what to run there or later. Running it again is harmless; once the device is",
       "gone here, name it by its fingerprint.",
-      "A removed device gets no record here from any mesh again, until you pair with it directly.",
+      "A removed device gets no record here from any mesh again, until you pair with it directly. A mesh",
+      "it runs stays at its last list here, and its members may use nothing here (cns mesh allow undoes",
+      "that); to end it here: cns mesh leave NAME.",
       "Exit status with --everywhere, --fingerprint, --dry-run or --json: 0 when done, 4 when a place",
       "still needs something run there, 1 when a place was unreachable or failed.",
     ].join("\n"))

@@ -16,7 +16,7 @@ import { endpointUrl } from "../options.js";
 import { decisionSchema, decodeInvite, DEFAULT_INVITE_MS, INVITE_PREFIX, MAX_INVITE_MS, suggestedName, type Decision, type Invite, type PairingApi, type Proposal } from "../pairing.js";
 import { hostCode, inviteForCode, isPairingCode, MAX_WRONG_CODES, PairingCodeError, parseCode, type HostedCode } from "../pairing-code.js";
 import { peerFileExists, peerNamePattern, removePeerFile, validatePeerUrl } from "../peer-files.js";
-import { describeGrants, expandGrants, findPairedPeer, getPeer, listPeers, revokeDevice, savedKey, savePairedPeer, updatePairedPeer, PERMISSIONS, type Permission } from "../peers.js";
+import { describeGrants, expandGrants, findPairedPeer, getPeer, isRevoked, listPeers, revokeDevice, savedKey, savePairedPeer, updatePairedPeer, PERMISSIONS, type Permission } from "../peers.js";
 import { plain } from "../terminal.js";
 import { selfCheck, type SelfFacts } from "../self-check.js";
 import type { ShellApi } from "../shell.js";
@@ -554,6 +554,7 @@ async function inviteAndWait(options: PairOptions): Promise<void> {
       `  It asks to use this machine's: ${describeGrants(proposal.requests)}`,
       `  It lets this machine use its:  ${describeGrants(proposal.offers)}`,
       ...proposal.addresses?.length ? [`  This machine will dial it at:  ${proposal.addresses.join(", ")}`] : [],
+      ...isRevoked(peer) ? [REMOVED_BEFORE] : [],
     ].join("\n"));
     const decline = async (reason: string, message: string) => {
       await control!.remote.decide(created.id, { accept: false, reason });
@@ -585,6 +586,9 @@ async function inviteAndWait(options: PairOptions): Promise<void> {
   }
 }
 
+/** Said on either side, with --yes too, when the other device was removed here (revokeDevice), which pairing again ends. */
+const REMOVED_BEFORE = "  It was removed from this device before (cns peer remove); pairing again lets it back in, and meshes here give it records again.";
+
 async function acceptInvite(text: string, options: PairOptions): Promise<void> {
   let invite: Invite;
   // An expired or unreadable invite is a refused pairing, as an unknown one is.
@@ -603,6 +607,7 @@ async function acceptInvite(text: string, options: PairOptions): Promise<void> {
     const existing = findPairedPeer(invite.key);
     if (existing) throw new Error(`This device is already paired with it as ${existing.name}. To pair again, remove it first with cns peer remove ${existing.name}.`);
     if (options.name !== undefined) checkFreeName(options.name);
+    const removedBefore = isRevoked(invite.key);
     const peerFingerprint = fingerprintOf(invite.key);
     // --grant, or --yes alone, decides without asking; --yes never grants what --grant does not name.
     const askGrants = options.grant === undefined && !prompt.yes;
@@ -611,6 +616,7 @@ async function acceptInvite(text: string, options: PairOptions): Promise<void> {
       `  This device will ask to use its: ${describeGrants(requests)}`,
       ...askGrants ? [] : [`  and let it use this device's:   ${describeGrants(offers)}`],
       `  This device is ${identity.fingerprint}; the other side will see that.`,
+      ...removedBefore ? [REMOVED_BEFORE] : [],
     ].join("\n"));
     if (!(await prompt.confirm("Pair with it?", true))) { console.log("Not paired."); process.exitCode = 3; return; }
     const name = await chooseName(prompt, "Save it as", options.name, invite.name ?? "peer");

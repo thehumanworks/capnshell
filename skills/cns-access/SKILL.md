@@ -84,7 +84,9 @@ run there, and 1 while one was unreachable or failed. Running it again is harmle
 device is gone here, name it by the fingerprint `cns peers` shows on another device:
 `cns peer remove --fingerprint FINGERPRINT --everywhere`. A removed device's key goes on the
 device's revoked list, so no mesh gives it a record there again; pairing with it directly again
-is the only way back.
+is the only way back. A mesh the removed device runs is narrowed there: its members may use
+nothing on that device until the user leaves it (`cns mesh leave MESH`, the step the report
+gives) or allows them again (`cns mesh allow MESH GRANTS`).
 
 A device that is in a mesh gets its grants from the mesh: `cns peer grant` refuses it, and
 `cns mesh allow MESH GRANTS` on the granting device sets what every member may use there.

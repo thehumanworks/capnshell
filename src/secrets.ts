@@ -194,11 +194,15 @@ export function pruneSecrets(self: PublicKey, states: readonly MeshState[]): num
   return removed;
 }
 
-/** The records to offer `peer`: those it may read, each with its key sealed to it. */
+/**
+ * The records to offer `peer`: those it may read, each with its key sealed to it. None of a mesh
+ * whose admin was removed here: its last list may name devices that whoever has that key added.
+ */
 export function secretsFor(peer: PublicKey, identity: Identity, states: readonly MeshState[]): SecretCopy[] {
-  // A device removed here has no record, so no link to ask on; and if it had, it would get nothing.
-  if (peer === identity.publicKey || revokedDevices().has(fingerprint(peer))) return [];
-  const offered = heldSecrets(identity.publicKey, states).filter(({ record, state }) => mayRead(record, state, peer)).slice(0, MAX_OFFER);
+  const revoked = revokedDevices();
+  // A device removed here gets no link (the daemon refuses it), and if it had one, it would get nothing.
+  if (peer === identity.publicKey || revoked.has(fingerprint(peer))) return [];
+  const offered = heldSecrets(identity.publicKey, states).filter(({ record, state }) => !revoked.has(fingerprint(state.admin)) && mayRead(record, state, peer)).slice(0, MAX_OFFER);
   if (!offered.length) return [];
   const keys = boxKeys(identity);
   try {
@@ -212,11 +216,12 @@ export function secretsFor(peer: PublicKey, identity: Identity, states: readonly
 
 /**
  * Keep the records `from`, a member, offered that are newer than this device's and that it
- * may keep (see above), and return them. Anything else offered is ignored.
+ * may keep (see above), and return them. Anything else offered is ignored, and so is every
+ * record of a mesh whose admin was removed here, as for secretsFor.
  */
 export function takeSecrets(from: PublicKey, identity: Identity, states: readonly MeshState[], offered: unknown): SecretRecord[] {
+  if (!Array.isArray(offered) || from === identity.publicKey) return [];
   const revoked = revokedDevices();
-  if (!Array.isArray(offered) || from === identity.publicKey || revoked.has(fingerprint(from))) return [];
   const self = identity.publicKey;
   const held = new Map(heldSecrets(self, states).map((secret) => [secret.id, secret.record]));
   const count = (mesh: string, admin: PublicKey) => [...held.values()].filter((record) => record.mesh === mesh && record.admin === admin).length;
@@ -228,7 +233,7 @@ export function takeSecrets(from: PublicKey, identity: Identity, states: readonl
       try { opened = openCopy(value); } catch { continue; }
       const { record } = opened;
       const state = meshOf(record, states, self, revoked);
-      if (!state || !isMember(state, from)) continue;
+      if (!state || revoked.has(fingerprint(state.admin)) || !isMember(state, from)) continue;
       const id = secretId(record);
       const current = held.get(id);
       if (current ? record.version <= current.version : count(record.mesh, record.admin) >= MAX_SECRETS) continue;

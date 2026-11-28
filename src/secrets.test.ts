@@ -122,6 +122,30 @@ test("nothing a device removed here set is kept, not even a version a member pas
   assert.equal(on(laptop, () => pruneSecrets(laptop.publicKey, states)), 1);
 });
 
+test("a secret set for a device removed here is not kept, and goes at the next prune", async (t) => {
+  const on = await devices(t);
+  const states = [home()];
+  on(laptop, () => keepSecret(sealSecret(laptop, fields("STUDIO_TOKEN", 1, studio), value("for studio"))));
+  assert.equal(on(laptop, () => read(laptop, states, "STUDIO_TOKEN")), "for studio");
+  on(laptop, () => revokeDevice(studio.fingerprint, studio.publicKey));
+  assert.equal(on(laptop, () => read(laptop, states, "STUDIO_TOKEN")), undefined);
+  assert.equal(on(laptop, () => pruneSecrets(laptop.publicKey, states)), 1);
+});
+
+test("a mesh whose admin was removed here offers its members no secret and takes none from them, and keeps those held", async (t) => {
+  const on = await devices(t);
+  const states = [home()];
+  on(laptop, () => keepSecret(sealSecret(laptop, fields("API_KEY", 1), value("one"))));
+  on(studio, () => keepSecret(sealSecret(studio, fields("API_URL", 1), value("https://studio.example"))));
+  const fromStudio = on(studio, () => secretsFor(laptop.publicKey, studio, states));
+  assert.equal(on(laptop, () => secretsFor(studio.publicKey, laptop, states)).length, 1);
+  // Its last list may name devices whoever has the admin's key added; studio stands for one.
+  on(laptop, () => revokeDevice(admin.fingerprint, admin.publicKey));
+  assert.deepEqual(on(laptop, () => secretsFor(studio.publicKey, laptop, states)), []);
+  assert.deepEqual(on(laptop, () => takeSecrets(studio.publicKey, laptop, states, fromStudio)), []);
+  assert.equal(on(laptop, () => read(laptop, states, "API_KEY")), "one", "what it holds stays, until it leaves the mesh");
+});
+
 test("a member keeps only what its owner signed, with a key that opens it", async (t) => {
   const on = await devices(t);
   const states = [home()];

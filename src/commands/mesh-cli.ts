@@ -35,7 +35,7 @@ function adminOf(name: string, self: PublicKey): MeshState {
 }
 
 /** What this device calls a mesh's admin. */
-function adminName(state: MeshState): string {
+export function adminName(state: MeshState): string {
   return listPeers(() => {}).find((peer) => peer.publicKey === state.admin && peer.mesh === undefined)?.name ?? `the device with fingerprint ${fingerprint(state.admin)}`;
 }
 

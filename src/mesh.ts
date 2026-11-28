@@ -274,7 +274,7 @@ export function removeMesh(name: string): void {
 }
 
 /** Every saved record this cns can read, and those it cannot, for planMesh. */
-function savedRecords(): { records: PeerEntry[]; unreadable: SavedKey[] } {
+export function savedRecords(): { records: PeerEntry[]; unreadable: SavedKey[] } {
   const unreadable: SavedKey[] = [];
   const records = listPeers((name, error) => unreadable.push({ name, publicKey: error instanceof UnreadablePeer ? error.publicKey : undefined }));
   return { records, unreadable };
@@ -286,8 +286,9 @@ function savedRecords(): { records: PeerEntry[]; unreadable: SavedKey[] } {
  * mesh may be in another, which can take it only once the first has let go of its record,
  * so a pass that removed records is followed by one more. Secrets this device may no longer
  * keep, such as those of a mesh it left or of a member removed from one, go too (secrets.ts).
+ * `records` reads the saved records, savedRecords but in a test.
  */
-export function applyMeshes(self: PublicKey, now = Date.now()): MeshPlan {
+export function applyMeshes(self: PublicKey, now = Date.now(), records = savedRecords): MeshPlan {
   const states = listMeshes();
   const total: MeshPlan = { create: [], update: [], remove: [] };
   const kept = new Set(states.map((state) => state.name));
@@ -301,7 +302,7 @@ export function applyMeshes(self: PublicKey, now = Date.now()): MeshPlan {
     for (const state of states) {
       // The revoked list is read after the records: a device revoked and then removed meanwhile
       // is either still in the records, so gets no new one, or already on the list.
-      const saved = savedRecords();
+      const saved = records();
       const plan = planMesh({ self, mesh: state.name, allow: state.allow, list: state.list, ...saved, revoked: revokedDevices(), now });
       for (const { name } of plan.remove) removePeerFile(name);
       for (const { name, incoming } of plan.update) updatePairedPeer(name, (peer) => ({ ...peer, grants: { ...peer.grants, incoming } }));

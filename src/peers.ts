@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { createPeerFile, peerFile, peerNames, readPeerFile, revokedFiles, rewritePeerFile, validatePeerUrl } from "./peer-files.js";
+import { createPeerFile, peerFile, peerNames, readPeerFile, readPeerFileLoosely, revokedFiles, rewritePeerFile, validatePeerUrl } from "./peer-files.js";
 import { isIP } from "node:net";
 import { errorMessage } from "./errors.js";
 import { fingerprint, type PublicKey } from "./identity.js";
@@ -218,9 +218,17 @@ export function getPeer(name: string): PeerEntry | undefined {
   return content === undefined ? undefined : entryFor(name, content);
 }
 
-/** The key the file saved as `name` names, also when this cns cannot use the record; undefined when it names none. */
+/**
+ * The key the file saved as `name` names, also when this cns cannot use the record, or the file
+ * is not private or is a link, as after a backup was restored; undefined when it names none. For
+ * keeping a device out only (revokeDevice), which narrows, never to let one in.
+ */
 export function savedKey(name: string): PublicKey | undefined {
-  try { return getPeer(name)?.publicKey; } catch (error) { return error instanceof UnreadablePeer ? error.publicKey : undefined; }
+  try { return getPeer(name)?.publicKey; } catch (error) {
+    if (error instanceof UnreadablePeer) return error.publicKey;
+    try { return publicKeySchema.safeParse((JSON.parse(readPeerFileLoosely(name) ?? "null") as { publicKey?: unknown } | null)?.publicKey).data; }
+    catch { return undefined; }
+  }
 }
 
 /**
@@ -236,6 +244,11 @@ export function revokeDevice(fp: string, publicKey?: PublicKey): void {
 /** The fingerprints of the devices removed here (revokeDevice). */
 export function revokedDevices(): Set<string> {
   return new Set(revokedFiles.names());
+}
+
+/** Whether the device with this key was removed here (revokeDevice): one look at the revoked directory, cheap enough for every connection. */
+export function isRevoked(publicKey: PublicKey): boolean {
+  return revokedFiles.exists(fingerprint(publicKey));
 }
 
 /** The paired device with this key, under whatever alias it was saved. */

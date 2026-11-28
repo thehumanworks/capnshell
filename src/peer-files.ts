@@ -38,8 +38,20 @@ function privateFiles(directory: () => string, what: string) {
       return readFileSync(fd, "utf8");
     } finally { closeSync(fd); }
   };
+  /**
+   * A file's contents without the private-file check, through a link too: a regular file of at
+   * most 64 KiB, else undefined. Only for what narrows access, such as keeping a device out.
+   */
+  const readLoosely = (name: string): string | undefined => {
+    let fd: number;
+    try { checkDirectories(); fd = openSync(file(name), constants.O_RDONLY | (constants.O_NONBLOCK ?? 0)); } catch { return undefined; }
+    try {
+      const stats = fstatSync(fd);
+      return stats.isFile() && stats.size <= 65536 ? readFileSync(fd, "utf8") : undefined;
+    } catch { return undefined; } finally { closeSync(fd); }
+  };
   return {
-    checkDirectories, file, prepare, read,
+    checkDirectories, file, prepare, read, readLoosely,
     /** Create a private file that must not exist yet. */
     create(name: string, content: string): void {
       const target = file(name);
@@ -107,6 +119,8 @@ export const rewritePeerFile: (name: string, content: string) => void = peers.re
 export const peerFileExists: (name: string) => boolean = peers.exists;
 /** Read a saved peer's file, which must be a private regular file; undefined when there is none. */
 export const readPeerFile: (name: string) => string | undefined = peers.read;
+/** Read a saved peer's file even when it is not private or is a link, for keeping its device out only; undefined when there is none to read. */
+export const readPeerFileLoosely: (name: string) => string | undefined = peers.readLoosely;
 /** The names of every saved peer, sorted; [] when nothing has been saved yet. */
 export const peerNames: () => string[] = peers.names;
 /** Remove a saved peer's file. */

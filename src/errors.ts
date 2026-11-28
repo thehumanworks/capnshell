@@ -17,10 +17,18 @@ function parseIssues(message: string): { path?: PropertyKey[]; message: string }
   return undefined;
 }
 
-/** Characters that reorder how text around them is shown, so that it reads as something else. */
-export const BIDI = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
-
-/** Text from another machine, made safe to print or log: no terminal control sequences, and nothing that reorders it. */
+/** Text from another machine, made safe to print or log: no terminal control sequences. */
 export function printable(text: string): string {
-  return String(text).replace(/[\u0000-\u001f\u007f-\u009f]/g, "?").replace(BIDI, "?");
+  return String(text).replace(/[\u0000-\u001f\u007f-\u009f]/g, "?");
+}
+
+/**
+ * Text from another machine where each character must show as itself, such as a table or a report
+ * a person acts on: no control characters, and none of the format and separator characters (such
+ * as bidi overrides, isolates and zero-width characters) that would make it read as something
+ * else. printable() keeps format characters, so that other output still shows right-to-left text
+ * such as session titles.
+ */
+export function strictlyPrintable(text: string): string {
+  return String(text).replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, "?");
 }

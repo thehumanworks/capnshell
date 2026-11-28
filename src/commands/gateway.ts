@@ -1,12 +1,10 @@
 import readline from "node:readline";
-import { errorMessage, printable } from "../errors.js";
 import { describeGrants, expandGrants } from "../peers.js";
 import { loadIdentity } from "../identity.js";
 import { INVITE_PREFIX } from "../pairing.js";
 import { OWNER_HEADER, ownerProof } from "../owner-proof.js";
 import { TOOL_NAMES, type ToolName } from "../mcp/server.js";
 import { CNS_VERSION, describeVersion, reportedVersion, versionOrder } from "../version.js";
-import type { Place } from "./remove-everywhere.js";
 
 /**
  * `cns gateway`: administer the gateway (gateway/), the MCP server Claude's connectors use to
@@ -22,7 +20,7 @@ export const READ_TOOLS: readonly ToolName[] = ["list_peers", "read_file", "list
 
 export interface GatewayOptions { url?: string; json?: boolean }
 
-function gatewayUrl(options: GatewayOptions): string {
+export function gatewayUrl(options: GatewayOptions): string {
   const value = options.url ?? process.env.CNS_GATEWAY ?? DEFAULT_GATEWAY;
   let url: URL;
   try { url = new URL(value); } catch { throw new Error(`The gateway address must be a URL such as ${DEFAULT_GATEWAY}.`); }
@@ -32,12 +30,12 @@ function gatewayUrl(options: GatewayOptions): string {
 }
 
 /** A request the gateway refused, with its HTTP status (401 when this device is not one of its owners), or no answer at all. */
-class GatewayError extends Error {
+export class GatewayError extends Error {
   constructor(message: string, readonly status?: number, options?: ErrorOptions) { super(message, options); }
 }
 
 /** One signed owner request; returns the gateway's answer or throws its error. */
-async function call<T>(options: GatewayOptions, action: string, input: Record<string, unknown> = {}, signal?: AbortSignal): Promise<T> {
+export async function call<T>(options: GatewayOptions, action: string, input: Record<string, unknown> = {}, signal?: AbortSignal): Promise<T> {
   const identity = loadIdentity();
   if (!identity) throw new Error("This device has no identity yet; run cns identity, then add its public key to the gateway's OWNER_KEYS.");
   const url = `${gatewayUrl(options)}/admin/${action}`;
@@ -69,7 +67,7 @@ interface Grant { id: string; client: string; devices: string[]; tools: string[]
 
 interface GatewayMesh { name: string; admin: string; version: number; members: string[] }
 /** `meshes` is absent from a gateway deployed before 2.6.0. */
-interface GatewayStatus { fingerprint: string; name: string; relay: string; devices: Device[]; meshes?: GatewayMesh[]; pending: Consent[]; grants: Grant[]; owner: string; version?: unknown; tools?: unknown }
+export interface GatewayStatus { fingerprint: string; name: string; relay: string; devices: Device[]; meshes?: GatewayMesh[]; pending: Consent[]; grants: Grant[]; owner: string; version?: unknown; tools?: unknown }
 
 /**
  * What the gateway was deployed from: its cns version and the tools it can grant. A gateway
@@ -149,44 +147,6 @@ export async function remove(name: string, options: GatewayOptions): Promise<voi
   const answer = await call<{ removed: boolean }>(options, "remove", { name });
   if (!answer.removed) throw new Error(`The gateway has no device named ${name}.`);
   print(options, answer, () => `The gateway forgot ${name}; no connector reaches it now. To end the pairing on ${name} too, run there: cns peer remove gateway`);
-}
-
-/** What became of a lost device at the gateway, as a place in the report; `fingerprint` is the gateway's own, when it answered. */
-export type GatewayForget = Pick<Place, "outcome" | "detail" | "next"> & { fingerprint?: string };
-
-/**
- * For `cns peer remove --everywhere`: make the gateway forget the device with fingerprint `fp`, as
- * `cns gateway remove` does, so no connector reaches it. Only a gateway CNS_GATEWAY names is asked,
- * so a device that uses none sends nothing anywhere. Only an owner's request is taken: the gateway
- * checks this device's signature against its OWNER_KEYS, as for every owner command.
- */
-export async function forgetAtGateway(fp: string, dryRun: boolean): Promise<GatewayForget> {
-  // OWNER_KEYS is a Cloudflare secret, so no device changes it. An owner the gateway never paired
-  // with can still approve connectors, so this is said whatever the gateway answered.
-  const owners = "; if it was one of the gateway's owners too, it can still approve connectors until its key is out of OWNER_KEYS (cd gateway && npx wrangler secret put OWNER_KEYS); cns gateway grants lists the connectors, and cns gateway revoke ID stops one";
-  // Text the gateway sent, such as a device's name or an error, is made printable here.
-  const place = (outcome: GatewayForget["outcome"], detail: string, more: Omit<GatewayForget, "outcome" | "detail"> = {}): GatewayForget => ({ outcome, detail: `${printable(detail)}${owners}`, ...more });
-  if (!process.env.CNS_GATEWAY) return place("not used", `CNS_GATEWAY is not set here, so no gateway was asked. If this device owns a gateway, run: cns gateway status, then cns gateway remove NAME (fingerprint ${fp})`);
-  const options: GatewayOptions = {};
-  const later = `Later, run: cns peer remove --fingerprint ${fp} --everywhere`;
-  try {
-    const signal = AbortSignal.timeout(15_000);
-    const status = await call<GatewayStatus>(options, "status", {}, signal);
-    const url = gatewayUrl(options);
-    const device = status.devices.find((candidate) => candidate.fingerprint === fp);
-    const gateway = { fingerprint: status.fingerprint };
-    if (!device) return place("already gone", `${url} has no device with this fingerprint`, gateway);
-    if (dryRun) return place("would remove", `${url} has it as ${device.name}`, gateway);
-    await call(options, "remove", { name: device.name }, signal);
-    return place("removed", `${url} had it as ${device.name}; no connector reaches it now`, gateway);
-  } catch (error) {
-    const detail = errorMessage(error);
-    if (error instanceof GatewayError && error.status === undefined) return place("unreachable", detail, { next: later });
-    if (error instanceof GatewayError && (error.status === 401 || error.status === 503)) {
-      return place("not permitted", detail, { next: "Run this on one of the gateway's owners, with CNS_GATEWAY set to its address" });
-    }
-    return place("failed", detail, { next: later });
-  }
 }
 
 /**

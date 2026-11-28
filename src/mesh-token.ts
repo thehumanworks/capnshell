@@ -129,15 +129,15 @@ export function decodeBotToken(value: string, source: TokenSource = "CNS_TOKEN")
  */
 export function startAsBot(text: string, source: TokenSource = "CNS_TOKEN"): { created: boolean; token: BotToken } {
   const token = decodeBotToken(text, source);
+  const subject = source === "CNS_TOKEN" ? source : `The ${sourceLabel(source)}`;
   // A token is no person's decision to trust its admin again (revokeDevice): only pairing is.
   if (revokedDevices().has(fingerprint(token.list.admin))) {
-    const subject = source === "token file" ? "The token file" : source === "code" ? "The token from the code" : "CNS_TOKEN";
     const next = source === "token file" ? "Get a new token from an admin you trust, or delete the token file." : source === "code" ? "Get a new code from an admin you trust." : "Get a new token from an admin you trust, or unset CNS_TOKEN.";
     throw new Error(`${subject} is for a mesh run by the device with fingerprint ${fingerprint(token.list.admin)}, which was removed from this machine, so it is refused. ${next}`);
   }
   const { identity, created } = ensureIdentity(token.keys);
   if (identity.publicKey !== token.keys.publicKey) {
-    throw new Error(`${source === "token file" ? "The token file" : source === "code" ? "The token from the code" : source} makes this machine a mesh bot, but it is already another device (${identity.fingerprint}). Run the bot with a configuration directory of its own: CNS_CONFIG_DIR=DIRECTORY.`);
+    throw new Error(`${subject} makes this machine a mesh bot, but it is already another device (${identity.fingerprint}). Run the bot with a configuration directory of its own: CNS_CONFIG_DIR=DIRECTORY.`);
   }
   const { list } = token;
   if (!findPairedPeer(list.admin)) {

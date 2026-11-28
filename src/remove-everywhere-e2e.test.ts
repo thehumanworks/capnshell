@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { chmodSync, copyFileSync, existsSync, readdirSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { stopDaemon } from "./commands/daemon.js";
@@ -135,15 +135,47 @@ test("a trusted device removes a lost one everywhere it may, and the lost one ca
   for (const of of [hub, studio, tv, nas, box]) assert.ok(has(of!, "laptop") && !revoked(of!, laptopFp), `${of!.name} still has laptop`);
   assert.ok(await listed("laptop"));
 
+  // phone runs a mesh of tv and hub, both of which let its members run commands there.
+  assert.equal((await mesh(phone!, ["create", "work"])).code, 0);
+  assert.equal((await mesh(phone!, ["add", "work", "tv", "hub"])).code, 0);
+  for (const member of [tv, hub]) {
+    const joined = await mesh(member!, ["join", "work", "--via", "phone", "--allow", "shell"]);
+    assert.equal(joined.code, 0, joined.output);
+  }
+  const work = async (of: TestDevice) => JSON.parse((await devices.cli(of, ["mesh", "list", "work", "--json"])).stdout)[0] as { version: number; allow: string[] };
+
   // Removed on tv, a member of hub's mesh, phone gets no member record there when the mesh changes:
-  // before, deleting its pairing made way for one, with the shell tv lets members use.
+  // before, deleting its pairing made way for one, with the shell tv lets members use. The mesh
+  // phone runs is narrowed there, and tv says which meshes list phone.
   assert.equal((await runs(phone!, "tv")).code, 4);
   const plainly = await devices.cli(tv!, ["peer", "remove", "phone", "--state", tv!.state]);
-  assert.deepEqual([plainly.code, plainly.stdout], [0, "Removed phone.\n"]);
+  assert.deepEqual([plainly.code, plainly.stdout], [0, [
+    "Removed phone.",
+    "phone runs the mesh work, which this device is in. It stays at its last list here, version 2, and its members may now use nothing here. To finish, leave it: cns mesh leave work. To let its members use shell here again: cns mesh allow work shell.",
+    "phone is listed in the mesh home, which hub runs; it gets no record here from that mesh until this device pairs with it directly.",
+  ].join("\n") + "\n"]);
+  assert.deepEqual((await work(tv!)).allow, []);
   assert.equal((await mesh(tv!, ["allow", "home", "shell"])).code, 0);
   const stillOut = await runs(phone!, "tv");
   assert.equal(stillOut.code, 3, stillOut.output);
   assert.ok(!has(tv!, "phone") && revoked(tv!, lost.fingerprint));
+  // A record of phone left on tv, say restored from a backup, lets it in no more: tv's daemon refuses a device removed there.
+  await writeFile(path.join(tv!.dir, "peers", "phone"), JSON.stringify({ version: 2, publicKey: lost.publicKey, addresses: [], pairedAt: new Date().toISOString(), grants: { incoming: ["shell"], outgoing: [] } }), { mode: 0o600 });
+  const leftover = await runs(phone!, "tv");
+  assert.equal(leftover.code, 3, leftover.output);
+  await rm(path.join(tv!.dir, "peers", "phone"));
+  // phone adds nas to its mesh: hub takes that list and offers it on, and tv, which removed phone, does not take it.
+  assert.equal((await mesh(phone!, ["add", "work", "nas"])).code, 0);
+  await eventually("hub takes version 3 of phone's mesh", async () => (await work(hub!)).version === 3);
+  await new Promise((resolve) => setTimeout(resolve, 2000));
+  assert.equal((await work(tv!)).version, 2, "tv takes no list phone signs");
+  // Pairing with it directly again is the way back, and both sides say so.
+  assert.equal((await devices.cli(phone!, ["peer", "remove", "tv", "--state", phone!.state])).code, 0);
+  const back = await devices.pair(tv!, phone!, { hostGrants: "none" });
+  for (const side of [back.host, back.guest]) assert.match(side, /It was removed from this device before \(cns peer remove\); pairing again lets it back in/);
+  assert.ok(!revoked(tv!, lost.fingerprint));
+  const again = await runs(phone!, "tv");
+  assert.equal(again.code, 4, `tv lets it in again, with what this pairing grants: nothing\n${again.output}`);
 
   // phone runs a command on laptop, which the dry run leaves alone. box has already removed laptop,
   // and nas is off.
@@ -160,6 +192,7 @@ test("a trusted device removes a lost one everywhere it may, and the lost one ca
     ["box", "", "not permitted", `On box, run: ${command}`],
     ["hub", "its pairing", "would remove", undefined],
     ["hub", "mesh home", "would remove", undefined],
+    ["hub", "mesh work", "would narrow", "To finish, run: cns run hub -- cns mesh leave work"],
     ["nas", "", "unreachable", `Later, run: cns run nas -- ${command}`],
     ["studio", "its pairing", "would remove", undefined],
     ["tv", "", "not permitted", `On tv, run: ${command}`],
@@ -182,6 +215,7 @@ test("a trusted device removes a lost one everywhere it may, and the lost one ca
   // Another device's answer is shown by its places and outcomes, in this cns's words only.
   assert.match(text.stdout, /^ {2}removed {8}hub: its pairing$/m);
   assert.match(text.stdout, /^ {2}removed {8}hub: mesh home$/m);
+  assert.match(text.stdout, /^ {2}narrowed {7}hub: mesh work: it runs this mesh, so hub takes no new list of it, and its members may now use nothing there; cns mesh allow work GRANTS there undoes that\. To finish, run: cns run hub -- cns mesh leave work\.$/m);
   assert.match(text.stdout, new RegExp(`^ {2}failed {9}nas: nas runs a cns from before this\\. Upgrade cns on nas, then run: cns run nas -- ${command}\\.$`, "m"));
   // hub's new list may reach studio first, which then drops phone by itself.
   assert.match(text.stdout, /^ {2}(removed {8}studio: its pairing|already gone {3}studio)$/m);
@@ -194,6 +228,7 @@ test("a trusted device removes a lost one everywhere it may, and the lost one ca
   assert.equal(refused.code, 3, refused.output);
   assert.equal(gateway.devices.length, 0);
   assert.ok(!has(hub!, "phone") && !await listed("phone"));
+  assert.deepEqual((await work(hub!)).allow, [], "hub narrowed the mesh phone runs");
   for (const of of [laptop, hub, studio]) assert.ok(!has(of!, "phone") && revoked(of!, lost.fingerprint), `${of!.name} has removed phone`);
   assert.ok(has(nas!, "phone"));
 
@@ -201,12 +236,12 @@ test("a trusted device removes a lost one everywhere it may, and the lost one ca
   const gone = await devices.cli(laptop!, ["peer", "remove", "phone", "--everywhere", "--state", laptop!.state]);
   assert.equal(gone.code, 1);
   assert.match(gone.stderr, /No paired device is saved as phone\. If it was removed here already, name it by its fingerprint, which cns peers on another of your devices shows: cns peer remove --fingerprint FINGERPRINT --everywhere\./);
-  const again = await remove(laptop!, ["--fingerprint", lost.fingerprint, "--everywhere"]);
-  assert.equal(again.code, 1, again.output);
-  assert.deepEqual(again.places.map((place) => [place.device, place.place, place.outcome]), [
+  const rerun = await remove(laptop!, ["--fingerprint", lost.fingerprint, "--everywhere"]);
+  assert.equal(rerun.code, 1, rerun.output);
+  assert.deepEqual(rerun.places.map((place) => [place.device, place.place, place.outcome]), [
     [null, "its pairing", "already gone"],
     ["box", "", "not permitted"],
-    ["hub", "", "already gone"],
+    ["hub", "mesh work", "not permitted"],
     ["nas", "", "failed"],
     ["studio", "", "already gone"],
     ["tv", "", "not permitted"],
@@ -224,5 +259,5 @@ test("a trusted device removes a lost one everywhere it may, and the lost one ca
   assert.ok(!has(nas!, "phone"));
   const last = await remove(laptop!, ["--fingerprint", lost.fingerprint, "--everywhere"]);
   assert.equal(last.code, 4, last.output);
-  assert.deepEqual(last.places.map((place) => place.outcome), ["already gone", "not permitted", "already gone", "already gone", "already gone", "not permitted", "already gone"]);
+  assert.deepEqual(last.places.map((place) => place.outcome), ["already gone", "not permitted", "not permitted", "already gone", "already gone", "not permitted", "already gone"]);
 });
