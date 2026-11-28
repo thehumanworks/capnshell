@@ -135,7 +135,7 @@ export interface UpgradeOptions {
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** A failure of the step that `program` ran, for the report. */
-function why(result: { code: number | null; stdout: string; stderr: string }, program: string): string {
+export function why(result: { code: number | null; stdout: string; stderr: string }, program: string): string {
   if (result.code === 127) return /[\\/]/.test(program) ? `${printable(program)} is not there` : `${program} is not on its daemon's PATH`;
   const line = (result.stderr.trim() || result.stdout.trim()).split(/\r?\n/).pop()?.trim();
   return line ? printable(line).slice(0, 200).replace(/\.$/, "") : `exit ${result.code}`;
