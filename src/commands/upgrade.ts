@@ -18,8 +18,6 @@ import { connectDevice, type DeviceConnection } from "./connect-device.js";
 
 /** The mise tool that installs cns from its GitHub releases. */
 export const MISE_TOOL = "github:thehumanworks/capnshell";
-/** The first mise that installs cns from MISE_TOOL; it also has the ls, tool and which that cns upgrade asks it. */
-export const MISE_MINIMUM = "2025.7.9";
 
 /** How cns came to a device, as the path of the executable its daemon runs tells it alone. */
 export type InstallPath = "mise" | "nix" | "unknown";
@@ -38,11 +36,6 @@ export function installPath(executable: string | undefined): InstallPath {
  */
 export function toolName(value: string): string | undefined {
   return /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(value) ? value : undefined;
-}
-
-/** mise's own version, from what mise --version prints: 2026.11.14 linux-x64 (2026-11-24). */
-export function miseVersion(text: string): string | undefined {
-  return /^\s*(?:mise\s+)?v?(\d{4}\.\d{1,2}\.\d{1,4})(?![\d.])/m.exec(text)?.[1];
 }
 
 /** What `mise ls --installed --json` prints, as far as the upgrade reads it: each tool's installed versions, by the name mise's config gives the tool. */
@@ -228,11 +221,7 @@ async function miseTool(name: string, target: string, platform: NodeJS.Platform,
     if (installPath(executable) === "mise") return { result: "failed", reason: `mise --version failed (${why(version, "mise")})`, next: byHand };
     return { result: "manual", reason: `cns cannot tell how cns was installed there: its daemon runs ${printable(executable)}, and mise --version failed there (${why(version, "mise")})`, next: install };
   }
-  const mise = miseVersion(version.stdout);
-  if (!mise) return { result: "failed", reason: "cns cannot read the version that mise --version printed there", next: byHand };
-  if (compareVersions(mise, MISE_MINIMUM) < 0) {
-    return { result: "manual", reason: `mise there is ${mise}, and cns upgrade needs mise ${MISE_MINIMUM} or newer, the first that installs cns from ${MISE_TOOL}`, next: `There, run mise self-update (or upgrade mise the way it was installed), then run cns upgrade ${name} again.` };
-  }
+  // A mise too old to install cns from its releases has none that its listing holds.
   const listed = await run("mise", ["ls", "--installed", "--json"]);
   if (listed.code !== 0) return { result: "failed", reason: `mise ls --installed --json failed (${why(listed, "mise")})`, next: byHand };
   const listing = parsed(listingSchema, listed.stdout);
