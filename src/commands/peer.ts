@@ -21,7 +21,7 @@ import { advertisedSchema, describeGrants, explainDenial, findPairedPeer, getPee
 import { lanCards } from "../wake.js";
 import { listeningAddresses } from "../addresses.js";
 import { serveControl, type PairingController } from "./daemon-server.js";
-import { listenFailure, removeStaleState, UPGRADE_REQUIRED } from "./daemon.js";
+import { listenFailure, removeStaleState } from "./daemon.js";
 import { runOneShot } from "./one-shot.js";
 import { infoSchema } from "./connect-device.js";
 import { describeVersion } from "../version.js";
@@ -43,10 +43,10 @@ export function authExitCode(error: unknown): number {
 export { commandExitCode } from "./one-shot.js";
 
 /** The server `listen` starts at the daemon's address, or an error that says why it cannot and what to run next. */
-async function bound<T>(daemon: DaemonConfig, listen: () => T): Promise<T> {
+function bound<T>(daemon: DaemonConfig, listen: () => T): T {
   try { return listen(); }
   catch (error) {
-    const failure = await listenFailure(error, daemon);
+    const failure = listenFailure(error, daemon);
     throw failure ? new Error(failure, { cause: error }) : error;
   }
 }
@@ -725,7 +725,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
     if (stopping) return;
     if (daemon) {
       // A port in use or one this user may not take: say so, and what to run next.
-      listener = await bound(daemon, () => serve<SocketData>({
+      listener = bound(daemon, () => serve<SocketData>({
         hostname: daemon.bind, port: daemon.port,
         fetch(request, server) {
           if (request.headers.has("Origin")) return new Response("Browser origins are not allowed", { status: 401 });
@@ -735,7 +735,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
             ? `${remote.family === "IPv6" ? `[${remote.address}]` : remote.address}:${remote.port}`
             : "unknown address";
           if (server.upgrade(request, { data: { address } })) return;
-          return new Response(UPGRADE_REQUIRED, { status: 400 });
+          return new Response("WebSocket upgrade required", { status: 400 });
         },
         websocket: {
           idleTimeout: 0, maxPayloadLength: 8 * 1024 * 1024,

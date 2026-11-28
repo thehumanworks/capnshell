@@ -2,7 +2,6 @@ import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { lstat, mkdir, open, unlink } from "node:fs/promises";
 import { constants } from "node:fs";
-import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { newWebSocketRpcSession, type RpcStub } from "capnweb";
@@ -174,6 +173,8 @@ export interface DaemonSettings { bind: string; port: number; url: string; state
 export interface StartDaemonOptions {
   /** The executable and arguments that run `cns`; by default, this program. Embedders pass the cns executable. */
   invocation?: (args: string[]) => { file: string; args: string[] };
+  /** How long the daemon has to be ready; 10 seconds by default. */
+  readyMs?: number;
 }
 export interface StartedDaemon {
   url: string;
@@ -209,7 +210,7 @@ export async function startDaemon(config: DaemonSettings, options: StartDaemonOp
   let logged = false;
   try {
     const ready = new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => { logged = true; finish(new Error(`Daemon startup timed out. See ${logPath}`)); }, 10_000);
+      const timer = setTimeout(() => { logged = true; finish(new Error(`Daemon startup timed out. See ${logPath}`)); }, options.readyMs ?? 10_000);
       const onMessage = (message: unknown) => {
         if (message && typeof message === "object" && "ready" in message && message.ready === true) finish();
       };
@@ -266,61 +267,35 @@ export async function logEnding(logPath: string): Promise<string> {
       if (start > 0) text = text.slice(text.indexOf("\n") + 1);
     } finally { await handle.close(); }
   } catch { return ""; }
-  const ending = text.split(/\r?\n/).map((line) => strictlyPrintable(line.trim())).filter(Boolean).slice(-3).join("\n");
-  return ending.length > 500 ? `...${ending.slice(-500)}` : ending;
+  const lines = text.split(/\r?\n/).map((line) => strictlyPrintable(line.trim())).filter(Boolean).slice(-3);
+  // The last line is the daemon's error, whose start says what went wrong; earlier lines fill what room is left.
+  let ending = lines.pop() ?? "";
+  if (ending.length > 500) ending = `${ending.slice(0, 500)}...`;
+  for (let line = lines.pop(); line !== undefined && line.length + 1 + ending.length <= 500; line = lines.pop()) ending = `${line}\n${ending}`;
+  return ending;
 }
-
-/** A cns daemon's listener answers a plain request, one that is not a WebSocket upgrade, with this. */
-export const UPGRADE_REQUIRED = "WebSocket upgrade required";
 
 /**
  * Why the daemon cannot listen at its address, and what to run next; undefined for other failures.
- * A port in use may be held by another cns daemon: the one cns status shows, when this one has
- * another --state, or one that answers at the port, such as one with another --state, another
- * user's or, under WSL's mirrored networking, the one on Windows.
+ * The command it suggests can be pasted: a value that is not plainly one word is single-quoted, for
+ * a POSIX shell or, on Windows, for PowerShell.
  */
-export async function listenFailure(error: unknown, daemon: { bind: string; port: number; state: string; service: boolean }): Promise<string | undefined> {
+export function listenFailure(error: unknown, daemon: { bind: string; port: number; state: string; service: boolean }, platform: NodeJS.Platform = process.platform): string | undefined {
   const code = error instanceof Error && "code" in error ? error.code : undefined;
   if (code !== "EADDRINUSE" && code !== "EACCES") return undefined;
-  const where = `port ${daemon.port} on ${daemon.bind}`;
-  const defaultState = daemon.state === daemonStatePath();
-  // A service's settings change only by installing it again.
-  const state = /\s/.test(daemon.state) ? `"${daemon.state}"` : daemon.state;
-  const options = daemon.service ? " --install" : `${daemon.bind === "0.0.0.0" ? "" : ` --bind ${daemon.bind}`}${defaultState ? "" : ` --state ${state}`}`;
-  const next = `cns up${options} --port PORT`;
+  const word = (value: string) => (platform === "win32" ? /^[\w./:\\@+=~-]+$/ : /^[\w./:@+,=~-]+$/).test(value) ? value
+    : platform === "win32" ? `'${value.replaceAll("'", "''")}'` : `'${value.replaceAll("'", "'\\''")}'`;
+  const options = `${daemon.bind === "0.0.0.0" ? "" : ` --bind ${word(daemon.bind)}`}${daemon.state === daemonStatePath() ? "" : ` --state ${word(daemon.state)}`}`;
+  // A service, which cns up --install or a NixOS or Home Manager module sets up, has its port where it is configured.
+  const instead = daemon.service ? "change the port where its service is configured (cns up --install --port PORT if cns installed it)"
+    : `start cns on another port: cns up${options} --port PORT`;
   if (code === "EACCES") {
-    const why = daemon.port < 1024 ? "ports below 1024 need extra rights"
-      : process.platform === "win32" ? "Windows may reserve it (netsh interface ipv4 show excludedportrange protocol=tcp lists the reserved ranges)"
-      : "this user may not listen there";
-    return `Cannot listen on ${where}: ${why}. Start cns on another port: ${next}.`;
+    // Windows has no privileged ports, but it reserves ranges of them, as for Hyper-V.
+    const why = platform === "win32" ? "Windows may reserve or block it (netsh interface ipv4 show excludedportrange protocol=tcp lists the reserved ranges)"
+      : daemon.port < 1024 ? "ports below 1024 need extra rights" : "this user may not listen there";
+    return `Cannot listen on port ${daemon.port} on ${daemon.bind}: ${why}. ${instead[0]!.toUpperCase()}${instead.slice(1)}.`;
   }
-  if (!defaultState) {
-    try {
-      const control = await connectControl(undefined, 1000);
-      try {
-        if ((await control.remote.status()).port === daemon.port) return `Port ${daemon.port} on ${daemon.bind} is in use by this device's cns daemon: cns status shows it and cns stop stops it. Or start this one on another port: ${next}.`;
-      } finally { control.close(); }
-    } catch { /* No daemon runs at the default state. */ }
-  }
-  if (await cnsAnswers(daemon.bind, daemon.port)) {
-    return `Port ${daemon.port} on ${daemon.bind} is in use by another cns daemon, such as one started with another --state, another user's or, under WSL, the one on Windows. Stop it where it runs with cns stop and its --state, or start this one on another port: ${next}.`;
-  }
-  return `Port ${daemon.port} on ${daemon.bind} is in use. Stop what uses it, or start cns on another port: ${next}.`;
-}
-
-/** Whether a cns daemon's listener answers at `bind`'s port, asked over loopback for a wildcard address. */
-function cnsAnswers(bind: string, port: number, timeoutMs = 500): Promise<boolean> {
-  const host = bind === "0.0.0.0" ? "127.0.0.1" : bind === "::" ? "::1" : bind;
-  return new Promise((resolve) => {
-    let reply = "";
-    const socket = net.connect({ host, port, timeout: timeoutMs });
-    socket.setEncoding("utf8");
-    socket.once("connect", () => socket.write("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"));
-    socket.on("data", (chunk: string) => { reply += chunk; if (reply.length > 4096) socket.destroy(); });
-    socket.once("timeout", () => socket.destroy());
-    socket.once("error", () => {});
-    socket.once("close", () => resolve(/^HTTP\/1\.1 400 /.test(reply) && reply.includes(UPGRADE_REQUIRED)));
-  });
+  return `Port ${daemon.port} on ${daemon.bind} is in use. Stop what uses it, or ${instead}. If it is this device's cns daemon, cns status shows it and cns stop stops it.`;
 }
 
 /** Connect to the local daemon whose state is at `statePath`, giving up after `timeoutMs`. */
