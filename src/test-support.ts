@@ -1,4 +1,5 @@
-import { spawn, type SpawnOptionsWithoutStdio } from "node:child_process";
+import { spawn, spawnSync, type SpawnOptionsWithoutStdio } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { EventEmitter, once } from "node:events";
 import { chmod, cp, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import net from "node:net";
@@ -8,6 +9,7 @@ import type { TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { connectControl, stopDaemon } from "./commands/daemon.js";
 import { makePrivateDirectory } from "./config.js";
+import { sessionsLeft } from "./held-sessions.js";
 import { KeyboardModes } from "./kitty-keyboard.js";
 import { selfInvocation } from "./runtime.js";
 
@@ -23,18 +25,51 @@ export function cliInvocation(args: string[]): { file: string; args: string[] } 
 }
 
 /**
+ * Where tests put their daemons' directories: /tmp rather than os.tmpdir(), which is 49 bytes
+ * on a Mac before a test adds to it, so that the sockets of a daemon's holders fit in macOS's
+ * 104-byte socket paths (held-sessions.ts).
+ */
+export const TEST_TMP = process.platform === "win32" ? os.tmpdir() : "/tmp";
+
+/**
  * A temporary home for a daemon that a test starts, with its state at .cns/daemon.json.
  * Hooks run in the order they were added, so one hook stops the daemon and then removes
  * the directory: removing the state file first would leave the daemon running.
  */
 export async function daemonHome(t: TestContext, prefix = "cns-daemon-"): Promise<{ home: string; statePath: string }> {
-  const home = await realpath(await mkdtemp(path.join(os.tmpdir(), prefix)));
+  const home = await realpath(await mkdtemp(path.join(TEST_TMP, prefix)));
   const statePath = path.join(home, ".cns", "daemon.json");
   t.after(async () => {
     try { await stopDaemon(statePath); } catch { /* Not running. */ }
+    await endHolders(statePath);
     await rm(home, { force: true, recursive: true });
   });
   return { home, statePath };
+}
+
+/**
+ * End the holders of the named sessions a test's daemon started, which outlive the daemon
+ * (held-sessions.ts), as cns stop --end-sessions does: only those whose socket answers with their
+ * record's token, never a pid alone, which on a busy machine may be another process's by now.
+ */
+export async function endHolders(statePath: string): Promise<void> {
+  try { await sessionsLeft(statePath, true); } catch { /* A directory the test made loose, or gone. */ }
+}
+
+/**
+ * Whether `pid` is a child of this process, as a holder a test started here is until it has been
+ * reaped: a pid that is no longer the test's, reused by another process, is not.
+ */
+export function childOfThisProcess(pid: number): boolean {
+  try {
+    if (process.platform === "linux") {
+      // After the program's name, in parentheses: state ppid ...
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      return Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]) === process.pid;
+    }
+    const ps = spawnSync("ps", ["-o", "ppid=", "-p", String(pid)], { encoding: "utf8" });
+    return ps.status === 0 && Number(ps.stdout.trim()) === process.pid;
+  } catch { return false; }
 }
 
 /**
@@ -147,11 +182,12 @@ export interface TestDevice {
  * other as people do. Hooks stop every daemon started here and then remove the directories.
  */
 export async function testDevices(t: TestContext, prefix = "cns-devices-") {
-  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), prefix)));
+  const root = await realpath(await mkdtemp(path.join(TEST_TMP, prefix)));
   const daemons: TestDevice[] = [];
   t.after(async () => {
     for (const device of daemons.reverse()) {
       try { await stopDaemon(device.state); } catch { /* Not running. */ }
+      await endHolders(device.state);
     }
     await rm(root, { recursive: true, force: true });
   });

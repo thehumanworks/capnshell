@@ -27,6 +27,13 @@ export interface ListenerInfo {
   relay?: string;
   /** The daemon runs under a service manager: cns daemon --service, as cns up --install and the Nix modules start it. */
   service?: boolean;
+  /** Named sessions outlive the daemon, in holder processes of their own; absent from daemons before them (held-sessions.ts). */
+  keepsSessions?: boolean;
+}
+
+/** What the daemon and cns stop say about the named sessions that keep running once the daemon has stopped, by holder pid where known. */
+export function keptSessions(sessions: Array<{ name: string; pid?: number }>): string {
+  return `Named sessions keep running: ${sessions.map(({ name, pid }) => pid ? `${name} (holder pid ${pid})` : name).join(", ")}. cns stop --end-sessions ends them.`;
 }
 export interface DaemonStatus extends ListenerInfo {
   pid: number;
@@ -372,14 +379,22 @@ export async function attachDaemon(statePath?: string): Promise<void> {
   });
 }
 
-/** Stop the daemon and return its pid once it has removed its state. */
-export async function stopDaemon(statePath?: string): Promise<number> {
+/**
+ * Stop the daemon once it has removed its state. Returns its pid, what it said of itself, and its
+ * named sessions whose program ran: those that keep running without it, and those that end with it.
+ */
+export async function stopDaemon(statePath?: string): Promise<{ pid: number; status: DaemonStatus; kept: string[]; ended: string[] }> {
   const file = daemonStatePath(statePath);
   const state = await readState(file);
   // Keep the authenticated target and cleanup ownership bound to the same snapshot.
   const connection = await connectToState(state);
-  try { await connection.remote.stop(); }
-  finally { connection.close(); }
+  let status: DaemonStatus;
+  try {
+    status = await connection.remote.status();
+    await connection.remote.stop();
+  } finally { connection.close(); }
+  // Absent from a daemon too old to name them.
+  const sessions = Array.isArray(status.sessions) ? status.sessions.filter((name) => typeof name === "string").map(strictlyPrintable) : [];
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
     try {
@@ -397,5 +412,5 @@ export async function stopDaemon(statePath?: string): Promise<number> {
   } catch (error) {
     if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
   }
-  return state.pid;
+  return { pid: state.pid, status, kept: status.keepsSessions ? sessions : [], ended: status.keepsSessions ? [] : sessions };
 }

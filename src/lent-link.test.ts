@@ -7,7 +7,7 @@ import test, { type TestContext } from "node:test";
 import { connectControl } from "./commands/daemon.js";
 import { PERMISSIONS, savePairedPeer } from "./peers.js";
 import { startRelay } from "./relay-server.js";
-import { cliEnvironment, cliInvocation, launchCli, unusedPort } from "./test-support.js";
+import { cliEnvironment, cliInvocation, endHolders, launchCli, unusedPort } from "./test-support.js";
 
 const posix = process.platform !== "win32";
 const decoder = new TextDecoder();
@@ -48,7 +48,7 @@ async function devices(t: TestContext, prefix: string, env: Record<string, strin
   const up = async (dev: Device) => {
     const result = await cli(dev, ["up", "--bind", "127.0.0.1", "--port", dev.port, "--state", dev.state]);
     assert.equal(result.code, 0, result.stdout + result.stderr);
-    cleanups.push(() => cli(dev, ["stop", "--state", dev.state]));
+    cleanups.push(async () => { await cli(dev, ["stop", "--state", dev.state]); await endHolders(dev.state); });
   };
   /** The daemon's standing links to `other`: how each runs. */
   const links = async (dev: Device, other: Device) => {

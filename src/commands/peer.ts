@@ -6,8 +6,10 @@ import { builtInRelay } from "../relay-config.js";
 import { serve, type Server, type ServerWebSocket } from "bun";
 import { z } from "zod";
 import { PtyRegistry, ShellApi, type ShellInfo } from "../shell.js";
+import type { PtyExit, SessionHost } from "../pty.js";
+import { daemonSessions, type HeldSessions } from "../held-sessions.js";
 import type { ConnectionController } from "../console.js";
-import { errorMessage, printable } from "../errors.js";
+import { errorMessage, printable, strictlyPrintable } from "../errors.js";
 import type { DaemonConfig, PeerConfig } from "../options.js";
 import { RefusingShell } from "../refusing-shell.js";
 import { plain, type RemoteNamedPty } from "../terminal.js";
@@ -21,7 +23,7 @@ import { advertisedSchema, describeGrants, explainDenial, findPairedPeer, getPee
 import { lanCards } from "../wake.js";
 import { listeningAddresses } from "../addresses.js";
 import { serveControl, type PairingController } from "./daemon-server.js";
-import { listenFailure, removeStaleState } from "./daemon.js";
+import { daemonStatePath, keptSessions, listenFailure, removeStaleState } from "./daemon.js";
 import { runOneShot } from "./one-shot.js";
 import { infoSchema } from "./connect-device.js";
 import { describeVersion } from "../version.js";
@@ -93,8 +95,13 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
   const daemon = config.role === "daemon" ? config : undefined;
   const command = config.role !== "daemon" ? config : undefined;
   const sessions = new Map<string, Session>();
-  // Named PTY sessions outlive the connection that started them, but not this process.
-  const ptys = new PtyRegistry();
+  const announce = (message: string) => { if (daemon) console.log(message); };
+  // Named PTY sessions outlive the connection that started them. The daemon's run in holder
+  // processes of their own, which outlive it too (held-sessions.ts); on Windows, or where their
+  // sockets' paths would be too long, they live here.
+  // keeps: whether they outlive this daemon, not when systemd stops them with it (keepsSessions).
+  const { host: ptys, holders, keeps, tooLong }: { host: SessionHost & Disposable; holders?: HeldSessions; keeps: boolean; tooLong?: string } =
+    daemon ? daemonSessions(daemonStatePath(daemon.state), daemon.service, { say: announce, adopted: auditEnd }) : { host: new PtyRegistry(), keeps: false };
   let nextId = 1;
   let listener: Server<SocketData> | undefined;
   let controlCleanup: (() => Promise<void>) | undefined;
@@ -103,13 +110,29 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
   const done = new Promise<void>((resolve) => { finished = resolve; });
   const oneShot = !daemon;
   const cancelled = new AbortController();
-  // Machine-readable command output must contain only the remote command's streams.
-  const announce = (message: string) => { if (daemon) console.log(message); };
+  // Machine-readable command output must contain only the remote command's streams: announce is the daemon's alone.
   const identity: Identity = ensureIdentity().identity;
   /** The mesh secrets this device reads, for the programs paired devices start here. */
   const localSecrets = secretsHere(identity);
   /** What paired devices do here, one line each in the audit log (audit.ts). */
   const audit = auditLog();
+  /**
+   * The end of a session a paired device started under an earlier daemon, as its GrantedShell
+   * would have recorded it there: the device by its name here now, or its fingerprint.
+   */
+  function auditEnd(record: { name: string; owner: string | null; startedAt: string }, exited: Promise<PtyExit>) {
+    const { owner } = record;
+    if (owner === null) return;
+    void exited.then((exit) => {
+      const peer = listPeers().find((entry) => fingerprint(entry.publicKey) === owner)?.name ?? owner;
+      try {
+        audit({
+          start: record.startedAt, end: new Date().toISOString(), peer, fingerprint: owner, action: "session.end", target: record.name,
+          exitCode: exit.exitCode, ...exit.signal ? { signal: exit.signal } : {}, ...exit.timedOut ? { timedOut: true } : {},
+        });
+      } catch { /* Lost; the audit log reports why. */ }
+    }, () => {});
+  }
   // The relay built into cns: the daemon registers there, and paired devices are dialed there after their direct addresses.
   const relay = builtInRelay();
   /**
@@ -175,7 +198,9 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
     relayAnswers.clear();
     invites.endAll();
     for (const session of sessions.values()) remove(session);
+    const kept = holders?.kept ?? [];
     ptys[Symbol.dispose]();
+    if (kept.length && keeps) announce(keptSessions(kept));
     try {
       await Promise.all([listener?.stop(true), controlCleanup?.()]);
     } catch (error) {
@@ -474,7 +499,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
     identity: () => ({ publicKey: identity.publicKey, fingerprint: identity.fingerprint }),
     addresses: () => advertised(),
     relayRegistered: () => relay ? isRegistered(registration) : undefined,
-    sessions: () => ptys.list().flatMap((session) => session.running ? [session.name] : []),
+    sessions: () => ptys.running,
     async invite(ttlMs) {
       const invite = createInvite(identity.publicKey, advertised(), ttlMs, suggestedName(os.hostname()));
       invites.open(invite.id, invite.secret, invite.expiresAt, ttlMs);
@@ -724,6 +749,13 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
     await secureReady();
     if (stopping) return;
     if (daemon) {
+      if (tooLong) announce(tooLong);
+      // Before any link, so that a reconnecting cns shell finds its session.
+      if (holders) {
+        await holders.adopt();
+        if (holders.names.length) announce(`Adopted named sessions: ${holders.names.map(strictlyPrintable).join(", ")}.`);
+        if (stopping) return;
+      }
       // A port in use or one this user may not take: say so, and what to run next.
       listener = bound(daemon, () => serve<SocketData>({
         hostname: daemon.bind, port: daemon.port,
@@ -764,7 +796,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
       // the endpoint decides. A state file whose daemon answers is kept, and this start then fails.
       if (daemon.service) await removeStaleState(daemon.state, { ignorePid: true });
       controlCleanup = await serveControl(controller, () => { void stop(); }, daemon.state,
-        { url: daemon.url, bind: daemon.bind, port: daemon.port, remote: daemon.remote, service: daemon.service, ...relay ? { relay } : {} }, pairing);
+        { url: daemon.url, bind: daemon.bind, port: daemon.port, remote: daemon.remote, service: daemon.service, keepsSessions: keeps, ...relay ? { relay } : {} }, pairing);
       if (stopping) { await Promise.all([controlCleanup(), listener.stop(true)]); return; }
       process.send?.({ ready: true });
       if (process.connected) process.disconnect?.();

@@ -3,7 +3,7 @@ import test from "node:test";
 import manifest from "../package.json" with { type: "json" };
 import { infoSchema } from "./commands/connect-device.js";
 import { localShellInfo } from "./shell.js";
-import { behindHint, CNS_VERSION, compareVersions, daemonDrift, describeVersion, reportedVersion, restartAdvice, versionOrder, type RestartFacts } from "./version.js";
+import { behindHint, CNS_VERSION, compareVersions, daemonDrift, describeVersion, reportedVersion, restartAdvice, sessionsHint, versionOrder, type RestartFacts } from "./version.js";
 
 test("this cns's version is package.json's, and its handshake reports it", () => {
   assert.equal(CNS_VERSION, manifest.version);
@@ -88,6 +88,27 @@ test("the advice fits how the daemon runs", () => {
     for (const kind of ["systemd", "launchd"] as const) assert.doesNotMatch(advice({ service: true, installed: { kind, managedByNix: true, runsThis } }), /cns up --install/);
   }
   assert.equal(advice({ service: true }, "darwin"), `A service manager cns did not install runs it: update cns there and restart it. ${ends}`);
+  // A daemon whose sessions run in holders keeps them across the restart, so the advice does not warn of losing them.
+  assert.equal(advice({ service: false, keepsSessions: true }), "Restart it: cns daemon restart.");
+  assert.equal(advice({ installed: { kind: "systemd", managedByNix: true, runsThis: true }, keepsSessions: true }),
+    "Home Manager's service already names this cns; restart it: cns daemon restart. If it still runs the old one afterwards, systemctl --user cat cns shows what overrides it.");
+  // A daemon that says it does not keep them, under a systemd unit an older cns wrote: cns up --install writes the unit that keeps them.
+  assert.equal(advice({ service: true, keepsSessions: false, installed: { kind: "systemd", managedByNix: false, runsThis: true } }),
+    `Restart it: cns daemon restart. ${ends} Its systemd unit, from an older cns, stops them with the daemon: cns up --install writes it again, so that they keep running.`);
+});
+
+test("a daemon that does not keep its named sessions says why, and what would keep them", () => {
+  const hint = (facts: Omit<Parameters<typeof sessionsHint>[0], "platform">, platform: NodeJS.Platform = "linux") => sessionsHint({ ...facts, platform });
+  const systemd = { kind: "systemd" as const, managedByNix: false };
+  assert.equal(hint({ service: true, keepsSessions: false, installed: systemd }), "Its systemd unit, from an older cns, stops them with the daemon: cns up --install writes it again, so that they keep running.");
+  assert.equal(hint({ service: true, keepsSessions: false, installed: { ...systemd, managedByNix: true } }),
+    "Its systemd unit, from an older Home Manager configuration, stops them with the daemon: switching to one with this cns (home-manager switch) keeps them running.");
+  assert.equal(hint({ service: true, keepsSessions: false }), "Its service stops them with the daemon: a unit with KillMode=process, as the NixOS module of this cns has, keeps them running.");
+  assert.equal(hint({ service: true, keepsSessions: false, longSocketPaths: true, installed: systemd }),
+    "Their sockets' paths would be too long for them to outlive it: a shorter --state path keeps them running.");
+  // Nothing to say for a daemon that keeps them, one too old to say, one cns up started, or on Windows.
+  for (const facts of [{ keepsSessions: true, service: true, installed: systemd }, { service: true, installed: systemd }, { keepsSessions: false, service: false }]) assert.equal(hint(facts), undefined);
+  assert.equal(hint({ service: true, keepsSessions: false }, "win32"), undefined);
 });
 
 test("cns peers names the devices behind the latest release when it is known, else behind this cns, and never fails without it", () => {

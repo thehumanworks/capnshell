@@ -25,7 +25,8 @@ import type { Pointer } from "bun:ffi";
 import { RefusingShell } from "../refusing-shell.js";
 import { connectControl, daemonStatePath, processExited, removeStaleState, runsUnder, startDaemon, stopDaemon, type ControlConnection, type DaemonStatus } from "./daemon.js";
 import { selfInvocation, selfPath } from "../runtime.js";
-import { behindHint, CNS_VERSION, daemonDrift, describeVersion, reportedVersion, restartAdvice, versionOrder } from "../version.js";
+import { behindHint, CNS_VERSION, daemonDrift, describeVersion, reportedVersion, restartAdvice, sessionsHint, versionOrder } from "../version.js";
+import { holderDirectory, HOLDERS, socketsTooLong } from "../held-sessions.js";
 import { knownLatestRelease } from "../releases.js";
 import { describeService, installService, installedService, installedServiceRuns, lingering, registeredTask, runTask, startInstalledService, serviceEnvironment, serviceFailed, serviceFile, serviceKind, serviceLog, serviceName, serviceOverrides, SETTING_VARIABLES, startService, taskName, uninstallService, type ServiceKind } from "../service.js";
 import { windowsUserSid } from "../config.js";
@@ -247,7 +248,9 @@ export async function restart(options: RestartOptions): Promise<void> {
   const plan = restartPlan(status.service, installed?.kind);
   // A drop-in that pins another cns comes back with every restart; say so before the device is cut off.
   const overrides = installed ? serviceOverrides(installed.kind, selfPath()).map(printable) : [];
-  if (overrides.length) console.error(`Warning: ${restartAdvice({ service: status.service, installed: { kind: installed!.kind, ...installedServiceRuns(installed!, selfPath()), overrides }, platform: process.platform })}`);
+  const facts = sessionFacts(status, state, installed);
+  if (overrides.length) console.error(`Warning: ${restartAdvice({ ...facts, installed: { kind: installed!.kind, ...installedServiceRuns(installed!, selfPath()), overrides } })}`);
+  const hint = sessionsHint(facts);
   const inside = runsUnder(status.pid);
   const log = path.join(path.dirname(state), "restart.log");
   await keepHandlesHere();
@@ -259,12 +262,14 @@ export async function restart(options: RestartOptions): Promise<void> {
   if (inside !== false) {
     // Inside the daemon, or where that cannot be told: the daemon may end this command any moment now.
     worker.unref();
-    console.log(`Restarting the daemon${through} in a moment. Links to this device drop and come back within seconds, and the named sessions it holds end. Check with cns status; the restart's log is ${log}.`);
+    const fate = status.keepsSessions ? "Named sessions keep running." : `The named sessions it holds end.${hint ? ` ${hint}` : ""}`;
+    console.log(`Restarting the daemon${through} in a moment. Links to this device drop and come back within seconds. ${fate} Check with cns status; the restart's log is ${log}.`);
     return;
   }
   const code = await new Promise<number | null>((resolve, reject) => { worker.once("error", reject); worker.once("exit", resolve); });
   if (code !== 0) throw new Error(`The daemon did not restart${through}:\n${(await readFile(log, "utf8")).trim()}`);
   await report(await connectControl(state), "Restarted", state);
+  if (hint && status.sessions?.length) console.error(`Its named sessions ended. ${hint}`);
 }
 
 /**
@@ -323,7 +328,7 @@ async function restartNow(statePath: string | undefined, delayMs: number, reload
   if (plan.stop) {
     // Once stopped, always try to start it again: nobody may be left to run cns up on this device.
     try {
-      const pid = await stopDaemon(state);
+      const { pid } = await stopDaemon(state);
       console.error("Stopped it.");
       // A service manager can take a process that is still exiting for one still running.
       if (plan.start !== "detached" && !(await processExited(pid, 10_000))) console.error(`The old daemon (pid ${pid}) has not exited yet.`);
@@ -357,6 +362,16 @@ async function restartNow(statePath: string | undefined, delayMs: number, reload
   try { console.error(`Restarted the daemon (pid ${(await started.remote.status()).pid}).`); } finally { started.close(); }
 }
 
+/** What decides whether the daemon at `state` keeps its named sessions across a restart, for restartAdvice and sessionsHint. */
+export function sessionFacts(status: Pick<DaemonStatus, "keepsSessions" | "service">, state: string, installed = installedService(state)) {
+  return {
+    service: status.service, keepsSessions: status.keepsSessions,
+    longSocketPaths: HOLDERS && socketsTooLong(holderDirectory(state)) !== undefined,
+    ...installed ? { installed: { kind: installed.kind, ...installedServiceRuns(installed, selfPath()) } } : {},
+    platform: process.platform,
+  };
+}
+
 /**
  * When the running daemon is not this cns's version: what that means and what to run, or undefined
  * when it is. A daemon keeps the executable it started with, so an upgrade reaches paired devices,
@@ -371,7 +386,7 @@ function driftWarning(status: DaemonStatus, state?: string): string | undefined 
     daemon: { version: status.version, ...status.executable ? { executable: printable(status.executable) } : {} },
     self,
     advice: restartAdvice({
-      service: status.service,
+      ...sessionFacts(status, daemonStatePath(state), installed),
       ...installed ? {
         installed: {
           kind: installed.kind, ...installedServiceRuns(installed, self.executable),
@@ -717,6 +732,8 @@ export async function status(options: StatusOptions): Promise<void> {
         version: reportedVersion(info.version) ?? null, executable: info.executable ? printable(info.executable) : null, warning: drift ?? null,
         // What a restart would end, for cns upgrade on another device; null from a daemon too old to say.
         sessions: Array.isArray(info.sessions) ? info.sessions.map(printable) : null,
+        // Whether its named sessions outlive a restart; false for a daemon from before holders.
+        keepsSessions: info.keepsSessions === true,
       };
       for (const [fingerprint, link] of await standingLinks(control)) links.push({ name: link.name, fingerprint, address: link.via, hostname: link.hostname, version: link.version ?? null });
     } finally { control.close(); }

@@ -279,13 +279,17 @@ test("a named session can be manually reattached after an abrupt client loss", {
 
   assert.equal((await cli("shell", "studio", "--name", "lost", "--", "sleep 60")).code, 0);
   const lost = JSON.parse((await cli("sessions", "studio", "--json")).stdout)[0];
+  // Stopping the daemon leaves the session running in its holder, and the next daemon adopts it.
   assert.equal((await devices.cli(studio, ["stop", "--state", studio.state])).code, 0);
+  process.kill(lost.pid, 0);
+  await devices.up(studio, studio.port);
+  const adopted = JSON.parse((await cli("sessions", "studio", "--json")).stdout);
+  assert.deepEqual(adopted.map((session: { name: string; pid: number }) => [session.name, session.pid]), [["lost", lost.pid]]);
+  assert.equal((await cli("kill", "studio", "lost")).code, 0);
   await eventually(async () => {
     try { process.kill(lost.pid, 0); return false; }
     catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
-  }, "host shutdown ended its session process");
-  await devices.up(studio, studio.port);
-  assert.deepEqual(JSON.parse((await cli("sessions", "studio", "--json")).stdout), []);
+  }, "kill ended its session process");
 });
 
 test("run reports an unreachable device as failure", { timeout: 15000, skip: !posix }, async (t) => {

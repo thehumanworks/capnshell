@@ -5,9 +5,9 @@ import { clip, type AuditEntry, type AuditLog } from "./audit.js";
 import { errorMessage } from "./errors.js";
 import { describeGrants, type LanCard, type Permission } from "./peers.js";
 import { envSchema, MAX_ENV_VARIABLES } from "./platform.js";
-import { programExited } from "./pty.js";
+import { programExited, sessionOwner, type SessionAttachment, type SessionHandle, type SessionHost } from "./pty.js";
 import {
-  ShellApi, type AttachOptions, type CaptureOptions, type KeysOptions, type NamedPty, type PtyAttachment, type PtySessionOptions, type PtySink,
+  ShellApi, type AttachOptions, type CaptureOptions, type KeysOptions, type PtySessionOptions, type PtySink,
   type RunOptions, type ShellInfo, type WaitOptions,
 } from "./shell.js";
 
@@ -126,7 +126,7 @@ function audited<T>(record: Recorder, given: Pick<AuditEntry, "action" | "target
 export interface GrantHolder { current: readonly Permission[] }
 
 export class GrantedShell extends RpcTarget {
-  #shell: ShellApi;
+  #shell: ShellApi<SessionHost>;
   #grants: GrantHolder;
   #peer: string;
   #owner: string | null;
@@ -147,7 +147,7 @@ export class GrantedShell extends RpcTarget {
    * `audit` takes an entry for each command, terminal, session, file and skill file the peer uses (audit.ts).
    * `lan` says which network cards this device has on which local networks, for cns wake (wake.ts).
    */
-  constructor(shell: ShellApi, grants: readonly Permission[] | GrantHolder, peer: string, owner: string | null = null, addresses: () => string[] = () => [], meshes: (offered: unknown) => unknown[] = () => [], secrets: (offered: unknown) => unknown[] = () => [], secretsHere: SecretsHere = noSecrets, audit: AuditLog = () => {}, lan: () => LanCard[] = () => []) {
+  constructor(shell: ShellApi<SessionHost>, grants: readonly Permission[] | GrantHolder, peer: string, owner: string | null = null, addresses: () => string[] = () => [], meshes: (offered: unknown) => unknown[] = () => [], secrets: (offered: unknown) => unknown[] = () => [], secretsHere: SecretsHere = noSecrets, audit: AuditLog = () => {}, lan: () => LanCard[] = () => []) {
     super();
     this.#shell = shell;
     this.#grants = Array.isArray(grants) ? { current: [...grants] } : grants as GrantHolder;
@@ -280,10 +280,14 @@ export class GrantedShell extends RpcTarget {
     return audited(this.#record, { action: "session.start", target: text(name), ...program(options) }, () => {
       this.#require("sessions:create");
       const start = new Date().toISOString();
+      const granted = (session: SessionHandle) => {
+        try { void programExited(session).then((exit) => this.#record({ start, action: "session.end", target: name, ...ended(exit) }), () => {}); }
+        catch { /* Its end goes unrecorded; the session works all the same. */ }
+        return new GrantedNamedPty(session, this.#grants, this.#peer, this.#owner, name, this.#record);
+      };
+      // A daemon's sessions start in holder processes of their own (held-sessions.ts), which takes a moment.
       const session = this.#shell.startPtySession(name, this.#withSecrets(options));
-      try { void programExited(session).then((exit) => this.#record({ start, action: "session.end", target: name, ...ended(exit) }), () => {}); }
-      catch { /* Its end goes unrecorded; the session works all the same. */ }
-      return new GrantedNamedPty(session, this.#grants, this.#peer, this.#owner, name, this.#record);
+      return session instanceof Promise ? session.then(granted) : granted(session);
     });
   }
   /**
@@ -310,13 +314,13 @@ const OWNER_PERMISSIONS = new Set<Permission>(["sessions:view", "sessions:contro
 
 /** A named session as a paired device sees it: each use is checked against its grants. */
 class GrantedNamedPty extends RpcTarget {
-  #inner: NamedPty;
+  #inner: SessionHandle;
   #grants: GrantHolder;
   #peer: string;
   #owner: string | null;
   #name: string;
   #record: Recorder;
-  constructor(inner: NamedPty, grants: GrantHolder, peer: string, owner: string | null, name: string, record: Recorder) {
+  constructor(inner: SessionHandle, grants: GrantHolder, peer: string, owner: string | null, name: string, record: Recorder) {
     super();
     this.#inner = inner;
     this.#grants = grants;
@@ -329,7 +333,7 @@ class GrantedNamedPty extends RpcTarget {
   #check(permission: Permission) {
     // Grants first: only a device without the grant pays for looking up the session's owner.
     if (this.#grants.current.includes(permission)) return;
-    if (this.#owner !== null && OWNER_PERMISSIONS.has(permission) && this.#inner.info().owner === this.#owner) return;
+    if (this.#owner !== null && OWNER_PERMISSIONS.has(permission) && sessionOwner(this.#inner) === this.#owner) return;
     require(this.#grants, this.#peer, [permission]);
   }
   info() { this.#check("sessions:view"); return this.#inner.info(); }
@@ -349,7 +353,8 @@ class GrantedNamedPty extends RpcTarget {
       let control = true;
       try { this.#check("sessions:control"); } catch { control = false; }
       const attachment = this.#inner.attach(sink, control ? options : {});
-      return new GrantedAttachment(attachment, () => this.#check("sessions:control"), () => this.#check("sessions:view"));
+      const granted = (inner: SessionAttachment) => new GrantedAttachment(inner, () => this.#check("sessions:control"), () => this.#check("sessions:view"));
+      return attachment instanceof Promise ? attachment.then(granted) : granted(attachment);
     });
   }
   /** Killing needs `sessions:kill`, unless the peer started the session. */
@@ -359,10 +364,10 @@ class GrantedNamedPty extends RpcTarget {
 
 /** An attachment as a paired device sees it: typing needs `sessions:control`. */
 class GrantedAttachment extends RpcTarget {
-  #inner: PtyAttachment;
+  #inner: SessionAttachment;
   #control: () => void;
   #view: () => void;
-  constructor(inner: PtyAttachment, control: () => void, view: () => void) {
+  constructor(inner: SessionAttachment, control: () => void, view: () => void) {
     super();
     this.#inner = inner;
     this.#control = control;

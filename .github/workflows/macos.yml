@@ -1,11 +1,13 @@
 # How cns restarts a daemon that runs as a launchd agent, from inside that
 # agent's own processes, as cns upgrade does: only a real Mac can show that
 # launchd lets the restart's own process unload the agent and load it again.
+# Also the named sessions that outlive the daemon in holder processes, whose
+# sockets must fit macOS's shorter socket paths.
 # No other workflow runs on macOS. A macOS runner costs several times the
 # minutes of a Linux one, and this repository's Actions minutes are limited, so
 # it runs once when a pull request is opened, again each time the "macos" label
 # is added to one, and on demand from the Actions tab or
-# `gh workflow run macos.yml`, and runs only the launchd test.
+# `gh workflow run macos.yml`, and runs only these tests.
 name: macOS
 
 on:
@@ -37,4 +39,4 @@ jobs:
           bun-version-file: package.json
       - run: bun install --frozen-lockfile --ignore-scripts
       - run: bun run typecheck
-      - run: bun test --timeout 30000 src/service-macos.test.ts
+      - run: bun test --timeout 30000 src/service-macos.test.ts src/held-sessions.test.ts src/keep-sessions-e2e.test.ts

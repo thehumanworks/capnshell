@@ -13,7 +13,8 @@ import { connectDevice, type DeviceConnection } from "./connect-device.js";
  * this device, with the commands cns run would run there: mise installs the release, then the
  * new cns restarts the daemon through the restart worker, as `cns daemon restart` does, so that
  * no device is left without a daemon. Nix and unknown installs are left alone, with what to run,
- * and so is a daemon whose named sessions the restart would end, unless --end-sessions.
+ * and so is a daemon whose named sessions the restart would end, unless --end-sessions: one whose
+ * sessions run in holders of their own (held-sessions.ts) keeps them, so it is upgraded.
  */
 
 /** The mise tool that installs cns from its GitHub releases. */
@@ -103,6 +104,8 @@ const statusSchema = z.object({
     executable: z.string().max(4096).nullish(),
     // Absent from a cns too old to report them, whose daemon cannot say which named sessions a restart would end.
     sessions: z.array(z.string().max(200)).max(1000).nullish(),
+    // Its named sessions outlive a restart; absent from a cns from before they did.
+    keepsSessions: z.boolean().nullish(),
   }).nullish(),
   // Absent from a cns too old to report it, which cannot say whether its service runs another one.
   service: z.object({ managedByNix: z.boolean(), runsThis: z.boolean() }).nullish(),
@@ -298,10 +301,11 @@ export async function upgradeDevice(name: string, target: string, reach: Reach, 
     }
     const found = await miseTool(name, target, device.platform, executable, run, word);
     if (!("tool" in found)) return { device: name, ...found };
-    // Restarting the daemon ends its named sessions, where an agent may be at work.
+    // Restarting the daemon ends its named sessions, where an agent may be at work, unless they run in holders of their own.
+    const keeps = facts?.daemon?.keepsSessions === true;
     const sessions = facts?.daemon?.sessions?.map(printable);
-    if (!options.endSessions && sessions?.length !== 0) return sessionsLeft(name, sessions, from);
-    const ends = `, which ends ${!sessions ? "any named sessions it holds and " : sessions.length ? `its named sessions ${sessions.join(", ")} and ` : ""}any open shells`;
+    if (!options.endSessions && !keeps && sessions?.length !== 0) return sessionsLeft(name, sessions, from);
+    const ends = keeps ? ", which its named sessions outlive" : `, which ends ${!sessions ? "any named sessions it holds and " : sessions.length ? `its named sessions ${sessions.join(", ")} and ` : ""}any open shells`;
     const tool = `${found.tool}@${target}`;
     const fail = (reason: string): Outcome => ({ device: name, result: "failed", reason, next: `There, run mise use -g ${tool}, ${RESTART_THERE}.` });
     if (options.dryRun) {
@@ -323,7 +327,7 @@ export async function upgradeDevice(name: string, target: string, reach: Reach, 
     }
     // Sessions started while mise worked: this daemon names its sessions, as the first look showed.
     const current = fresh.daemon?.sessions?.map(printable);
-    if (!options.endSessions && current?.length) return sessionsLeft(name, current, from);
+    if (!options.endSessions && fresh.daemon?.keepsSessions !== true && current?.length) return sessionsLeft(name, current, from);
     // A service keeps the cns it names, so only cns up --install, from the new cns, moves it onto that one.
     const restart = fresh.service && !fresh.service.managedByNix && !fresh.service.runsThis ? ["up", "--install"] : ["daemon", "restart"];
     let ran: Awaited<ReturnType<Device["run"]>> | undefined;

@@ -37,7 +37,8 @@ const MAX_WAITERS = 8;
 const MAX_VIEWERS = 8;
 
 const dimension = z.int().min(1).max(1000);
-const programOptionsSchema = optionsSchema.extend({
+/** What a program in a PTY runs; a named session's options are checked with it before anything starts it. */
+export const programOptionsSchema = optionsSchema.extend({
   /** Omit to start the executing user's login shell. */
   command: commandSchema.optional(),
   cols: dimension.default(80),
@@ -599,9 +600,17 @@ function releaseError(released: AbortSignal): Error {
 }
 
 /** Revokes a handle. Module-private so that no RPC caller can reach it. */
-const revokers = new WeakMap<PtyControls, (reason: string) => void>();
+const revokers = new WeakMap<object, (reason: string) => void>();
 /** A handle's session accessor, which fails once the handle is revoked. */
-const accessors = new WeakMap<PtyControls, () => Pty>();
+const accessors = new WeakMap<object, () => Pty>();
+/** How the program behind a handle ends and who started it, for this device's own records. */
+const facts = new WeakMap<object, { exited(): Promise<PtyExit>; owner(): string | null }>();
+
+/** Let a HandleScope revoke `handle`, such as a holder's session handle (held-sessions.ts). */
+export function revocable(handle: object, revoke: (reason: string) => void, about?: { exited(): Promise<PtyExit>; owner(): string | null }): void {
+  revokers.set(handle, revoke);
+  if (about) facts.set(handle, about);
+}
 
 /**
  * The named-session handles and attachments a shell issued. Closing the scope, as a
@@ -610,15 +619,15 @@ const accessors = new WeakMap<PtyControls, () => Pty>();
  * themselves keep running for every other caller.
  */
 export class HandleScope {
-  #handles = new Set<PtyControls>();
+  #handles = new Set<object>();
   #closed: string | null = null;
   /** Why this scope closed, or null while it is open. */
   get closed() { return this.#closed; }
-  add(handle: PtyControls) {
+  add(handle: object) {
     if (this.#closed) revokers.get(handle)?.(this.#closed);
     else this.#handles.add(handle);
   }
-  delete(handle: PtyControls) { this.#handles.delete(handle); }
+  delete(handle: object) { this.#handles.delete(handle); }
   /** Revoke every handle issued in this scope. Closing again changes nothing. */
   close(reason: string) {
     if (this.#closed) return;
@@ -682,8 +691,44 @@ class PtyControls extends RpcTarget {
  * How the program behind a session or a handle on one ends, for this device's own records such
  * as the audit log. A function rather than a method, so that no RPC caller can reach it.
  */
-export function programExited(handle: PtySession | NamedPty): Promise<PtyExit> {
-  return accessors.get(handle)!().exited;
+export function programExited(handle: PtySession | SessionHandle): Promise<PtyExit> {
+  const about = facts.get(handle);
+  return about ? about.exited() : accessors.get(handle)!().exited;
+}
+
+/** Who started the session behind a handle, as PtySessionInfo.owner says, without asking its holder. */
+export function sessionOwner(handle: SessionHandle): string | null {
+  // Not `??`: a session the host started has no owner, which must not fall through to a handle in this process.
+  const about = facts.get(handle);
+  return about ? about.owner() : accessors.get(handle)!().owner;
+}
+
+/**
+ * What a shell's callers reach a named session through: a NamedPty for a session in this
+ * process, or a handle on a session's holder process (held-sessions.ts).
+ */
+export interface SessionHandle {
+  info(): PtySessionInfo | Promise<PtySessionInfo>;
+  busy(): Promise<boolean | null>;
+  write(data: string | Uint8Array): void | Promise<void>;
+  keys(keys: string[], options?: KeysOptions): void | Promise<void>;
+  resize(cols: number, rows: number): void | Promise<void>;
+  capture(options?: CaptureOptions): Promise<PtyScreen>;
+  wait(options: WaitOptions): Promise<PtyWait>;
+  attach(sink: PtySink, options?: AttachOptions): SessionAttachment | Promise<SessionAttachment>;
+  kill(): Promise<PtyExit>;
+  [Symbol.dispose](): void;
+}
+export type SessionAttachment = Pick<SessionHandle, "write" | "keys" | "resize" | "capture" | "wait"> & { detach(): void; [Symbol.dispose](): void };
+
+/** Where a shell's named sessions live: PtyRegistry in this process, or HeldSessions, a holder process each. */
+export interface SessionHost {
+  /** Start a session, issuing its handle in `scope`. */
+  startSession(name: string, options: PtySessionOptions, owner: string | null, scope: HandleScope): SessionHandle | Promise<SessionHandle>;
+  openSession(name: string, scope: HandleScope): SessionHandle;
+  list(): PtySessionInfo[] | Promise<PtySessionInfo[]>;
+  /** The names of the sessions whose program still runs. */
+  readonly running: string[];
 }
 
 /** An unnamed PTY, owned by the caller that opened it. */
@@ -718,7 +763,11 @@ export class PtyAttachment extends PtyControls {
     this.#pty = pty();
     this.#viewer = viewer;
   }
-  detach(): void { this.#pty.unview(this.#viewer); }
+  /** With a reason, the sink's detached(reason) hears it first, as when the daemon revokes the handle a holder's viewer came through. */
+  detach(reason?: string): void {
+    if (typeof reason === "string") this.#pty.detach(this.#viewer, reason);
+    else this.#pty.unview(this.#viewer);
+  }
   [Symbol.dispose]() {
     super[Symbol.dispose]();
     this.detach();
@@ -729,7 +778,7 @@ export class PtyAttachment extends PtyControls {
  * A handle on a named session. Releasing the handle leaves the session running.
  * Closing the scope it was issued in revokes it and the attachments made through it.
  */
-export class NamedPty extends PtyControls {
+export class NamedPty extends PtyControls implements SessionHandle {
   #registry: PtyRegistry;
   #name: string;
   #lookup: () => Pty;
@@ -775,17 +824,25 @@ function describe(name: string, pty: Pty): PtySessionInfo {
  * every place is taken and a new session needs one: the session that ended first goes.
  * Sessions someone is attached to are never removed this way.
  */
-export class PtyRegistry {
+export class PtyRegistry implements SessionHost {
   #sessions = new Map<string, Pty>();
   /** When each finished session's program ended, in milliseconds since the epoch. */
   #ended = new Map<Pty, number>();
   #timers = new Set<ReturnType<typeof setTimeout>>();
   #finishedMs: number;
+  #onRemoved: (pty: Pty) => void;
   #disposed = false;
 
-  constructor({ finishedMs = FINISHED_SESSION_MS }: { finishedMs?: number } = {}) {
+  /** `onRemoved` hears of each session killed or removed after it finished, as a holder process ends then. */
+  constructor({ finishedMs = FINISHED_SESSION_MS, onRemoved = () => {} }: { finishedMs?: number; onRemoved?: (pty: { exited: Promise<PtyExit> }) => void } = {}) {
     this.#finishedMs = finishedMs;
+    this.#onRemoved = onRemoved;
   }
+
+  startSession(name: string, options: PtySessionOptions, owner: string | null, scope?: HandleScope): NamedPty {
+    return new NamedPty(this, name, this.start(name, options, owner), scope);
+  }
+  openSession(name: string, scope?: HandleScope): NamedPty { return new NamedPty(this, name, this.get(name), scope); }
 
   start(name: string, options: PtySessionOptions = {}, owner: string | null = null): Pty {
     sessionNameSchema.parse(name);
@@ -829,6 +886,7 @@ export class PtyRegistry {
     }
     this.#ended.delete(pty);
     pty.dispose();
+    this.#onRemoved(pty);
   }
 
   /** Make room by removing the finished session that ended first and has nobody attached; false when there is none. */
@@ -858,12 +916,14 @@ export class PtyRegistry {
   list(): PtySessionInfo[] {
     return [...this.#sessions].map(([name, pty]) => describe(name, pty));
   }
+  get running(): string[] { return this.list().flatMap((session) => session.running ? [session.name] : []); }
 
   async kill(name: string, pty: Pty): Promise<PtyExit> {
     this.resolve(name, pty);
     this.#sessions.delete(name);
     this.#ended.delete(pty);
     pty.dispose();
+    this.#onRemoved(pty);
     return await pty.exited;
   }
 

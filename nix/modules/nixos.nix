@@ -96,6 +96,8 @@ in
         ExecStart = utils.escapeSystemdExecArgs [ exe "daemon" "--service" "--state" stateFile "--bind" cfg.bind "--port" (toString cfg.port) ];
         Restart = "on-failure";
         RestartSec = 5;
+        # Stopping or restarting the service ends the daemon alone: its named sessions' holders keep running.
+        KillMode = "process";
       };
     };
   };

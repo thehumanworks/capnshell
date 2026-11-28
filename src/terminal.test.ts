@@ -94,3 +94,87 @@ test("an error that ends cns while a program has set the terminal's keyboard mod
   assert.equal(screen.buffer.active.type, "normal");
   assert.deepEqual(keyboard.all, [3, 1, 0, 0]);
 });
+
+// A session whose redraw arrives well before the attach call returns, as through a holder
+// under load. The session reports the keys it is given.
+const SLOW_ATTACH = String.raw`
+import { attachTerminal } from ${JSON.stringify(path.join(import.meta.dirname, "terminal.ts"))};
+void attachTerminal(async (sink) => {
+  await sink.output(Buffer.from("the session's screen\r\n"), 22);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  return {
+    write(data) { process.stdout.write("keys " + JSON.stringify(Buffer.from(data).toString("latin1")) + "\r\n"); process.exit(7); },
+    resize() {}, capture: async () => { throw new Error("unused"); }, [Symbol.dispose]() {},
+  };
+}, {}, { normalScreen: true });
+`;
+
+// What changed: the terminal went raw only once the attach call returned. A key typed at the
+// redrawn screen before then was the terminal's: Ctrl-C stopped cns instead of the program.
+test("a key typed at a session's screen before its attach call returns goes to the session", { skip: !posix }, async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "cns-terminal-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const script = path.join(dir, "slow-attach.ts");
+  await writeFile(script, SLOW_ATTACH);
+  let output = "";
+  let drawn!: () => void;
+  const shown = new Promise<void>((resolve) => { drawn = resolve; });
+  const child = Bun.spawn([process.execPath, script], {
+    terminal: {
+      cols: 80, rows: 10, name: "xterm-256color",
+      data: (_terminal, data) => {
+        output += Buffer.from(data).toString("latin1");
+        if (output.includes("the session's screen")) drawn();
+      },
+    },
+  });
+  t.after(() => { if (child.exitCode === null) child.kill(); });
+  await shown;
+  child.terminal!.write("\x03");
+  assert.equal(await child.exited, 7, output);
+  assert.match(output, /keys "\\u0003"/);
+});
+
+// A session that shows its screen and then fails its attach call. The process carries on and
+// reads a line, as cns shell does before it tries the session again.
+const FAILED_ATTACH = String.raw`
+import { attachTerminal } from ${JSON.stringify(path.join(import.meta.dirname, "terminal.ts"))};
+try {
+  await attachTerminal(async (sink) => {
+    await sink.output(Buffer.from("the session's screen\r\n"), 22);
+    throw new Error("the attach failed");
+  }, {}, { normalScreen: true });
+} catch (error) {
+  process.stdout.write("caught: " + (error as Error).message + "\n");
+}
+process.stdin.once("data", (data) => { process.stdout.write("read " + JSON.stringify(String(data)) + "\n"); process.exit(0); });
+process.stdin.resume();
+`;
+
+// The first output makes the terminal raw. Left raw after a failed attach, the terminal shows
+// nothing that is typed, and Enter no longer ends a line.
+test("an attach that fails after the session's first output gives the terminal its own mode back", { skip: !posix }, async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "cns-terminal-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const script = path.join(dir, "failed-attach.ts");
+  await writeFile(script, FAILED_ATTACH);
+  let output = "";
+  let caught!: () => void;
+  const failed = new Promise<void>((resolve) => { caught = resolve; });
+  const child = Bun.spawn([process.execPath, script], {
+    terminal: {
+      cols: 80, rows: 10, name: "xterm-256color",
+      data: (_terminal, data) => {
+        output += Buffer.from(data).toString("latin1");
+        if (output.includes("caught: the attach failed")) caught();
+      },
+    },
+  });
+  t.after(() => { if (child.exitCode === null) child.kill(); });
+  await failed;
+  const typed = output.length;
+  child.terminal!.write("typed\r");
+  assert.equal(await child.exited, 0, output);
+  // Cooked again: the terminal echoes the line, and hands it over at Enter as a line.
+  assert.match(output.slice(typed), /typed\r\n[^]*read "typed\\n"/);
+});

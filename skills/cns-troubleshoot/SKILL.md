@@ -41,15 +41,20 @@ the restart command that fits how it was started: usually `cns daemon restart`, 
 `cns up --install` again for a service that points at another executable. Use the command
 they print.
 
-- Restarting ends that daemon's named sessions. Check `cns sessions` first and ask the user.
+- Named sessions keep running when the daemon restarts if `cns status --json` shows
+  `daemon.keepsSessions: true`. Otherwise restarting ends them: check `cns sessions` first and
+  ask the user. They outlive `cns stop` too, which names each with its holder's pid;
+  `cns stop --end-sessions` ends them, so use it only when the user agrees.
 - `cns --version` older than `cns status`'s daemon: an older cns comes first on `PATH`
   (`command -v cns`, or `Get-Command cns` in PowerShell).
 - A daemon that stays old after a restart on Linux: `systemctl --user cat cns` shows a
   drop-in or another `ExecStart` that overrides the service.
 - `cns peers` and `cns doctor NAME` show which other devices run an older cns.
   `cns upgrade NAME --dry-run` shows how cns would upgrade one from here; with the user's
-  go-ahead, `cns upgrade NAME` (or `--all`) does it. It skips a daemon with named sessions,
-  or too old to say; add `--end-sessions` only when the user agrees to end them.
+  go-ahead, `cns upgrade NAME` (or `--all`) does it. A daemon whose named sessions outlive
+  a restart (`daemon.keepsSessions` in `cns status --json`) is upgraded with them running.
+  It skips one whose sessions would end, or too old to say; add `--end-sessions` only when
+  the user agrees to end them.
 
 ## Never
 

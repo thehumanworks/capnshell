@@ -96,39 +96,60 @@ export interface RestartFacts {
     /** systemd drop-ins whose ExecStart runs another cns, whatever the unit file says; see serviceOverrides. */
     overrides?: string[];
   };
+  /** The daemon's named sessions outlive a restart (DaemonStatus.keepsSessions). */
+  keepsSessions?: boolean;
+  /** The daemon keeps them itself, since its holders' socket paths would be too long (socketsTooLong). */
+  longSocketPaths?: boolean;
   platform: NodeJS.Platform;
 }
 
-/** Restarting a daemon ends the named sessions it holds, which nothing brings back. */
+/** Restarting a daemon from before holders (held-sessions.ts) ends the named sessions it holds, which nothing brings back. */
 const SESSIONS_END = "Restarting ends the named sessions it holds.";
+
+/**
+ * Why a daemon that says its named sessions do not outlive it ends them, and what would keep them;
+ * undefined for one that keeps them, one too old to say, and on Windows, where nothing does.
+ */
+export function sessionsHint(facts: Omit<RestartFacts, "installed"> & { installed?: Pick<NonNullable<RestartFacts["installed"]>, "kind" | "managedByNix"> }): string | undefined {
+  if (facts.keepsSessions !== false || facts.platform === "win32") return undefined;
+  if (facts.longSocketPaths) return "Their sockets' paths would be too long for them to outlive it: a shorter --state path keeps them running.";
+  if (!facts.service) return undefined;
+  // A unit without KillMode=process, as older releases of cns and its Nix modules wrote, stops every process the daemon started.
+  const { installed } = facts;
+  if (installed?.kind === "systemd" && !installed.managedByNix) return "Its systemd unit, from an older cns, stops them with the daemon: cns up --install writes it again, so that they keep running.";
+  if (installed?.managedByNix) return "Its systemd unit, from an older Home Manager configuration, stops them with the daemon: switching to one with this cns (home-manager switch) keeps them running.";
+  return "Its service stops them with the daemon: a unit with KillMode=process, as the NixOS module of this cns has, keeps them running.";
+}
 
 /** What to run so that the daemon runs this cns: restart it, reinstall its service, or update the configuration that owns it. */
 export function restartAdvice(facts: RestartFacts): string {
   const { installed } = facts;
+  const hint = sessionsHint(facts);
+  const ends = facts.keepsSessions ? "" : ` ${SESSIONS_END}${hint ? ` ${hint}` : ""}`;
   const overrides = installed?.overrides ?? [];
   if (overrides.length) {
     // Checked first: neither a restart nor a new unit file gets past a drop-in that replaces the command.
     const [these, replace, theirs] = overrides.length === 1 ? ["The drop-in", "replaces", "the file or its"] : ["The drop-ins", "replace", "the files or their"];
     return `${these} ${overrides.join(", ")} ${replace} the service's command with another cns, so every restart brings that one back. ` +
-      `Delete ${theirs} ExecStart lines, run systemctl --user daemon-reload, then cns daemon restart. ${SESSIONS_END}`;
+      `Delete ${theirs} ExecStart lines, run systemctl --user daemon-reload, then cns daemon restart.${ends}`;
   }
   if (installed?.managedByNix) {
     const check = installed.kind === "systemd" ? " If it still runs the old one afterwards, systemctl --user cat cns shows what overrides it." : "";
     return installed.runsThis
-      ? `Home Manager's service already names this cns; restart it: cns daemon restart. ${SESSIONS_END}${check}`
-      : `Home Manager owns its service: switch to a configuration with this cns (home-manager switch), which restarts it. ${SESSIONS_END}${check}`;
+      ? `Home Manager's service already names this cns; restart it: cns daemon restart.${ends}${check}`
+      : `Home Manager owns its service: switch to a configuration with this cns (home-manager switch), which restarts it.${ends}${check}`;
   }
   if (installed) {
     return installed.runsThis
-      ? `Restart it: cns daemon restart. ${SESSIONS_END}`
-      : `Its service runs another executable: run cns up --install with this cns, which points the service here and restarts it. ${SESSIONS_END}`;
+      ? `Restart it: cns daemon restart.${ends}`
+      : `Its service runs another executable: run cns up --install with this cns, which points the service here and restarts it.${ends}`;
   }
   if (facts.service) {
     const example = facts.platform === "linux" ? ", such as sudo systemctl restart cns for the NixOS module" : "";
-    return `A service manager cns did not install runs it: update cns there and restart it${example}. ${SESSIONS_END}`;
+    return `A service manager cns did not install runs it: update cns there and restart it${example}.${ends}`;
   }
-  if (facts.service === undefined) return `Restart it: cns daemon restart, or restart the service that runs it. ${SESSIONS_END}`;
-  return `Restart it: cns daemon restart. ${SESSIONS_END}`;
+  if (facts.service === undefined) return `Restart it: cns daemon restart, or restart the service that runs it.${ends}`;
+  return `Restart it: cns daemon restart.${ends}`;
 }
 
 /**

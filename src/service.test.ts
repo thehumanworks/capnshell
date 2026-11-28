@@ -31,6 +31,8 @@ test("the systemd unit quotes every word so specifiers and variables stay litera
   assert.ok(unit.includes(`Environment="LANG=en_US.UTF-8 a%%20b&c=$X"`));
   assert.match(unit, /^Restart=on-failure$/m);
   assert.match(unit, /^WantedBy=default\.target$/m);
+  // A stop or restart of the unit ends the daemon alone, not its named sessions' holders.
+  assert.match(unit, /^KillMode=process$/m);
 });
 
 test("a setting with a newline cannot inject service directives", () => {
@@ -264,6 +266,8 @@ test("the Nix modules run the daemon command that cns up --install writes", asyn
     const source = await readFile(path.join(import.meta.dir, "..", "nix", "modules", module), "utf8");
     const words = /\[\s*(?:exe\s+)?((?:"[^"]*"\s+)+)"--state"/.exec(source)?.[1]?.match(/"[^"]*"/g)?.map((word) => JSON.parse(word));
     assert.deepEqual(words, ["daemon", "--service"], module);
+    // As in the unit cns up --install writes: stopping the service leaves the named sessions running.
+    assert.match(source, /^\s*KillMode = "process";$/m, module);
   }
 });
 

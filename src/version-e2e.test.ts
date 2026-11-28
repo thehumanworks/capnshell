@@ -51,9 +51,11 @@ test("commands say when the daemon runs an older cns, and what to run, which fix
   assert.equal(status.code, 0, status.stderr);
   assert.match(status.stdout, /^Daemon: +cns 0\.9\.0, pid \d+ at /m);
   assert.ok(status.stdout.includes(warning), status.stdout);
-  // cns up started it, outside any service, so cns stop and cns up replace it.
-  assert.match(status.stdout, /so paired devices and commands that use the daemon get the older one\. Restart it: cns daemon restart\. Restarting ends the named sessions it holds\./);
+  // cns up started it, outside any service, so cns stop and cns up replace it. Being this source, it keeps
+  // its named sessions across the restart, so the advice does not warn of losing them.
+  assert.match(status.stdout, /so paired devices and commands that use the daemon get the older one\. Restart it: cns daemon restart\.$/m);
   const json = JSON.parse((await cli(["status", "--json", "--state", state])).stdout);
+  assert.equal(json.daemon.keepsSessions, true);
   assert.deepEqual([json.version, json.daemon.version, json.daemon.executable], [CNS_VERSION, "0.9.0", olderCli]);
   assert.ok(json.daemon.warning.startsWith(warning.slice("Warning: ".length)));
 

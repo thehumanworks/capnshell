@@ -82,7 +82,8 @@ cns kill studio repl
 - `cns screen DEVICE NAME --history 200` adds scrollback.
 - `cns sessions [DEVICE]` lists sessions; `--json` shows each one's `owner` fingerprint.
   Kill only sessions you started. Others may belong to the user's open terminals.
-- A device holds 16 sessions. They end when killed or when that device's daemon restarts.
+- A device holds 16 sessions. They end when killed, when their program exits or the device
+  reboots; they keep running when its daemon restarts (except on Windows).
 
 Do not run bare `cns shell DEVICE`, `cns shell --attach` or `cns ui` yourself: they are for
 a person at a terminal.

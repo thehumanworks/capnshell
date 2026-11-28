@@ -98,7 +98,7 @@ test("session handles check viewing, typing and killing separately, and owners k
 
   // View only: read the screen and watch, but not type, resize or kill.
   const viewer = as(["sessions:list", "sessions:view"]);
-  assert.equal(viewer.ptySessions()[0]?.owner, null, "a session started on the host has no paired owner");
+  assert.equal((await viewer.ptySessions())[0]?.owner, null, "a session started on the host has no paired owner");
   const watched = viewer.ptySession("host");
   assert.match((await watched.capture()).text, /READY/);
   assert.throws(() => watched.keys(["x"]), /sessions:control not granted to laptop/);
@@ -107,7 +107,7 @@ test("session handles check viewing, typing and killing separately, and owners k
   const output: string[] = [];
   const sink = { output(data: Uint8Array) { output.push(new TextDecoder().decode(data)); }, exit(_: PtyExit) {} };
   const before = host.info();
-  const attachment = watched.attach(sink, { cols: 120, rows: 50 });
+  const attachment = await watched.attach(sink, { cols: 120, rows: 50 });
   assert.deepEqual([host.info().cols, host.info().rows], [before.cols, before.rows], "a viewer cannot resize the session");
   assert.throws(() => attachment.write("x"), /sessions:control/);
   host.keys(["seen", "Enter"]);
@@ -123,8 +123,8 @@ test("session handles check viewing, typing and killing separately, and owners k
 
   // Create only: the device owns what it starts, so it may view, type into and kill that, and only that.
   const creator = as(["sessions:create"]);
-  const own = creator.startPtySession("mine", { command: "printf OWN; sleep 30" });
-  assert.equal(own.info().owner, "laptop-fingerprint");
+  const own = await creator.startPtySession("mine", { command: "printf OWN; sleep 30" });
+  assert.equal((await own.info()).owner, "laptop-fingerprint");
   assert.equal((await own.wait({ text: "OWN", timeoutMs: 10000 })).matched, true);
   own.keys(["x"]);
   // A handle on someone else's session does nothing for it.
@@ -135,7 +135,7 @@ test("session handles check viewing, typing and killing separately, and owners k
   assert.deepEqual(local.ptySessions().map((session) => session.name), ["host"]);
   // Another device with the same grants does not own it.
   const other = as(["sessions:create"], "studio-fingerprint");
-  other.startPtySession("theirs", { command: "sleep 30" })[Symbol.dispose]();
+  (await other.startPtySession("theirs", { command: "sleep 30" }))[Symbol.dispose]();
   assert.throws(() => creator.ptySession("theirs").info(), /sessions:view not granted/);
   // Killing needs only sessions:kill; a device without any session permission learns nothing.
   const killer = as(["sessions:kill"]);
@@ -234,9 +234,9 @@ test("a granted shell records what the peer does, by name and fingerprint, with 
   assert.deepEqual(recorded("file.mkdir").map((entry) => entry.target), [path.join(dir, "made")]);
 
   // A session's start, each attach but nothing typed through it, its kill and its end.
-  const session = shell.startPtySession("work", { command: "sleep 30", secrets: ["API_KEY"] });
+  const session = await shell.startPtySession("work", { command: "sleep 30", secrets: ["API_KEY"] });
   assert.deepEqual(recorded("session.start").map((entry) => [entry.target, entry.command, entry.secrets]), [["work", "sleep 30", ["API_KEY"]]]);
-  const attachment = shell.ptySession("work").attach({ output() {}, exit() {} });
+  const attachment = await shell.ptySession("work").attach({ output() {}, exit() {} });
   const before = entries.length;
   attachment.write("hunter2\r");
   attachment.keys(["Enter"]);

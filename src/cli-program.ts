@@ -355,22 +355,50 @@ export function createCli(): Command {
     .option("-u, --uninstall", "Stop the service's daemon and remove the service")
     .addHelpText("after", "\nOnly paired devices can connect, after authenticating; each gets what cns pair granted it.\nThe daemon also registers at the relay built into cns, so paired devices on other networks reach it\nwith nothing to set up. Links are encrypted end to end, directly or through the relay. Pair with cns pair.\n--install keeps the running daemon's --bind and --port unless given; run it again to change them.")
     .action(async (options) => { const { up } = await import("./commands/pairing-cli.js"); await up(options); });
+  // Named sessions run in processes of their own except on Windows, where they end with the daemon (held-sessions.ts).
+  const keeps = process.platform === "win32" ? "" : "; named sessions keep running";
   const stopCommand = (command: Command) => command
     .option("-S, --state <path>", "Local daemon state file")
-    .action(async (options: { state?: string }) => {
-      const { stopDaemon } = await import("./commands/daemon.js");
-      await stopDaemon(options.state);
-      console.log("Daemon stopped.");
+    .addOption(new Option("-E, --end-sessions", "End the named sessions too, also those an older cns left running out of its reach").hideHelp(process.platform === "win32"))
+    .addHelpText("after", process.platform === "win32" ? "" : "\nNamed sessions keep running once the daemon stops, and the next daemon adopts them. cns stop names\neach with its holder's pid; --end-sessions ends them, also when no daemon runs, as after a crash.")
+    .action(async (options: { state?: string; endSessions?: boolean }) => {
+      const [{ daemonStatePath, keptSessions, removeStaleState, stopDaemon }, { sessionFacts }, { sessionsHint }, { sessionsLeft }] = await Promise.all([
+        import("./commands/daemon.js"), import("./commands/pairing-cli.js"), import("./version.js"), import("./held-sessions.js"),
+      ]);
+      const state = daemonStatePath(options.state);
+      let stopped: Awaited<ReturnType<typeof stopDaemon>> | undefined;
+      try { stopped = await stopDaemon(options.state); }
+      catch (error) {
+        // With no daemon to stop, --end-sessions still ends the sessions one left running: also one
+        // that crashed and left its state file, which goes once its daemon does not answer and its pid is gone.
+        const none = error instanceof Error && "code" in error && error.code === "ENOENT";
+        if (!options.endSessions || !(none || await removeStaleState(options.state))) throw error;
+      }
+      console.log(stopped ? "Daemon stopped." : "No daemon is running.");
+      if (stopped?.ended.length) {
+        const hint = sessionsHint(sessionFacts(stopped.status, state));
+        console.log(`Named sessions ended with it: ${stopped.ended.join(", ")}.${hint ? ` ${hint}` : ""}`);
+      }
+      if (options.endSessions) {
+        const { sessions, notes } = await sessionsLeft(state, true);
+        if (sessions.length) console.log(`Named sessions ended: ${sessions.map(({ name, pid }) => `${name} (holder pid ${pid})`).join(", ")}.`);
+        for (const note of notes) console.log(note);
+      } else if (stopped?.kept.length) {
+        const { sessions, notes } = await sessionsLeft(state, false);
+        const pids = new Map(sessions.map(({ name, pid }) => [name, pid]));
+        console.log(keptSessions(stopped.kept.map((name) => ({ name, pid: pids.get(name) }))));
+        for (const note of notes) console.log(note);
+      }
     });
   startCommand(daemon.command("start").description("Run this device as a paired peer: start its daemon, or report the running one (also cns up)"));
-  stopCommand(daemon.command("stop").description("Stop the daemon and its peer connections; a service starts it again at the next login or cns daemon start (also cns stop)"));
+  stopCommand(daemon.command("stop").description(`Stop the daemon and its peer connections${keeps}; a service starts it again at the next login or cns daemon start (also cns stop)`));
   daemon.command("restart")
     .description("Stop the daemon and start it again as it runs now, also when a paired device runs this, which drops its link")
     .option("-S, --state <path>", "Local daemon state file")
     .addOption(new Option("--worker <ms>").hideHelp())
     // From cns up --install, which rewrote the service's file: launchd loads it again rather than start the copy it has.
     .addOption(new Option("--reload").hideHelp())
-    .addHelpText("after", "\nThe daemon comes back through its service when one runs it (systemd restarts it, launchd or Task\nScheduler starts it again), else detached with the same --bind and --port, running this cns. A paired device can run it:\n  cns run studio -- cns daemon restart\nIt then returns at once, the daemon restarts a second later, and the link comes back within seconds.\nRestarting ends the named sessions the daemon holds. A daemon that was not running is started.")
+    .addHelpText("after", "\nThe daemon comes back through its service when one runs it (systemd restarts it, launchd or Task\nScheduler starts it again), else detached with the same --bind and --port, running this cns. A paired device can run it:\n  cns run studio -- cns daemon restart\nIt then returns at once, the daemon restarts a second later, and the link comes back within seconds.\nNamed sessions keep running across the restart, in processes of their own; a reboot ends them, and\nso does the restart on Windows, or under a systemd unit an older cns wrote until cns up --install\nwrites it again. A daemon that was not running is started.")
     .action(async (options: { state?: string; worker?: string; reload?: boolean }) => { const { restart } = await import("./commands/pairing-cli.js"); await restart(options); });
   startCommand(program.command("up").description("Run this device as a paired peer: start its daemon, or report the running one (also cns daemon start)"));
   program.command("pair")
@@ -436,9 +464,10 @@ export function createCli(): Command {
       "github:thehumanworks/capnshell@VERSION, or the tool alias mise's config gives it there, which pins",
       "it in mise's global config); then the new cns restarts the daemon in a process of its own, as cns",
       "daemon restart does, or with cns up --install where a service still runs the old cns, so the device",
-      "keeps a daemon. Restarting ends the named sessions the daemon holds, so a device with any, or whose",
-      "cns is too old to say, is left as it is unless --end-sessions. So is a device whose cns Nix manages,",
-      "or that was installed another way; the report says what to run there.",
+      "keeps a daemon. Its named sessions outlive the restart, except where the daemon runs them itself",
+      "(Windows, an older cns, or a systemd unit without KillMode=process); such a device with any, or",
+      "whose cns is too old to say, is left as it is unless --end-sessions. So is a device whose cns Nix",
+      "manages, or that was installed another way; the report says what to run there.",
       "The report has one line per device: upgraded, already current, needs a manual step, or unreachable,",
       "with what to run later. Exit 1 when a device did not answer or a step failed there, else 4 when a",
       "device needs a manual step, else 0, also for a --dry-run whose plans would all go ahead.",
@@ -515,7 +544,7 @@ export function createCli(): Command {
       const { attachDaemon } = await import("./commands/daemon.js");
       await attachDaemon(options.state);
     });
-  stopCommand(program.command("stop").description("Stop the local daemon and its peer connections (also cns daemon stop)"));
+  stopCommand(program.command("stop").description(`Stop the local daemon and its peer connections${keeps} (also cns daemon stop)`));
   return program;
 }
 

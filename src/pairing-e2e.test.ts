@@ -7,7 +7,7 @@ import { generateIdentity } from "./identity.js";
 import { suggestedName } from "./pairing.js";
 import { savePairedPeer } from "./peers.js";
 import { connectControl } from "./commands/daemon.js";
-import { cliEnvironment, cliInvocation, launchCli, unusedPort } from "./test-support.js";
+import { cliEnvironment, cliInvocation, endHolders, launchCli, unusedPort } from "./test-support.js";
 import { CNS_VERSION } from "./version.js";
 
 /** This cns's version, as a regular expression. */
@@ -67,7 +67,7 @@ test("two devices pair, run commands within their grants, and refuse everyone el
   assert.match(up.stdout, new RegExp(`^Started as [a-z2-7]{4}(-[a-z2-7]{4}){5} \\(cns ${VERSION}, pid \\d+\\), listening at ws://127\\.0\\.0\\.1:\\d+\\.\nReachable at ws://127\\.0\\.0\\.1:\\d+\\.\nNo paired devices yet`));
   // The daemon it started runs this cns, so there is nothing to warn about.
   assert.doesNotMatch(up.stderr, /The daemon runs/);
-  cleanups.push(() => cli(studio, ["stop", "--state", studio.state]));
+  cleanups.push(async () => { await cli(studio, ["stop", "--state", studio.state]); await endHolders(studio.state); });
   const again = await cli(studio, ["up", "--bind", "127.0.0.1", "--port", port, "--state", studio.state]);
   assert.match(again.stdout, /^Running as/);
 
@@ -301,7 +301,7 @@ test("two devices pair, run commands within their grants, and refuse everyone el
   const laptopPort = await unusedPort("127.0.0.1");
   const laptopUp = await cli(laptop, ["up", "--bind", "127.0.0.1", "--port", laptopPort, "--state", laptop.state]);
   assert.equal(laptopUp.code, 0, laptopUp.stderr);
-  cleanups.push(() => cli(laptop, ["stop", "--state", laptop.state]));
+  cleanups.push(async () => { await cli(laptop, ["stop", "--state", laptop.state]); await endHolders(laptop.state); });
   assert.equal((await cli(studio, ["peer", "address", "laptop", `ws://127.0.0.1:${laptopPort}`, "--state", studio.state])).code, 0);
   const linkCounts = async () => {
     const counts: number[] = [];
