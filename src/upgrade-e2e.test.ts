@@ -40,20 +40,34 @@ async function script(file: string, body: string): Promise<string> {
 }
 
 /**
- * A device whose daemon, once started with `old`, runs cns 2.7.0 that mise installed, as far as cns
- * upgrade can tell: the cns on its PATH says so, and its mise "installs" this cns as the latest
- * release, which the releases URL it returns, for CNS_RELEASES, names.
+ * A device whose daemon, once started with `old`, runs cns 2.7.0 that mise installed as `tool`, as
+ * far as cns upgrade can tell: the cns on its PATH says so, mise lists it there and says it comes
+ * from github:thehumanworks/capnshell, and its mise "installs" this cns as the latest release,
+ * which the releases URL it returns, for CNS_RELEASES, names.
  */
-async function miseDevice(t: TestContext, devices: Awaited<ReturnType<typeof testDevices>>, name: string) {
+async function miseDevice(t: TestContext, devices: Awaited<ReturnType<typeof testDevices>>, name: string, tool = "github:thehumanworks/capnshell") {
   const tools = path.join(devices.root, `${name}-tools`);
   const bin = path.join(tools, "bin");
-  const installs = path.join(tools, "mise", "installs", "github-thehumanworks-capnshell");
+  // As mise names the directory: installs/github-thehumanworks-capnshell, or installs/cns for a [tool_alias] cns.
+  const installs = path.join(tools, "mise", "installs", tool.replaceAll(/[:/]/g, "-"));
   const old = await cnsAs(devices.root, "2.7.0");
   const fresh = await script(path.join(installs, CNS_VERSION, "cns"), `exec ${self().map(sh).join(" ")} "$@"`);
   const miseLog = path.join(tools, "mise.log");
   await writeFile(miseLog, "");
   await script(path.join(bin, "cns"), `echo ${sh(JSON.stringify({ version: "2.7.0", daemon: { version: "2.7.0", executable: path.join(installs, "2.7.0", "cns"), sessions: [] } }))}`);
-  await script(path.join(bin, "mise"), `echo "$*" >> ${sh(miseLog)}\ncase "$1" in\n  --version) echo 2026.11.3 ;;\n  use) ;;\n  which) echo ${sh(fresh)} ;;\n  *) exit 2 ;;\nesac`);
+  // What mise 2026.11.14 prints for these, cut to what cns reads.
+  const listing = { [tool]: [{ version: "2.7.0", install_path: path.join(installs, "2.7.0"), installed: true, active: true }] };
+  await script(path.join(bin, "mise"), [
+    `echo "$*" >> ${sh(miseLog)}`,
+    `case "$1" in`,
+    `  --version) echo '2026.11.14 linux-x64 (2026-11-24)' ;;`,
+    `  ls) echo ${sh(JSON.stringify(listing, null, 2))} ;;`,
+    `  tool) [ "$2" = ${sh(tool)} ] || exit 1; echo '{ "backend": "github:thehumanworks/capnshell" }' ;;`,
+    `  use) ;;`,
+    `  which) echo ${sh(fresh)} ;;`,
+    `  *) exit 2 ;;`,
+    `esac`,
+  ].join("\n"));
   // XDG_CONFIG_HOME: a unit goes where cns and the stand-in for systemctl look, never into this user's own systemd.
   const device = await devices.device(name, { PATH: `${bin}:${process.env.PATH}`, XDG_CONFIG_HOME: path.join(devices.root, name, ".config") });
   // The state path cns uses by default, as the commands that run there do.
@@ -89,7 +103,8 @@ test("cns upgrade --all upgrades a device through mise and restarts its daemon, 
   assert.equal(plan.stdout.split("\n").length, 3, plan.stdout);
   assert.match(plan.stdout, /^pi: unreachable \(Cannot connect to pi: .*\)\. Later, run cns upgrade pi$/m);
   assert.match(plan.stdout, new RegExp(`^studio: would upgrade from 2\\.7\\.0 to ${escaped}: mise use -g github:thehumanworks/capnshell@${escaped}, which pins that version in mise's global config there, then cns up --install from the new cns if a service runs the old one, else cns daemon restart, which ends any open shells$`, "m"));
-  assert.equal(await readFile(miseLog, "utf8"), "--version\n");
+  const asked = "--version\nls --installed --json\ntool github:thehumanworks/capnshell --json\n";
+  assert.equal(await readFile(miseLog, "utf8"), asked);
   assert.equal((await daemonAt(studio.state)).pid, before.pid);
   assert.equal(JSON.parse(await readFile(cache, "utf8")).version, CNS_VERSION);
 
@@ -98,7 +113,7 @@ test("cns upgrade --all upgrades a device through mise and restarts its daemon, 
   assert.equal(upgraded.stdout.split("\n").length, 3, upgraded.stdout);
   assert.match(upgraded.stdout, /^pi: unreachable \(Cannot connect to pi: .*\)\. Later, run cns upgrade pi$/m);
   assert.match(upgraded.stdout, new RegExp(`^studio: upgraded from 2\\.7\\.0 to ${escaped}$`, "m"));
-  assert.equal(await readFile(miseLog, "utf8"), `--version\nuse -g github:thehumanworks/capnshell@${CNS_VERSION}\nwhich cns --tool github:thehumanworks/capnshell@${CNS_VERSION}\n`);
+  assert.equal(await readFile(miseLog, "utf8"), `${asked}${asked}use -g github:thehumanworks/capnshell@${CNS_VERSION}\nwhich cns --tool github:thehumanworks/capnshell@${CNS_VERSION}\n`);
   const after = await replaced(studio.state, before.pid, log);
   assert.equal(after.version, CNS_VERSION);
   assert.equal(after.service, false, "a daemon cns up started is started again the same way");
@@ -107,9 +122,10 @@ test("cns upgrade --all upgrades a device through mise and restarts its daemon, 
   assert.equal(again.code, 0, again.output);
 });
 
-test("a paired device's cns up --install hands the restart to a process of its own, and cns upgrade moves the service onto the new cns", { skip: process.platform !== "linux", timeout: 120000 }, async (t) => {
+test("a paired device's cns up --install hands the restart to a process of its own, and cns upgrade moves the service onto the new cns, through a mise tool alias", { skip: process.platform !== "linux", timeout: 120000 }, async (t) => {
   const devices = await testDevices(t, "cns-upgrade-service-");
-  const { device: studio, old, bin, log, releases } = await miseDevice(t, devices, "studio");
+  // [tool_alias] cns = "github:thehumanworks/capnshell" in mise's config there.
+  const { device: studio, old, bin, miseLog, log, releases } = await miseDevice(t, devices, "studio", "cns");
   await fakeSystemctl(bin);
   const laptop = await devices.device("laptop");
   await devices.up(studio, undefined, old);
@@ -132,6 +148,8 @@ test("a paired device's cns up --install hands the restart to a process of its o
   const upgraded = await devices.cli({ ...laptop, env: { ...laptop.env, CNS_RELEASES: releases } }, ["upgrade", "studio"]);
   assert.equal(upgraded.code, 0, `${upgraded.output}\nThe restart's log:\n${await log()}`);
   assert.equal(upgraded.stdout, `studio: upgraded from 2.7.0 to ${CNS_VERSION}\n`);
+  // By the alias, so that mise moves the alias's version rather than adding github:thehumanworks/capnshell beside it.
+  assert.equal(await readFile(miseLog, "utf8"), `--version\nls --installed --json\ntool cns --json\nuse -g cns@${CNS_VERSION}\nwhich cns --tool cns@${CNS_VERSION}\n`);
   const after = await replaced(studio.state, service.pid, log);
   assert.deepEqual([after.service, after.version], [true, CNS_VERSION]);
   assert.match(await log(), /^Restarting the daemon \(pid \d+\) from its service's new file\.$/m);

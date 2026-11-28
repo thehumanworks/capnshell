@@ -7,18 +7,62 @@ import test from "node:test";
 import { generateIdentity } from "../identity.js";
 import { revokeDevice, savePairedPeer } from "../peers.js";
 import { CNS_VERSION } from "../version.js";
-import { commandLine, fleet, installPath, reachDevice, reportLine, shellWord, statusFacts, upgrade, upgradeDevice, upgradeExitCode, type Device, type Outcome, type Reach } from "./upgrade.js";
+import { commandLine, fleet, installPath, MISE_TOOL, miseToolsHolding, miseVersion, reachDevice, reportLine, shellWord, statusFacts, toolName, upgrade, upgradeDevice, upgradeExitCode, type Device, type Outcome, type Reach } from "./upgrade.js";
 
-test("how cns came to a device is told by its daemon's executable", () => {
+test("the path of its daemon's executable alone tells Nix, and mise's own directory for the tool", () => {
   assert.equal(installPath("/home/a/.local/share/mise/installs/github-thehumanworks-capnshell/2.7.0/cns"), "mise");
   assert.equal(installPath("/opt/mise-data/installs/github-thehumanworks-capnshell/2.7.0/cns"), "mise");
   assert.equal(installPath("C:\\Users\\a\\AppData\\Local\\mise\\installs\\github-thehumanworks-capnshell\\2.7.0\\cns.exe"), "mise");
   assert.equal(installPath("/nix/store/abc-cns-2.7.0/bin/cns"), "nix");
-  // Another mise backend is another tool to mise, which mise use -g github:... would install beside it.
-  assert.equal(installPath("/home/a/.local/share/mise/installs/ubi-thehumanworks-capnshell/2.7.0/cns"), "unknown");
+  // A tool alias, or another backend, is another directory: only mise can say what it holds.
+  assert.equal(installPath("/home/a/.local/share/mise/installs/cns/2.7.0/cns"), "unknown");
   assert.equal(installPath("/usr/local/bin/cns"), "unknown");
   assert.equal(installPath("/home/a/src/capnshell/src/cli.ts"), "unknown");
   assert.equal(installPath(undefined), "unknown");
+});
+
+test("mise's listing says which tool installed the daemon's cns, by the name its config gives it, on each platform", () => {
+  const linux = "/home/a/.local/share/mise/installs";
+  const at = (name: string, ...paths: string[]) => ({ [name]: paths.map((install_path) => ({ install_path })) });
+  // No alias, as mise use -g github:thehumanworks/capnshell@2.7.0 installs it; a [tool_alias] (or [alias]) named cns; a custom MISE_DATA_DIR.
+  assert.deepEqual(miseToolsHolding(at(MISE_TOOL, `${linux}/github-thehumanworks-capnshell/2.7.0`), `${linux}/github-thehumanworks-capnshell/2.7.0/cns`, "linux"), [MISE_TOOL]);
+  assert.deepEqual(miseToolsHolding({ ...at("node", `${linux}/node/24.0.0`), ...at("cns", `${linux}/cns/2.6.0`, `${linux}/cns/2.7.0`) }, `${linux}/cns/2.7.0/cns`, "linux"), ["cns"]);
+  assert.deepEqual(miseToolsHolding(at("cns", "/opt/mise-data/installs/cns/2.7.0"), "/opt/mise-data/installs/cns/2.7.0/cns", "linux"), ["cns"]);
+  assert.deepEqual(miseToolsHolding(at("cns", "/Users/a/.local/share/mise/installs/cns/2.7.0"), "/Users/a/.local/share/mise/installs/cns/2.7.0/cns", "darwin"), ["cns"]);
+  // mise's identity layout, as mise 2026.11.14 lists it: the daemon's executable, its real path, is in the installation itself.
+  assert.deepEqual(miseToolsHolding(at("cns", `${linux}/capnshell-on3c2hgh`), `${linux}/capnshell-on3c2hgh/cns`, "linux"), ["cns"]);
+  // Windows: %LOCALAPPDATA%\mise, with either slash and in any case, and the \\?\ form.
+  const windows = "C:\\Users\\a\\AppData\\Local\\mise";
+  const listed = at("cns", `${windows}\\installs\\cns\\2.7.0`);
+  for (const executable of [`${windows}\\installs\\cns\\2.7.0\\cns.exe`, "c:\\users\\A\\appdata\\local\\MISE\\installs\\cns\\2.7.0\\cns.exe", "C:/Users/a/AppData/Local/mise/installs/cns/2.7.0/cns.exe", `\\\\?\\${windows}\\installs\\cns\\2.7.0\\cns.exe`]) {
+    assert.deepEqual(miseToolsHolding(listed, executable, "win32"), ["cns"], executable);
+  }
+  // There the identity layout keeps installations in mise\i, and a daemon started through the version link, a junction, names the link.
+  assert.deepEqual(miseToolsHolding(at("cns", `${windows}\\i\\capnshell-on3c2hgh`), `${windows}\\installs\\cns\\2.7.0\\cns.exe`, "win32"), ["cns"]);
+  // A version mise has removed since the daemon started; and MISE_TOOL's own directory, which mise no longer lists.
+  assert.deepEqual(miseToolsHolding(at("cns", `${linux}/cns/2.9.0`), `${linux}/cns/2.7.0/cns`, "linux"), ["cns"]);
+  assert.deepEqual(miseToolsHolding({}, `${linux}/github-thehumanworks-capnshell/2.7.0/cns`, "linux"), [MISE_TOOL]);
+  // Not mise's: elsewhere, another case on Linux, beside a listed directory, or under a root.
+  assert.deepEqual(miseToolsHolding(at("cns", `${linux}/cns/2.7.0`), "/usr/local/bin/cns", "linux"), []);
+  assert.deepEqual(miseToolsHolding(at("cns", `${linux}/cns/2.7.0`), `${linux}/CNS/2.7.0/cns`, "linux"), []);
+  assert.deepEqual(miseToolsHolding(at("Cns", "/opt/tools/c"), "/opt/tools/cns/cns", "linux"), []);
+  assert.deepEqual(miseToolsHolding(at("cns", "/", "/opt"), "/opt/cns", "linux"), []);
+  assert.deepEqual(miseToolsHolding(at("cns", "C:\\", "C:\\Tools"), "C:\\Tools\\cns.exe", "win32"), []);
+  // Another backend is named as mise lists it, for mise tool to tell; two that hold it are both named.
+  assert.deepEqual(miseToolsHolding(at("ubi:thehumanworks/capnshell", `${linux}/ubi-thehumanworks-capnshell/2.7.0`), `${linux}/ubi-thehumanworks-capnshell/2.7.0/cns`, "linux"), ["ubi:thehumanworks/capnshell"]);
+  assert.deepEqual(miseToolsHolding({ ...at("cns", `${linux}/capnshell-on3c2hgh`), ...at(MISE_TOOL, `${linux}/capnshell-on3c2hgh`) }, `${linux}/capnshell-on3c2hgh/cns`, "linux"), ["cns", MISE_TOOL]);
+});
+
+test("only a tool name with no shell or option characters, and mise's version, are taken from mise", () => {
+  for (const name of ["cns", MISE_TOOL, "my_cns.2", "aqua:a/b", "C-N-S"]) assert.equal(toolName(name), name);
+  for (const name of ["", "-g", "--cd=/tmp", "cns@2.9.0", "a b", "a;b", "$(id)", "`id`", "'cns'", "\"cns\"", "c\nns", "c\u202ens", "cns\\x", "%PATH%", "a&b", "a|b", "~", "é", "x".repeat(201)]) {
+    assert.equal(toolName(name), undefined, JSON.stringify(name));
+  }
+  assert.equal(miseVersion("2026.11.14 linux-x64 (2026-11-24)\n"), "2026.11.14");
+  assert.equal(miseVersion("2025.7.9 macos-arm64 (2025-07-14)"), "2025.7.9");
+  assert.equal(miseVersion("mise 2024.1.0"), "2024.1.0");
+  assert.equal(miseVersion("2026.11.14-DEBUG windows-x64 (2026-11-24)\r\n"), "2026.11.14");
+  for (const text of ["", "mise", "20261.1.1 linux-x64", "2026.11.14.2", "version 2026.11.14"]) assert.equal(miseVersion(text), undefined, text);
 });
 
 test("words reach Bash as they are, and PowerShell commands exit with the program's status", () => {
@@ -51,14 +95,21 @@ interface Simulated {
   /** The daemon's named sessions; null for a daemon too old to say. */
   sessions: string[] | null;
   service: object | null;
+  /** The name mise's config gives the tool that installed cns there, such as a [tool_alias], and the backend mise says it comes from. */
+  tool: string;
+  backend: string;
   answers: Record<string, { code: number; stdout?: string; stderr?: string }>;
 }
 
-/** A device as cns upgrade reaches it: a daemon running a mise-installed cns, with no named sessions, unless told otherwise. */
+/** A device as cns upgrade reaches it: a daemon running a cns that mise installed from MISE_TOOL, with no named sessions, unless told otherwise. */
 function device(overrides: Partial<Simulated> = {}) {
   const shell = overrides.shell ?? "Bash";
   const windows = shell === "PowerShell";
-  const fresh = windows ? "C:\\Users\\a\\AppData\\Local\\mise\\installs\\github-thehumanworks-capnshell\\2.9.0\\cns.exe" : "/home/a/.local/share/mise/installs/github-thehumanworks-capnshell/2.9.0/cns";
+  const tool = overrides.tool ?? MISE_TOOL;
+  const directory = tool.replaceAll(/[:/]/g, "-");
+  const fresh = windows ? `C:\\Users\\a\\AppData\\Local\\mise\\installs\\${directory}\\2.9.0\\cns.exe` : `/home/a/.local/share/mise/installs/${directory}/2.9.0/cns`;
+  // What mise ls --installed --json lists there: the version the daemon runs.
+  const listing = { node: [{ version: "24.0.0", install_path: "/home/a/.local/share/mise/installs/node/24.0.0" }], [tool]: [{ version: "2.7.0", install_path: fresh.replace(/[\\/]cns(\.exe)?$/, "").replace("2.9.0", "2.7.0"), installed: true }] };
   const state = {
     pid: 100, version: overrides.version ?? "2.7.0", up: true, commands: [] as string[],
     /** What the daemon runs once a restart takes it onto another cns. */
@@ -73,6 +124,8 @@ function device(overrides: Partial<Simulated> = {}) {
     for (const [prefix, result] of Object.entries(overrides.answers ?? {})) if (command.includes(prefix)) return result;
     if (/^(& )?cns status --json/.test(command)) return status(state.version);
     if (command.includes("mise --version")) return { code: 0, stdout: "2026.11.3 linux-x64 (2026-11-20)" };
+    if (command.includes("mise ls --installed --json")) return { code: 0, stdout: JSON.stringify(listing, null, 2) };
+    if (command.includes("mise tool ")) return { code: 0, stdout: JSON.stringify({ backend: overrides.backend ?? MISE_TOOL, installed_versions: ["2.7.0"] }) };
     if (command.includes("mise use -g")) return { code: 0, stderr: "mise github:thehumanworks/capnshell@2.9.0 ✓ installed" };
     if (command.includes("mise which cns")) return { code: 0, stdout: `${fresh}\n` };
     if (command.includes("status --json")) return status("2.9.0", { service: overrides.service === undefined ? null : overrides.service });
@@ -96,6 +149,8 @@ function device(overrides: Partial<Simulated> = {}) {
 }
 
 const quick = { backMs: 0, sleep: async () => {} };
+/** What cns upgrade asks mise before it changes anything there: its version, what it installed, and the backend of the tool that holds the daemon's cns. */
+const asks = (tool = MISE_TOOL) => ["cns status --json", "mise --version", "mise ls --installed --json", `mise tool '${tool}' --json`];
 
 test("a device that runs a cns from mise is upgraded with the exact version, then its daemon restarts on the new cns", async () => {
   const studio = device();
@@ -103,12 +158,82 @@ test("a device that runs a cns from mise is upgraded with the exact version, the
   assert.deepEqual(outcome, { device: "studio", result: "upgraded", from: "2.7.0", to: "2.9.0" });
   assert.equal(reportLine(outcome), "studio: upgraded from 2.7.0 to 2.9.0");
   assert.deepEqual(studio.state.commands, [
-    "cns status --json",
+    ...asks(),
     "mise use -g 'github:thehumanworks/capnshell@2.9.0'",
     "mise which cns --tool 'github:thehumanworks/capnshell@2.9.0'",
     `'${studio.fresh}' status --json`,
     `'${studio.fresh}' daemon restart`,
   ]);
+});
+
+test("a cns that mise installed under a tool alias is upgraded by the alias, which moves the alias's version", async () => {
+  // [tool_alias] cns = "github:thehumanworks/capnshell", or [alias] before mise 2025.12.11: mise installs it in installs/cns.
+  const studio = device({ tool: "cns" });
+  assert.equal(reportLine(await upgradeDevice("studio", "2.9.0", studio.reach, quick)), "studio: upgraded from 2.7.0 to 2.9.0");
+  assert.deepEqual(studio.state.commands, [...asks("cns"), "mise use -g 'cns@2.9.0'", "mise which cns --tool 'cns@2.9.0'", `'${studio.fresh}' status --json`, `'${studio.fresh}' daemon restart`]);
+  const plan = await upgradeDevice("studio", "2.9.0", device({ tool: "cns" }).reach, { ...quick, dryRun: true });
+  assert.match(reportLine(plan), /^studio: would upgrade from 2\.7\.0 to 2\.9\.0: mise use -g cns@2\.9\.0, which pins that version/);
+  // GitHub tells no owner or repository apart by case.
+  const spelled = device({ tool: "capnshell", backend: "github:TheHumanWorks/CapnShell" });
+  assert.equal(reportLine(await upgradeDevice("studio", "2.9.0", spelled.reach, quick)), "studio: upgraded from 2.7.0 to 2.9.0");
+  assert.equal(spelled.state.commands[4], "mise use -g 'capnshell@2.9.0'");
+  // On Windows, quoted for PowerShell.
+  const pc = device({ shell: "PowerShell", tool: "cns" });
+  assert.equal(reportLine(await upgradeDevice("pc", "2.9.0", pc.reach, quick)), "pc: upgraded from 2.7.0 to 2.9.0");
+  assert.equal(pc.state.commands[3], "& mise tool 'cns' --json; if ($null -eq $LASTEXITCODE) { exit 127 }; exit $LASTEXITCODE");
+  assert.equal(pc.state.commands[4], "& mise use -g 'cns@2.9.0'; if ($null -eq $LASTEXITCODE) { exit 127 }; exit $LASTEXITCODE");
+});
+
+test("a tool that mise installs from elsewhere is left as it is, with what to run there", async () => {
+  for (const [tool, backend] of [["cns", "github:someone-else/capnshell"], ["cns", "github:thehumanworks/capnshell-fork"], ["ubi:thehumanworks/capnshell", "ubi:thehumanworks/capnshell"]]) {
+    const other = device({ tool, backend });
+    const outcome = await upgradeDevice("studio", "2.9.0", other.reach, quick);
+    assert.equal(reportLine(outcome), `studio: needs a manual step: the mise tool ${tool} that installed its cns comes from ${backend}, not from github:thehumanworks/capnshell. ` +
+      `There, point ${tool} at github:thehumanworks/capnshell in mise's config ([tool_alias]) and run cns upgrade studio again, or install cns 2.9.0 yourself, then restart its daemon on it (cns status there says how).`);
+    assert.equal(upgradeExitCode([outcome]), 4);
+    assert.deepEqual(other.state.commands, asks(tool), "nothing changes there");
+  }
+});
+
+test("mise output cns cannot read, or a mise too old, stops the device before anything changes there", async () => {
+  const byHand = "There, run mise use -g github:thehumanworks/capnshell@2.9.0, or with the name mise's config gives that tool there (its [tool_alias]), then restart its daemon on it (cns status there says how).";
+  const held = { install_path: "/home/a/.local/share/mise/installs/github-thehumanworks-capnshell/2.7.0" };
+  for (const [answers, reason, ran] of [
+    [{ "mise --version": { code: 0, stdout: "mise, the front-end to your dev env" } }, "cns cannot read the version that mise --version printed there", 2],
+    [{ "mise ls": { code: 0, stdout: "mise WARN  not JSON" } }, "cns cannot read what mise ls --installed --json printed there", 3],
+    [{ "mise ls": { code: 0, stdout: JSON.stringify([held]) } }, "cns cannot read what mise ls --installed --json printed there", 3],
+    [{ "mise ls": { code: 2, stderr: "error: unexpected argument '--installed' found" } }, "mise ls --installed --json failed (error: unexpected argument '--installed' found)", 3],
+    [{ "mise tool": { code: 0, stdout: JSON.stringify({ name: "cns" }) } }, "cns cannot read what mise tool github:thehumanworks/capnshell --json printed there", 4],
+    [{ "mise tool": { code: 1, stderr: "mise ERROR cns not found in mise tool registry" } }, "mise tool github:thehumanworks/capnshell --json failed (mise ERROR cns not found in mise tool registry)", 4],
+  ] as const) {
+    const odd = device({ answers });
+    const outcome = await upgradeDevice("studio", "2.9.0", odd.reach, quick);
+    assert.equal(reportLine(outcome), `studio: needs a manual step: ${reason}. ${byHand}`);
+    assert.equal(outcome.result, "failed");
+    assert.equal(odd.state.commands.length, ran, "nothing runs after it");
+  }
+  // Older than the first mise that installs cns from its releases.
+  const old = device({ answers: { "mise --version": { code: 0, stdout: "2025.7.8 linux-x64 (2025-07-13)" } } });
+  const outcome = await upgradeDevice("studio", "2.9.0", old.reach, quick);
+  assert.equal(reportLine(outcome), "studio: needs a manual step: mise there is 2025.7.8, and cns upgrade needs mise 2025.7.9 or newer, the first that installs cns from github:thehumanworks/capnshell. There, run mise self-update (or upgrade mise the way it was installed), then run cns upgrade studio again.");
+  assert.equal(upgradeExitCode([outcome]), 4);
+  assert.deepEqual(old.state.commands, ["cns status --json", "mise --version"]);
+});
+
+test("a tool name from mise reaches the command line only when it holds no shell or option characters", async () => {
+  const held = [{ install_path: "/home/a/.local/share/mise/installs/github-thehumanworks-capnshell/2.7.0" }];
+  for (const name of ["cns'; touch /tmp/pwned; '", "$(touch pwned)", "--cd=/tmp", "cns‮"]) {
+    const odd = device({ answers: { "mise ls": { code: 0, stdout: JSON.stringify({ [name]: held }) } } });
+    const outcome = await upgradeDevice("studio", "2.9.0", odd.reach, quick);
+    assert.equal(outcome.result, "failed");
+    assert.match(reportLine(outcome), /^studio: needs a manual step: mise there names the tool that installed cns .*, which cns does not put on a command line\. /);
+    assert.doesNotMatch(reportLine(outcome), /‮/);
+    assert.deepEqual(odd.state.commands, ["cns status --json", "mise --version", "mise ls --installed --json"]);
+  }
+  // Two tools that hold it: cns cannot say which one mise's config means.
+  const both = device({ answers: { "mise ls": { code: 0, stdout: JSON.stringify({ cns: held, [MISE_TOOL]: held }) } } });
+  assert.match(reportLine(await upgradeDevice("studio", "2.9.0", both.reach, quick)), /: its daemon runs \S+, which mise there lists under several tools: cns, github:thehumanworks\/capnshell\. There, run mise use -g /);
+  assert.equal(both.state.commands.length, 3);
 });
 
 test("a service that runs the old cns is pointed at the new one with cns up --install, which restarts through the worker", async () => {
@@ -128,7 +253,7 @@ test("on Windows the same steps run in PowerShell, quoted for it, each exiting w
   assert.equal(reportLine(await upgradeDevice("pc", "2.9.0", pc.reach, quick)), "pc: upgraded from 2.7.0 to 2.9.0");
   const status = "; if ($null -eq $LASTEXITCODE) { exit 127 }; exit $LASTEXITCODE";
   assert.deepEqual(pc.state.commands, [
-    `& cns status --json${status}`,
+    ...asks().map((command) => `& ${command}${status}`),
     `& mise use -g 'github:thehumanworks/capnshell@2.9.0'${status}`,
     `& mise which cns --tool 'github:thehumanworks/capnshell@2.9.0'${status}`,
     `& '${pc.fresh}' status --json${status}`,
@@ -145,21 +270,25 @@ test("--dry-run reads what each device runs and plans, changing nothing", async 
   const studio = device();
   const plan = await upgradeDevice("studio", "2.9.0", studio.reach, { ...quick, dryRun: true });
   assert.equal(reportLine(plan), `studio: would upgrade from 2.7.0 to 2.9.0: ${pins}, then cns up --install from the new cns if a service runs the old one, else cns daemon restart, which ends any open shells`);
-  assert.deepEqual(studio.state.commands, ["cns status --json", "mise --version"]);
+  assert.deepEqual(studio.state.commands, asks());
   assert.equal(studio.state.pid, 100);
   assert.equal(upgradeExitCode([plan]), 0);
   // Without mise there, the upgrade would fail: the plan says so.
   const noMise = device({ answers: { "mise --version": { code: 127, stderr: "bash: mise: command not found" } } });
   const failing = await upgradeDevice("box", "2.9.0", noMise.reach, { ...quick, dryRun: true });
-  assert.equal(reportLine(failing), "box: needs a manual step: mise --version failed (mise is not on its daemon's PATH). There, install cns 2.9.0, then restart its daemon on it (cns status there says how).");
+  assert.equal(reportLine(failing), "box: needs a manual step: mise --version failed (mise is not on its daemon's PATH). There, run mise use -g github:thehumanworks/capnshell@2.9.0, or with the name mise's config gives that tool there (its [tool_alias]), then restart its daemon on it (cns status there says how).");
   assert.equal(upgradeExitCode([plan, failing]), 1);
+  // A cns elsewhere, with no mise to ask: cns cannot tell how it came there.
+  const elsewhere = device({ executable: "/usr/local/bin/cns", answers: { "mise --version": { code: 127, stderr: "bash: mise: command not found" } } });
+  assert.equal(reportLine(await upgradeDevice("box", "2.9.0", elsewhere.reach, { ...quick, dryRun: true })),
+    "box: needs a manual step: cns cannot tell how cns was installed there: its daemon runs /usr/local/bin/cns, and mise --version failed there (mise is not on its daemon's PATH). There, install cns 2.9.0, then restart its daemon on it (cns status there says how).");
 });
 
 test("a daemon with named sessions, or too old to say, is left alone unless --end-sessions, and the plan names them", async () => {
   const busy = device({ sessions: ["build", "shell-1"] });
   const left = await upgradeDevice("studio", "2.9.0", busy.reach, quick);
   assert.equal(reportLine(left), "studio: needs a manual step: restarting its daemon would end its named sessions build, shell-1. To end them and upgrade, run cns upgrade studio --end-sessions.");
-  assert.deepEqual(busy.state.commands, ["cns status --json"]);
+  assert.deepEqual(busy.state.commands, asks(), "only reads");
   assert.equal(upgradeExitCode([left]), 4);
   assert.match(reportLine(await upgradeDevice("studio", "2.9.0", busy.reach, { ...quick, dryRun: true, endSessions: true })),
     /, then cns up --install from the new cns if a service runs the old one, else cns daemon restart, which ends its named sessions build, shell-1 and any open shells$/);
@@ -175,7 +304,7 @@ test("a daemon with named sessions, or too old to say, is left alone unless --en
   const started = await upgradeDevice("studio", "2.9.0", late.reach, quick);
   assert.equal(reportLine(started), "studio: needs a manual step: restarting its daemon would end its named sessions agent. To end them and upgrade, run cns upgrade studio --end-sessions.");
   assert.equal(late.state.pid, 100, "not restarted");
-  assert.equal(late.state.commands.length, 4);
+  assert.equal(late.state.commands.length, 7);
 });
 
 test("the cns mise gives must be the release, or nothing restarts", async () => {
@@ -189,7 +318,9 @@ test("the cns mise gives must be the release, or nothing restarts", async () => 
 test("the report's lines carry no control, format or separator characters a device sent", async () => {
   const sneaky = device({ executable: "/usr/local/bin/cns\u202e\u2028\u200b\u0007x" });
   assert.equal(reportLine(await upgradeDevice("box", "2.9.0", sneaky.reach, quick)),
-    "box: needs a manual step: cns cannot tell how cns was installed there: its daemon runs /usr/local/bin/cns????x. There, install cns 2.9.0, then restart its daemon on it (cns status there says how).");
+    "box: needs a manual step: cns cannot tell how cns was installed there: its daemon runs /usr/local/bin/cns????x, which no tool that mise lists there holds. There, install cns 2.9.0, then restart its daemon on it (cns status there says how).");
+  const backend = device({ tool: "cns", backend: "github:evil/\u202ecns\u2066\u0007" });
+  assert.match(reportLine(await upgradeDevice("box", "2.9.0", backend.reach, quick)), /comes from github:evil\/\?cns\?\?, not from /);
 });
 
 test("--all leaves out the cns gateway, with a line for it, and names the mesh each device came from", () => {
@@ -280,8 +411,8 @@ test("Nix and installs cns cannot tell are not changed, and the report says what
   const manual = device({ executable: "/usr/local/bin/cns" });
   const unknown = await upgradeDevice("box", "2.9.0", manual.reach, quick);
   assert.equal(reportLine(unknown),
-    "box: needs a manual step: cns cannot tell how cns was installed there: its daemon runs /usr/local/bin/cns. There, install cns 2.9.0, then restart its daemon on it (cns status there says how).");
-  assert.deepEqual(manual.state.commands, ["cns status --json"]);
+    "box: needs a manual step: cns cannot tell how cns was installed there: its daemon runs /usr/local/bin/cns, which no tool that mise lists there holds. There, install cns 2.9.0, then restart its daemon on it (cns status there says how).");
+  assert.deepEqual(manual.state.commands, ["cns status --json", "mise --version", "mise ls --installed --json"]);
   assert.equal(upgradeExitCode([nixos, unknown, { device: "nas", result: "current", version: "2.9.0" }]), 4);
   // No cns on the daemon's PATH there to ask.
   const bare = device({ answers: { "cns status": { code: 127, stderr: "bash: cns: command not found" } } });
@@ -294,7 +425,7 @@ test("a failed step stops that device with what to run there, and nothing after 
   const failed = await upgradeDevice("studio", "2.9.0", noMise.reach, quick);
   assert.equal(reportLine(failed),
     "studio: needs a manual step: mise use -g github:thehumanworks/capnshell@2.9.0 failed (mise is not on its daemon's PATH). There, run mise use -g github:thehumanworks/capnshell@2.9.0, then restart its daemon on it (cns status there says how).");
-  assert.equal(noMise.state.commands.length, 2);
+  assert.equal(noMise.state.commands.length, 5);
   assert.equal(upgradeExitCode([failed, { device: "nixbox", result: "manual", reason: "", next: "" }]), 1);
   const offline = device({ answers: { "mise use": { code: 1, stderr: "mise ERROR failed to download\nmise ERROR HTTP status client error (404 Not Found)." } } });
   assert.match(reportLine(await upgradeDevice("studio", "2.9.0", offline.reach, quick)), /failed \(mise ERROR HTTP status client error \(404 Not Found\)\)\. There, run mise use/);
@@ -314,7 +445,7 @@ test("only an absolute path from mise which is run, and a failed mise which stop
     const outcome = await upgradeDevice("studio", "2.9.0", odd.reach, quick);
     assert.equal(reportLine(outcome), `studio: needs a manual step: mise did not say where it installed cns 2.9.0 (${reason}). There, run mise use -g github:thehumanworks/capnshell@2.9.0, then restart its daemon on it (cns status there says how).`);
     assert.equal(outcome.result, "failed");
-    assert.equal(odd.state.commands.length, 3, "nothing runs after it");
+    assert.equal(odd.state.commands.length, 6, "nothing runs after it");
   }
 });
 

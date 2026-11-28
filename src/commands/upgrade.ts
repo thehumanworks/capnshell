@@ -18,15 +18,68 @@ import { connectDevice, type DeviceConnection } from "./connect-device.js";
 
 /** The mise tool that installs cns from its GitHub releases. */
 export const MISE_TOOL = "github:thehumanworks/capnshell";
+/** The first mise that installs cns from MISE_TOOL; it also has the ls, tool and which that cns upgrade asks it. */
+export const MISE_MINIMUM = "2025.7.9";
 
-/** How cns came to a device, told by the executable its daemon runs. */
+/** How cns came to a device, as the path of the executable its daemon runs tells it alone. */
 export type InstallPath = "mise" | "nix" | "unknown";
 
 export function installPath(executable: string | undefined): InstallPath {
   if (executable === undefined) return "unknown";
   if (executable.startsWith("/nix/store/")) return "nix";
-  // mise's GitHub backend keeps each version in installs/github-thehumanworks-capnshell/VERSION, wherever its data directory is.
+  // mise keeps each version of MISE_TOOL in installs/github-thehumanworks-capnshell/VERSION, wherever its data directory is.
   return /[\\/]installs[\\/]github-thehumanworks-capnshell[\\/]/i.test(executable) ? "mise" : "unknown";
+}
+
+/**
+ * A tool's name as mise's config gives it, which goes on the device's command line: a letter or a
+ * digit, then letters, digits and the separators mise allows (- _ . : /). Never a space, a quote,
+ * an @, or a leading dash that mise would read as an option.
+ */
+export function toolName(value: string): string | undefined {
+  return /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(value) ? value : undefined;
+}
+
+/** mise's own version, from what mise --version prints: 2026.11.14 linux-x64 (2026-11-24). */
+export function miseVersion(text: string): string | undefined {
+  return /^\s*(?:mise\s+)?v?(\d{4}\.\d{1,2}\.\d{1,4})(?![\d.])/m.exec(text)?.[1];
+}
+
+/** What `mise ls --installed --json` prints, as far as the upgrade reads it: each tool's installed versions, by the name mise's config gives the tool. */
+const listingSchema = z.record(z.string(), z.array(z.object({ install_path: z.string() })));
+type Listing = z.infer<typeof listingSchema>;
+
+/** What `mise tool NAME --json` says the tool's backend is: github:OWNER/REPO, through any tool alias. */
+const toolSchema = z.object({ backend: z.string().max(1000) });
+
+const parsed = <T>(schema: z.ZodType<T>, text: string): T | undefined => { try { return schema.parse(JSON.parse(text)); } catch { return undefined; } };
+
+/** Where mise keeps the versions of the tool it names `name`: installs/ and the name in kebab case, for a name with no capitals. */
+function toolDirectory(name: string): string | undefined {
+  return /^[a-z0-9._:/-]+$/.test(name) ? name.split(/[^a-z0-9]+/).filter(Boolean).join("-") : undefined;
+}
+
+/**
+ * The names of the tools in `listing` that installed the cns at `executable` on a `platform`
+ * device: the tool whose installation holds it, else one whose directory under installs/ does, as
+ * a version link there does (mise's identity layout, on Windows) or a version mise has since
+ * removed. Windows paths are compared with either slash and in any case.
+ */
+export function miseToolsHolding(listing: Listing, executable: string, platform: NodeJS.Platform): string[] {
+  const windows = platform === "win32";
+  const key = (file: string) => {
+    const forward = windows ? file.replace(/^\\\\\?\\/, "").replaceAll("\\", "/") : file;
+    return (windows ? forward.toLowerCase() : forward).replace(/\/+$/, "");
+  };
+  const file = key(executable);
+  // A path from the root, at least two directories down: never one that holds everything.
+  const holds = (directory: string) => /^(\/|[a-z]:\/)[^/]+\/[^/]/i.test(`${key(directory)}/`) && file.startsWith(`${key(directory)}/`);
+  const inside = Object.entries(listing).filter(([, versions]) => versions.some((version) => holds(version.install_path))).map(([name]) => name);
+  if (inside.length) return inside;
+  return [...new Set([...Object.keys(listing), MISE_TOOL])].filter((name) => {
+    const directory = toolDirectory(name);
+    return directory !== undefined && file.includes(`/installs/${directory}/`);
+  });
 }
 
 type Shell = "Bash" | "PowerShell";
@@ -157,10 +210,55 @@ function nixSteps(platform: NodeJS.Platform): string {
     `then ${rebuild} (home-manager switch --flake . for Home Manager); or, for a nix profile install: nix profile upgrade capnshell, then cns daemon restart.`;
 }
 
+type Run = (program: string, args: string[], timeoutMs?: number) => ReturnType<Device["run"]>;
+/** A device left as it is, for a person to act on, or stopped by a step that failed. */
+type Refusal = Omit<Extract<Outcome, { result: "manual" | "failed" }>, "device">;
+
+/**
+ * Ask mise on the device which of its tools installed the cns at `executable`, by the name that
+ * mise's config gives it there, which may be a tool alias: the tool whose installation holds it,
+ * if mise installs that tool from MISE_TOOL. Only reads.
+ */
+async function miseTool(name: string, target: string, platform: NodeJS.Platform, executable: string, run: Run, word: (value: string) => string): Promise<{ tool: string } | Refusal> {
+  const install = `There, install cns ${target}, ${RESTART_THERE}.`;
+  const byHand = `There, run mise use -g ${MISE_TOOL}@${target}, or with the name mise's config gives that tool there (its [tool_alias]), ${RESTART_THERE}.`;
+  const version = await run("mise", ["--version"]);
+  if (version.code !== 0) {
+    // A daemon on a cns under mise's own directory for MISE_TOOL, with no mise to ask.
+    if (installPath(executable) === "mise") return { result: "failed", reason: `mise --version failed (${why(version, "mise")})`, next: byHand };
+    return { result: "manual", reason: `cns cannot tell how cns was installed there: its daemon runs ${printable(executable)}, and mise --version failed there (${why(version, "mise")})`, next: install };
+  }
+  const mise = miseVersion(version.stdout);
+  if (!mise) return { result: "failed", reason: "cns cannot read the version that mise --version printed there", next: byHand };
+  if (compareVersions(mise, MISE_MINIMUM) < 0) {
+    return { result: "manual", reason: `mise there is ${mise}, and cns upgrade needs mise ${MISE_MINIMUM} or newer, the first that installs cns from ${MISE_TOOL}`, next: `There, run mise self-update (or upgrade mise the way it was installed), then run cns upgrade ${name} again.` };
+  }
+  const listed = await run("mise", ["ls", "--installed", "--json"]);
+  if (listed.code !== 0) return { result: "failed", reason: `mise ls --installed --json failed (${why(listed, "mise")})`, next: byHand };
+  const listing = parsed(listingSchema, listed.stdout);
+  if (!listing) return { result: "failed", reason: "cns cannot read what mise ls --installed --json printed there", next: byHand };
+  const tools = miseToolsHolding(listing, executable, platform);
+  if (!tools.length) return { result: "manual", reason: `cns cannot tell how cns was installed there: its daemon runs ${printable(executable)}, which no tool that mise lists there holds`, next: install };
+  if (tools.length > 1) return { result: "manual", reason: `its daemon runs ${printable(executable)}, which mise there lists under several tools: ${tools.map(printable).join(", ")}`, next: byHand };
+  const tool = toolName(tools[0]!);
+  if (!tool) return { result: "failed", reason: `mise there names the tool that installed cns ${printable(tools[0]!)}, which cns does not put on a command line`, next: byHand };
+  // Through a tool alias, as mise reads its config there: [tool_alias], or [alias] before it.
+  const described = await run("mise", ["tool", word(tool), "--json"], MISE_MS);
+  if (described.code !== 0) return { result: "failed", reason: `mise tool ${tool} --json failed (${why(described, "mise")})`, next: byHand };
+  const backend = parsed(toolSchema, described.stdout)?.backend;
+  if (!backend) return { result: "failed", reason: `cns cannot read what mise tool ${tool} --json printed there`, next: byHand };
+  // GitHub does not tell owners or repositories apart by case.
+  if (backend.toLowerCase() !== MISE_TOOL) {
+    return { result: "manual", reason: `the mise tool ${tool} that installed its cns comes from ${printable(backend)}, not from ${MISE_TOOL}`, next: `There, point ${tool} at ${MISE_TOOL} in mise's config ([tool_alias]) and run cns upgrade ${name} again, or install cns ${target} yourself, ${RESTART_THERE}.` };
+  }
+  return { tool };
+}
+
 /**
  * Upgrade cns on one paired device to `target`, a releaseVersion. Reading what the device runs
  * changes nothing there, so --dry-run does that much. Only a cns that mise installed is upgraded,
- * with the exact version, which mise installs even while it holds back a new release as latest.
+ * with the exact version, which mise installs even while it holds back a new release as latest,
+ * and by the name mise's config gives it, so that a tool alias moves to that version.
  */
 export async function upgradeDevice(name: string, target: string, reach: Reach, options: UpgradeOptions = {}): Promise<Outcome> {
   let device: Device;
@@ -170,25 +268,24 @@ export async function upgradeDevice(name: string, target: string, reach: Reach, 
     // The daemon is what other devices use, whatever cns comes first on PATH there.
     if (from !== undefined && compareVersions(from, target) >= 0) return { device: name, result: "current", version: from };
     const word = (value: string) => shellWord(value, device.shell);
-    const run = (program: string, args: string[], timeoutMs = STEP_MS) => device.run(commandLine(device.shell, program, args), timeoutMs);
+    const run: Run = (program, args, timeoutMs = STEP_MS) => device.run(commandLine(device.shell, program, args), timeoutMs);
     const probe = await run("cns", ["status", "--json"]);
     const facts = probe.code === 0 ? statusFacts(probe.stdout) : undefined;
     const executable = facts?.daemon?.executable ?? undefined;
-    const how = installPath(executable);
-    if (how === "nix") return { device: name, result: "manual", reason: "Nix manages cns there", next: nixSteps(device.platform) };
-    if (how === "unknown") {
-      const runs = executable ? `its daemon runs ${printable(executable)}` : probe.code === 0 ? "cns status --json there does not say what its daemon runs" : why(probe, "cns");
+    if (installPath(executable) === "nix") return { device: name, result: "manual", reason: "Nix manages cns there", next: nixSteps(device.platform) };
+    if (!executable) {
+      const runs = probe.code === 0 ? "cns status --json there does not say what its daemon runs" : why(probe, "cns");
       return { device: name, result: "manual", reason: `cns cannot tell how cns was installed there: ${runs}`, next: `There, install cns ${target}, ${RESTART_THERE}.` };
     }
+    const found = await miseTool(name, target, device.platform, executable, run, word);
+    if (!("tool" in found)) return { device: name, ...found };
     // Restarting the daemon ends its named sessions, where an agent may be at work.
     const sessions = facts?.daemon?.sessions?.map(printable);
     if (!options.endSessions && sessions?.length !== 0) return sessionsLeft(name, sessions, from);
     const ends = `, which ends ${!sessions ? "any named sessions it holds and " : sessions.length ? `its named sessions ${sessions.join(", ")} and ` : ""}any open shells`;
-    const tool = `${MISE_TOOL}@${target}`;
+    const tool = `${found.tool}@${target}`;
     const fail = (reason: string): Outcome => ({ device: name, result: "failed", reason, next: `There, run mise use -g ${tool}, ${RESTART_THERE}.` });
     if (options.dryRun) {
-      const mise = await run("mise", ["--version"]);
-      if (mise.code !== 0) return { device: name, result: "failed", reason: `mise --version failed (${why(mise, "mise")})`, next: `There, install cns ${target}, ${RESTART_THERE}.` };
       return {
         device: name, result: "planned", from, to: target,
         steps: [`mise use -g ${tool}, which pins that version in mise's global config there`, `cns up --install from the new cns if a service runs the old one, else cns daemon restart${ends}`],
@@ -203,7 +300,7 @@ export async function upgradeDevice(name: string, target: string, reach: Reach, 
     const fresh = status.code === 0 ? statusFacts(status.stdout) : undefined;
     if (!fresh?.version) return fail(`the cns mise installed, ${printable(path)}, does not run (${why(status, path)})`);
     if (fresh.version !== target) {
-      return { device: name, result: "failed", reason: `the cns mise gave for ${target}, ${printable(path)}, is cns ${fresh.version}`, next: `There, mise ls ${MISE_TOOL} lists what mise has; run mise install --force ${tool}, ${RESTART_THERE}.` };
+      return { device: name, result: "failed", reason: `the cns mise gave for ${target}, ${printable(path)}, is cns ${fresh.version}`, next: `There, mise ls ${found.tool} lists what mise has; run mise install --force ${tool}, ${RESTART_THERE}.` };
     }
     // Sessions started while mise worked: this daemon names its sessions, as the first look showed.
     const current = fresh.daemon?.sessions?.map(printable);
