@@ -241,8 +241,10 @@ async function miseTool(name: string, target: string, platform: NodeJS.Platform,
     const backend = parsed(toolSchema, described.stdout)?.backend;
     return backend ? { backend } : { result: "failed", reason: `cns cannot read what mise tool ${named} --json printed there`, next: byHand };
   };
+  // Options that an alias gives, such as [bin=cns], do not change where cns comes from; api_url does: another server.
+  const repository = (backend: string) => backend.replace(/\[[^\]]*\]$/, "");
   // GitHub does not tell owners or repositories apart by case.
-  const ours = (backend: string) => backend.toLowerCase() === MISE_TOOL;
+  const ours = (backend: string) => (/\[[^\]]*api_url[^\]]*\]$/i.test(backend) ? backend : repository(backend)).toLowerCase() === MISE_TOOL;
   const holder = await backendOf(tool);
   if (!("backend" in holder)) return holder;
   // No config there asks for the tool that installed the daemon's cns, as after a move to a tool
@@ -259,10 +261,14 @@ async function miseTool(name: string, target: string, platform: NodeJS.Platform,
       if (ours(configured.backend)) return { tool: other };
     }
   }
-  if (!ours(holder.backend)) {
-    return { result: "manual", reason: `the mise tool ${tool} that installed its cns comes from ${printable(holder.backend)}, not from ${MISE_TOOL}`, next: `There, point ${tool} at ${MISE_TOOL} in mise's config ([tool_alias]) and run cns upgrade ${name} again, or install cns ${target} yourself, ${RESTART_THERE}.` };
-  }
-  return { tool };
+  if (ours(holder.backend)) return { tool };
+  // Another tool, such as the node that runs the Pi package's cns.js: nothing to point anywhere.
+  if (!/\/capnshell$/i.test(repository(holder.backend))) return { result: "manual", reason: `cns cannot tell how cns was installed there: its daemon runs ${printable(executable)}, inside mise's tool ${tool}`, next: install };
+  const reason = `the mise tool ${tool} that installed its cns comes from ${printable(holder.backend)}, not from ${MISE_TOOL}`;
+  // A tool alias names it without a backend; ubi:thehumanworks/capnshell and the like are tools of their own.
+  return tool.includes(":")
+    ? { result: "manual", reason, next: `There, run mise use -g ${MISE_TOOL}@${target}, remove ${tool} from mise's config, ${RESTART_THERE}.` }
+    : { result: "manual", reason, next: `There, point ${tool} at ${MISE_TOOL} in mise's config ([tool_alias]) and run cns upgrade ${name} again, or install cns ${target} yourself, ${RESTART_THERE}.` };
 }
 
 /**

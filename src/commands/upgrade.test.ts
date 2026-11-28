@@ -221,14 +221,32 @@ test("a cns that mise installed under a tool alias is upgraded by the alias, whi
 });
 
 test("a tool that mise installs from elsewhere is left as it is, with what to run there", async () => {
-  for (const [tool, backend] of [["cns", "github:someone-else/capnshell"], ["cns", "github:thehumanworks/capnshell-fork"], ["ubi:thehumanworks/capnshell", "ubi:thehumanworks/capnshell"]]) {
-    const other = device({ tool, backend });
+  const restart = "then restart its daemon on it (cns status there says how).";
+  const from = (tool: string, backend: string) => `studio: needs a manual step: the mise tool ${tool} that installed its cns comes from ${backend}, not from github:thehumanworks/capnshell. `;
+  for (const [tool, backend, line] of [
+    // A tool alias for another capnshell: point it at this one.
+    ["cns", "github:someone-else/capnshell", `${from("cns", "github:someone-else/capnshell")}There, point cns at github:thehumanworks/capnshell in mise's config ([tool_alias]) and run cns upgrade studio again, or install cns 2.9.0 yourself, ${restart}`],
+    ["cns", "ubi:thehumanworks/capnshell[exe=cns]", `${from("cns", "ubi:thehumanworks/capnshell[exe=cns]")}There, point cns at github:thehumanworks/capnshell in mise's config ([tool_alias]) and run cns upgrade studio again, or install cns 2.9.0 yourself, ${restart}`],
+    // An alias with an api_url gets its releases from another server.
+    ["cns", "github:thehumanworks/capnshell[api_url=https://forge.example/api/v3]", `${from("cns", "github:thehumanworks/capnshell[api_url=https://forge.example/api/v3]")}There, point cns at github:thehumanworks/capnshell in mise's config ([tool_alias]) and run cns upgrade studio again, or install cns 2.9.0 yourself, ${restart}`],
+    // capnshell as a tool of another backend: install it from this one, and drop that one.
+    ["ubi:thehumanworks/capnshell", "ubi:thehumanworks/capnshell", `${from("ubi:thehumanworks/capnshell", "ubi:thehumanworks/capnshell")}There, run mise use -g github:thehumanworks/capnshell@2.9.0, remove ubi:thehumanworks/capnshell from mise's config, ${restart}`],
+    ["github:someone-else/capnshell", "github:someone-else/capnshell", `${from("github:someone-else/capnshell", "github:someone-else/capnshell")}There, run mise use -g github:thehumanworks/capnshell@2.9.0, remove github:someone-else/capnshell from mise's config, ${restart}`],
+    // Not a capnshell at all: the Pi package's cns.js under mise's node, or an alias for another program.
+    ["node", "core:node", `studio: needs a manual step: cns cannot tell how cns was installed there: its daemon runs /home/a/.local/share/mise/installs/node/2.7.0/lib/node_modules/pi-cns/cns.js, inside mise's tool node. There, install cns 2.9.0, ${restart}`],
+    ["cns", "github:thehumanworks/capnshell-fork", `studio: needs a manual step: cns cannot tell how cns was installed there: its daemon runs /home/a/.local/share/mise/installs/cns/2.7.0/cns, inside mise's tool cns. There, install cns 2.9.0, ${restart}`],
+  ]) {
+    const executable = tool === "node" ? "/home/a/.local/share/mise/installs/node/2.7.0/lib/node_modules/pi-cns/cns.js" : undefined;
+    const other = device({ tool, backend, ...executable ? { executable } : {} });
     const outcome = await upgradeDevice("studio", "2.9.0", other.reach, quick);
-    assert.equal(reportLine(outcome), `studio: needs a manual step: the mise tool ${tool} that installed its cns comes from ${backend}, not from github:thehumanworks/capnshell. ` +
-      `There, point ${tool} at github:thehumanworks/capnshell in mise's config ([tool_alias]) and run cns upgrade studio again, or install cns 2.9.0 yourself, then restart its daemon on it (cns status there says how).`);
+    assert.equal(reportLine(outcome), line);
     assert.equal(upgradeExitCode([outcome]), 4);
     assert.deepEqual(other.state.commands, asks(tool), "nothing changes there");
   }
+  // Options an alias gives do not change where cns comes from.
+  const options = device({ tool: "cns", backend: "github:thehumanworks/capnshell[bin=cns]" });
+  assert.equal(reportLine(await upgradeDevice("studio", "2.9.0", options.reach, quick)), "studio: upgraded from 2.7.0 to 2.9.0");
+  assert.equal(options.state.commands[4], "mise use -g 'cns@2.9.0'");
 });
 
 test("mise output cns cannot read stops the device before anything changes there", async () => {
@@ -351,8 +369,8 @@ test("the report's lines carry no control, format or separator characters a devi
   const sneaky = device({ executable: "/usr/local/bin/cns\u202e\u2028\u200b\u0007x" });
   assert.equal(reportLine(await upgradeDevice("box", "2.9.0", sneaky.reach, quick)),
     "box: needs a manual step: cns cannot tell how cns was installed there: its daemon runs /usr/local/bin/cns????x, which no tool that mise lists there holds. There, install cns 2.9.0, then restart its daemon on it (cns status there says how).");
-  const backend = device({ tool: "cns", backend: "github:evil/\u202ecns\u2066\u0007" });
-  assert.match(reportLine(await upgradeDevice("box", "2.9.0", backend.reach, quick)), /comes from github:evil\/\?cns\?\?, not from /);
+  const backend = device({ tool: "cns", backend: "github:\u202eevil\u2066\u0007/capnshell" });
+  assert.match(reportLine(await upgradeDevice("box", "2.9.0", backend.reach, quick)), /comes from github:\?evil\?\?\/capnshell, not from /);
 });
 
 test("--all leaves out the cns gateway, with a line for it, and names the mesh each device came from", () => {
