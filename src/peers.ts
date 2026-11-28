@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { createPeerFile, peerFile, peerNames, readPeerFile, rewritePeerFile, validatePeerUrl } from "./peer-files.js";
+import { createPeerFile, peerFile, peerNames, readPeerFile, revokedFiles, rewritePeerFile, validatePeerUrl } from "./peer-files.js";
 import { isIP } from "node:net";
 import { errorMessage } from "./errors.js";
 import { fingerprint, type PublicKey } from "./identity.js";
@@ -218,6 +218,26 @@ export function getPeer(name: string): PeerEntry | undefined {
   return content === undefined ? undefined : entryFor(name, content);
 }
 
+/** The key the file saved as `name` names, also when this cns cannot use the record; undefined when it names none. */
+export function savedKey(name: string): PublicKey | undefined {
+  try { return getPeer(name)?.publicKey; } catch (error) { return error instanceof UnreadablePeer ? error.publicKey : undefined; }
+}
+
+/**
+ * Keep a removed device out (docs/adr/0010-removing-a-lost-device.md): no mesh gives the device
+ * with fingerprint `fp` a record here again (planMesh), until this device pairs with it directly
+ * (savePairedPeer). A fingerprint, so that a device never seen here can be kept out too.
+ */
+export function revokeDevice(fp: string, publicKey?: PublicKey): void {
+  try { revokedFiles.create(fp, JSON.stringify({ version: 1, ...publicKey ? { publicKey } : {}, revokedAt: new Date().toISOString() }) + "\n"); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+}
+
+/** The fingerprints of the devices removed here (revokeDevice). */
+export function revokedDevices(): Set<string> {
+  return new Set(revokedFiles.names());
+}
+
 /** The paired device with this key, under whatever alias it was saved. */
 export function findPairedPeer(publicKey: PublicKey): PeerEntry | undefined {
   // Called for every connection: bad files are reported by listings, not here.
@@ -232,6 +252,9 @@ export function savePairedPeer(name: string, peer: Omit<PairedPeer, "version">):
   if (existing) throw new Error(`This device is already paired as ${existing.name}.`);
   const record: PairedPeer = pairedPeerSchema.parse({ version: 2, ...peer });
   createPeerFile(name, recordText(record));
+  // Pairing with a removed device again is the way back for it (revokeDevice); a mesh's record is not.
+  const fp = fingerprint(record.publicKey);
+  if (record.mesh === undefined && revokedFiles.exists(fp)) revokedFiles.remove(fp);
 }
 
 /** Change a paired device's record, for example its grants or addresses. Fields this cns does not know stay as they were. */

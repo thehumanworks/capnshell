@@ -6,6 +6,7 @@ import test from "node:test";
 import { makePrivateDirectory } from "./config.js";
 import { generateIdentity, type Identity } from "./identity.js";
 import { firstList, nextList, signList, type MemberList, type MeshState } from "./mesh.js";
+import { revokeDevice } from "./peers.js";
 import { heldSecrets, keepSecret, openSecret, pruneSecrets, sealSecret, secretsFor, takeSecrets, type SecretCopy } from "./secrets.js";
 import { secureReady } from "./secure.js";
 
@@ -91,6 +92,16 @@ test("a mesh's gateway is offered no secret, and none it offers or is named for 
   assert.deepEqual(on(studio, () => takeSecrets(gateway.publicKey, studio, states, fromGateway)), []);
   on(laptop, () => keepSecret(sealSecret(laptop, fields("FOR_GATEWAY", 1, gateway), value("y"))));
   assert.deepEqual(on(laptop, () => heldSecrets(laptop.publicKey, states).map(({ record }) => record.name)), ["API_KEY"]);
+});
+
+test("a device removed here is offered no secret, even one its mesh lets it read", async (t) => {
+  const on = await devices(t);
+  const states = [home()];
+  on(laptop, () => keepSecret(sealSecret(laptop, fields("API_KEY", 1), value("one"))));
+  assert.equal(on(laptop, () => secretsFor(studio.publicKey, laptop, states)).length, 1);
+  on(laptop, () => revokeDevice(studio.fingerprint, studio.publicKey));
+  assert.deepEqual(on(laptop, () => secretsFor(studio.publicKey, laptop, states)), []);
+  assert.equal(on(laptop, () => secretsFor(admin.publicKey, laptop, states)).length, 1, "the others still get it");
 });
 
 test("a member keeps only what its owner signed, with a key that opens it", async (t) => {

@@ -145,6 +145,14 @@ again to approve them. `--tools read` includes the skill tools. Other commands:
 
 All take `--json`, and `--url` or `CNS_GATEWAY` to name another gateway.
 
+For a lost or stolen device, `cns peer remove NAME --everywhere` on an owner, with `CNS_GATEWAY`
+set to the gateway's address, forgets it here as `cns gateway remove` does, along with its
+pairings and meshes elsewhere; without `CNS_GATEWAY` it asks no gateway, and says to run
+`cns gateway status`, then `cns gateway remove NAME`. If the device was an
+owner, it can still approve connectors until its key is out of `OWNER_KEYS`: put the list
+without it with `npx wrangler secret put OWNER_KEYS`, then list connectors with
+`cns gateway grants` and stop any it approved with `cns gateway revoke ID`.
+
 ## Notes
 
 - cns's encryption uses libsodium.js, which compiles WebAssembly at run time, and Workers

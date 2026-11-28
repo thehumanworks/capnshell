@@ -16,7 +16,7 @@ import { endpointUrl } from "../options.js";
 import { decisionSchema, decodeInvite, DEFAULT_INVITE_MS, INVITE_PREFIX, MAX_INVITE_MS, suggestedName, type Decision, type Invite, type PairingApi, type Proposal } from "../pairing.js";
 import { hostCode, inviteForCode, isPairingCode, MAX_WRONG_CODES, PairingCodeError, parseCode, type HostedCode } from "../pairing-code.js";
 import { peerFileExists, peerNamePattern, removePeerFile, validatePeerUrl } from "../peer-files.js";
-import { describeGrants, expandGrants, findPairedPeer, getPeer, listPeers, savePairedPeer, updatePairedPeer, PERMISSIONS, type Permission } from "../peers.js";
+import { describeGrants, expandGrants, findPairedPeer, getPeer, listPeers, savedKey, savePairedPeer, updatePairedPeer, PERMISSIONS, type Permission } from "../peers.js";
 import { plain } from "../terminal.js";
 import { selfCheck, type SelfFacts } from "../self-check.js";
 import type { ShellApi } from "../shell.js";
@@ -879,23 +879,16 @@ export async function address(name: string, urls: string[], options: { remove?: 
   console.log(updated.addresses.length ? `${name} is dialed at: ${updated.addresses.join(", ")}.` : `${name} has no saved address.`);
 }
 
-/** `cns peer remove NAME`: unpair a device here; the running daemon drops its links at once. */
-export async function removePeer(name: string, options: { state?: string }, expectedKey?: string): Promise<void> {
-  let publicKey: string | undefined;
-  let mesh: string | undefined;
-  try { ({ publicKey, mesh } = getPeer(name) ?? {}); }
-  catch { /* An explicit peer remove can forget an unreadable record. */ }
-  // A mesh removal selected a member by key. Never unpair a different device now using its alias.
-  if (expectedKey !== undefined && publicKey !== expectedKey) throw new Error(`The pairing for ${name} changed; it was not removed. Check cns peer list.`);
-  if (mesh !== undefined) notMeshMember(name, `It goes when the mesh's admin removes it, or when this device leaves the mesh: cns mesh leave ${mesh}.`);
+/**
+ * Forget the device saved as `name`, which must still name the key `publicKey`, and have the
+ * running daemon end its links at once. `cns peer remove` (remove-everywhere.ts) calls it.
+ */
+export async function unpair(name: string, publicKey: string, state?: string): Promise<void> {
+  // Found by key, then removed by name: never a different device now saved under that name.
+  if (savedKey(name) !== publicKey) throw new Error(`The pairing for ${name} changed; it was not removed. Check cns peer list.`);
   removePeerFile(name);
-  if (publicKey) {
-    const control = await daemonIfRunning(options.state);
-    if (control) {
-      try { await control.remote.forget(publicKey); } finally { control.close(); }
-    }
-  }
-  console.log(`Removed ${name}.`);
+  const control = await daemonIfRunning(state);
+  if (control) { try { await control.remote.forget(publicKey); } finally { control.close(); } }
 }
 
 /** `cns peers`: every paired device with its status. */

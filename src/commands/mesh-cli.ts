@@ -11,7 +11,6 @@ import { describeGrants, expandGrants, getPeer, listPeers, resolvePeer, savePair
 import { heldSecrets } from "../secrets.js";
 import { connectDevice } from "./connect-device.js";
 import { connectControl } from "./daemon.js";
-import { removePeer } from "./pairing-cli.js";
 
 interface StateOption { state?: string }
 
@@ -51,7 +50,7 @@ function checkRoom(name: string): void {
  * line and offers linked devices the new lists. With no daemon, bring the records in line
  * here; the daemon offers the lists when it starts. Says whether a daemon took the change.
  */
-async function settle(options: StateOption, self: PublicKey): Promise<boolean> {
+export async function settle(options: StateOption, self: PublicKey): Promise<boolean> {
   let control: Awaited<ReturnType<typeof connectControl>>;
   try { control = await connectControl(options.state); }
   catch { applyMeshes(self); return false; }
@@ -245,7 +244,8 @@ export async function removeMembers(name: string, devices: string[], options: St
   const live = await settle(options, identity.publicKey);
   console.log(`Removed ${devices.join(", ")} from the mesh ${name} (version ${list.version}). The other members drop ${keys.length === 1 ? "it" : "them"} when they get this list.`);
   for (const peer of paired) {
-    if (options.unpair) await removePeer(peer.name, options, peer.publicKey);
+    // Imported here: remove-everywhere.ts uses this module's settle.
+    if (options.unpair) await (await import("./remove-everywhere.js")).removePeer(peer.name, options, peer.publicKey);
     else console.log(`Still paired with this device: ${peer.name}. To unpair: cns peer remove ${peer.name}.`);
   }
   if (!live) console.log("Start this device's daemon so members get the new list: cns up.");

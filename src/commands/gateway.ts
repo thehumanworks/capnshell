@@ -1,4 +1,5 @@
 import readline from "node:readline";
+import { errorMessage } from "../errors.js";
 import { describeGrants, expandGrants } from "../peers.js";
 import { loadIdentity } from "../identity.js";
 import { INVITE_PREFIX } from "../pairing.js";
@@ -29,25 +30,30 @@ function gatewayUrl(options: GatewayOptions): string {
   return url.origin;
 }
 
+/** A request the gateway refused, with its HTTP status (401 when this device is not one of its owners), or no answer at all. */
+class GatewayError extends Error {
+  constructor(message: string, readonly status?: number, options?: ErrorOptions) { super(message, options); }
+}
+
 /** One signed owner request; returns the gateway's answer or throws its error. */
-async function call<T>(options: GatewayOptions, action: string, input: Record<string, unknown> = {}): Promise<T> {
+async function call<T>(options: GatewayOptions, action: string, input: Record<string, unknown> = {}, signal?: AbortSignal): Promise<T> {
   const identity = loadIdentity();
   if (!identity) throw new Error("This device has no identity yet; run cns identity, then add its public key to the gateway's OWNER_KEYS.");
   const url = `${gatewayUrl(options)}/admin/${action}`;
   const body = new TextEncoder().encode(JSON.stringify(input));
   let response: Response;
+  let text: string;
   try {
-    response = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", [OWNER_HEADER]: ownerProof(identity, "POST", url, body) }, body });
+    response = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", [OWNER_HEADER]: ownerProof(identity, "POST", url, body) }, body, signal });
+    text = await response.text();
   } catch (error) {
-    throw new Error(`Cannot reach the gateway at ${gatewayUrl(options)}: ${(error as Error).message}`, { cause: error });
+    throw new GatewayError(`Cannot reach the gateway at ${gatewayUrl(options)}: ${(error as Error).message}`, undefined, { cause: error });
   }
-  const text = await response.text();
   let answer: unknown;
   try { answer = JSON.parse(text); } catch { throw new Error(`The gateway answered ${response.status}: ${text.slice(0, 200)}`); }
   if (!response.ok) {
     const message = (answer as { error?: string }).error ?? `The gateway answered ${response.status}.`;
-    if (response.status === 401) throw new Error(`${message} This device's public key is ${identity.publicKey}.`);
-    throw new Error(message);
+    throw new GatewayError(response.status === 401 ? `${message} This device's public key is ${identity.publicKey}.` : message, response.status);
   }
   return answer as T;
 }
@@ -142,6 +148,46 @@ export async function remove(name: string, options: GatewayOptions): Promise<voi
   const answer = await call<{ removed: boolean }>(options, "remove", { name });
   if (!answer.removed) throw new Error(`The gateway has no device named ${name}.`);
   print(options, answer, () => `The gateway forgot ${name}; no connector reaches it now. To end the pairing on ${name} too, run there: cns peer remove gateway`);
+}
+
+/** What became of a lost device at the gateway; `fingerprint` is the gateway's own, when it answered. */
+export interface GatewayForget {
+  outcome: "removed" | "would remove" | "already gone" | "not permitted" | "not used" | "unreachable" | "failed";
+  detail: string;
+  next?: string;
+  fingerprint?: string;
+}
+
+/**
+ * For `cns peer remove --everywhere`: make the gateway forget the device with fingerprint `fp`, as
+ * `cns gateway remove` does, so no connector reaches it. Only a gateway CNS_GATEWAY names is asked,
+ * so a device that uses none sends nothing anywhere. Only an owner's request is taken: the gateway
+ * checks this device's signature against its OWNER_KEYS, as for every owner command.
+ */
+export async function forgetAtGateway(fp: string, dryRun: boolean): Promise<GatewayForget> {
+  if (!process.env.CNS_GATEWAY) return { outcome: "not used", detail: `CNS_GATEWAY is not set here, so no gateway was asked. If this device owns a gateway, run: cns gateway status, then cns gateway remove NAME (fingerprint ${fp})` };
+  const options: GatewayOptions = {};
+  const later = `Later, run: cns peer remove --fingerprint ${fp} --everywhere`;
+  // OWNER_KEYS is a Cloudflare secret, so no device changes it: said once the gateway removed the device.
+  const owners = "; if it was one of the gateway's owners too, it can still approve connectors until its key is out of OWNER_KEYS (cd gateway && npx wrangler secret put OWNER_KEYS); cns gateway grants lists the connectors, and cns gateway revoke ID stops one";
+  try {
+    const signal = AbortSignal.timeout(15_000);
+    const status = await call<GatewayStatus>(options, "status", {}, signal);
+    const url = gatewayUrl(options);
+    const device = status.devices.find((candidate) => candidate.fingerprint === fp);
+    const answer = (outcome: GatewayForget["outcome"], detail: string): GatewayForget => ({ outcome, detail, fingerprint: status.fingerprint });
+    if (!device) return answer("already gone", `${url} has no device with this fingerprint`);
+    if (dryRun) return answer("would remove", `${url} has it as ${device.name}`);
+    await call(options, "remove", { name: device.name }, signal);
+    return answer("removed", `${url} had it as ${device.name}; no connector reaches it now${owners}`);
+  } catch (error) {
+    const detail = errorMessage(error);
+    if (error instanceof GatewayError && error.status === undefined) return { outcome: "unreachable", detail, next: later };
+    if (error instanceof GatewayError && (error.status === 401 || error.status === 503)) {
+      return { outcome: "not permitted", detail, next: "Run this on one of the gateway's owners, with CNS_GATEWAY set to its address" };
+    }
+    return { outcome: "failed", detail, next: later };
+  }
 }
 
 /**

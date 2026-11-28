@@ -1,8 +1,8 @@
 import { z } from "zod";
 import { errorMessage } from "./errors.js";
-import { verify, type Identity, type PublicKey } from "./identity.js";
+import { fingerprint, verify, type Identity, type PublicKey } from "./identity.js";
 import { endedMeshFiles, meshFiles, peerNamePattern, removePeerFile, validatePeerUrl } from "./peer-files.js";
-import { expandGrants, grantsSchema, listPeers, publicKeySchema, savePairedPeer, UnreadablePeer, updatePairedPeer, type PairedPeer, type PeerEntry, type Permission } from "./peers.js";
+import { expandGrants, grantsSchema, listPeers, publicKeySchema, revokedDevices, savePairedPeer, UnreadablePeer, updatePairedPeer, type PairedPeer, type PeerEntry, type Permission } from "./peers.js";
 import { pruneSecrets } from "./secrets.js";
 
 /**
@@ -141,14 +141,15 @@ export interface SavedKey { name: string; publicKey?: PublicKey }
  * is not in the list, as after the admin removed it, every record of the mesh goes. Records
  * are between members: the admin is paired with each of them directly. `unreadable` are the
  * saved records this cns cannot read, such as a newer cns's (UnreadablePeer): their names
- * stay taken, and a member one of them names gets no record beside it.
+ * stay taken, and a member one of them names gets no record beside it. A device removed here
+ * (`revoked`, by fingerprint: revokeDevice) gets none, and loses the one it had.
  */
-export function planMesh({ self, mesh, allow, list, records, unreadable = [], now }: { self: PublicKey; mesh: string; allow: readonly Permission[]; list: MemberList; records: readonly PeerEntry[]; unreadable?: readonly SavedKey[]; now: number }): MeshPlan {
+export function planMesh({ self, mesh, allow, list, records, unreadable = [], revoked = new Set(), now }: { self: PublicKey; mesh: string; allow: readonly Permission[]; list: MemberList; records: readonly PeerEntry[]; unreadable?: readonly SavedKey[]; revoked?: ReadonlySet<string>; now: number }): MeshPlan {
   const plan: MeshPlan = { create: [], update: [], remove: [] };
   // Every member is paired with the admin directly, as it joined through that pairing, so the
   // admin keeps no records for its mesh and nobody keeps one for the admin. A device the list
   // does not hold keeps none.
-  const members = self !== list.admin && list.members.some((member) => member.key === self) ? list.members.filter((member) => member.key !== self && member.key !== list.admin) : [];
+  const members = self !== list.admin && list.members.some((member) => member.key === self) ? list.members.filter((member) => member.key !== self && member.key !== list.admin && !revoked.has(fingerprint(member.key))) : [];
   const keys = new Set(members.map((member) => member.key));
   const taken = new Set(unreadable.map((record) => record.name));
   for (const record of records) {
@@ -288,6 +289,7 @@ export function applyMeshes(self: PublicKey, now = Date.now()): MeshPlan {
   const states = listMeshes();
   const total: MeshPlan = { create: [], update: [], remove: [] };
   const kept = new Set(states.map((state) => state.name));
+  const revoked = revokedDevices();
   for (const record of listPeers(() => {})) {
     if (record.mesh === undefined || kept.has(record.mesh)) continue;
     removePeerFile(record.name);
@@ -296,7 +298,7 @@ export function applyMeshes(self: PublicKey, now = Date.now()): MeshPlan {
   for (let pass = 0; pass < 2; pass++) {
     let removed = false;
     for (const state of states) {
-      const plan = planMesh({ self, mesh: state.name, allow: state.allow, list: state.list, ...savedRecords(), now });
+      const plan = planMesh({ self, mesh: state.name, allow: state.allow, list: state.list, ...savedRecords(), revoked, now });
       for (const { name } of plan.remove) removePeerFile(name);
       for (const { name, incoming } of plan.update) updatePairedPeer(name, (peer) => ({ ...peer, grants: { ...peer.grants, incoming } }));
       for (const { name, record } of plan.create) savePairedPeer(name, record);

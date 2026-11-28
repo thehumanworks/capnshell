@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import sodium from "libsodium-wrappers-sumo";
 import { z } from "zod";
-import { publicKeyBytes, verify, withSeed, type Identity, type PublicKey } from "./identity.js";
+import { fingerprint, publicKeyBytes, verify, withSeed, type Identity, type PublicKey } from "./identity.js";
 import type { MeshState } from "./mesh.js";
 import { peerNamePattern, secretFiles } from "./peer-files.js";
-import { publicKeySchema } from "./peers.js";
+import { publicKeySchema, revokedDevices } from "./peers.js";
 
 /**
  * Secrets shared in a mesh (docs/adr/0007-mesh-secrets.md).
@@ -190,7 +190,8 @@ export function pruneSecrets(self: PublicKey, states: readonly MeshState[]): num
 
 /** The records to offer `peer`: those it may read, each with its key sealed to it. */
 export function secretsFor(peer: PublicKey, identity: Identity, states: readonly MeshState[]): SecretCopy[] {
-  if (peer === identity.publicKey) return [];
+  // A device removed here has no record, so no link to ask on; and if it had, it would get nothing.
+  if (peer === identity.publicKey || revokedDevices().has(fingerprint(peer))) return [];
   const offered = heldSecrets(identity.publicKey, states).filter(({ record, state }) => mayRead(record, state, peer)).slice(0, MAX_OFFER);
   if (!offered.length) return [];
   const keys = boxKeys(identity);

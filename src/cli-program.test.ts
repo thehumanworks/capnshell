@@ -46,6 +46,13 @@ test("peer and gateway commands take the device as their argument or with --devi
   const parse = (argv: string[]) => createCli().configureOutput({ writeOut: () => {}, writeErr: () => {} }).parseAsync(argv, { from: "user" });
   await assert.rejects(parse(["peer", "remove"]), /peer remove requires a paired device's name: cns peer remove NAME, or --device DEVICE/);
   await assert.rejects(parse(["peer", "remove", "-D", "studio", "laptop"]), /peer remove takes one device/);
+  await assert.rejects(parse(["peer", "remove", "phone", "--fingerprint", "aaaa-bbbb-cccc-dddd-eeee-ffff"]), /Name the device once: cns peer remove NAME, or cns peer remove --fingerprint FINGERPRINT/);
+  // A name is never taken as a fingerprint, nor a fingerprint as a name.
+  await assert.rejects(parse(["peer", "remove", "--fingerprint", "phone", "--everywhere"]), /^Error: phone is not a fingerprint: those are six groups of four letters and digits, as cns peers shows them\.$/);
+  // The fingerprint is the only text that goes on other devices' command lines, so nothing else gets through.
+  for (const given of ["aaaa-bbbb-cccc-dddd-eeee-ffff; rm -rf ~", "aaaa-bbbb-cccc-dddd-eeee-ffff\n", "xaaaa-bbbb-cccc-dddd-eeee-ffff", "aaaa-bbbb-cccc-dddd-eeee-fff", "AAAA-BBBB-CCCC-DDDD-EEEE-FFFF", "aaaa-bbbb-cccc-dddd-eeee-$(id)", "aaaa-bbbb-cccc-dddd-eeee-ffff-gggg"]) {
+    await assert.rejects(parse(["peer", "remove", "--fingerprint", given, "--everywhere"]), / is not a fingerprint: /, JSON.stringify(given));
+  }
   await assert.rejects(parse(["peer", "address", "-D", "studio"]), /peer address requires at least one address/);
   await assert.rejects(parse(["gateway", "remove", "studio", "-D", "studio"]), /gateway remove takes one device/);
   await assert.rejects(parse(["doctor", "studio", "--device", "studio"]), /Name the device once: cns doctor studio, or cns doctor --device studio/);

@@ -118,6 +118,8 @@ export const meshFiles = privateFiles(() => path.join(configDirectory(), "meshes
 export const endedMeshFiles = privateFiles(() => path.join(configDirectory(), "meshes-ended"), "mesh");
 /** The mesh secrets this device keeps, one file per secret, named by its id (secrets.ts). */
 export const secretFiles = privateFiles(() => path.join(configDirectory(), "secrets"), "secret");
+/** The devices removed here, which no mesh gives a record, one file per fingerprint (peers.ts). */
+export const revokedFiles = privateFiles(() => path.join(configDirectory(), "revoked"), "revoked device");
 
 export function validatePeerUrl(value: string): string {
   const parsed = new URL(value);

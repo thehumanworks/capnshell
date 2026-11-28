@@ -6,7 +6,7 @@ import test, { afterEach, beforeEach } from "node:test";
 import { ensureIdentity } from "../identity.js";
 import { TOOL_NAMES } from "../mcp/server.js";
 import { CNS_VERSION } from "../version.js";
-import { approve, chooseTools, gatewayDrift, READ_TOOLS, status } from "./gateway.js";
+import { approve, chooseTools, forgetAtGateway, gatewayDrift, READ_TOOLS, status } from "./gateway.js";
 
 /** The tools a gateway deployed before the skill tools and list_secrets (2.3.0) can grant. */
 const OLD_TOOLS = ["list_peers", "run_command", "start_session", "send_keys", "read_screen", "list_sessions", "kill_session", "read_file", "write_file", "list_directory", "glob"];
@@ -121,4 +121,38 @@ test("the tools an approval names, by what the gateway lists", () => {
   assert.deepEqual(chooseTools("glob, read_file", { tools: OLD_TOOLS }), { tools: ["glob", "read_file"], dropped: [] });
   assert.equal(gatewayDrift({ version: CNS_VERSION, tools: [...TOOL_NAMES] }), undefined);
   assert.match(gatewayDrift({ version: "99.0.0", tools: [...TOOL_NAMES, "new_tool"] })!, /newer than this cns/);
+});
+
+test("a lost device the gateway cannot be asked about is reported as not used, unreachable, not permitted or failed, with what to run", async (t) => {
+  const previousGateway = process.env.CNS_GATEWAY;
+  t.after(() => { if (previousGateway === undefined) delete process.env.CNS_GATEWAY; else process.env.CNS_GATEWAY = previousGateway; });
+  const fp = "aaaa-bbbb-cccc-dddd-eeee-ffff";
+  const later = `Later, run: cns peer remove --fingerprint ${fp} --everywhere`;
+  let asked = 0;
+  const answering = (status: number, body: string) => {
+    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => { asked++; return new Response(body, { status, headers: { "Content-Type": "application/json" } }); } });
+    t.after(() => server.stop(true));
+    return `http://127.0.0.1:${server.port}`;
+  };
+  // With no CNS_GATEWAY, no gateway is asked, not even the default one.
+  delete process.env.CNS_GATEWAY;
+  assert.deepEqual(await forgetAtGateway(fp, false), { outcome: "not used", detail: `CNS_GATEWAY is not set here, so no gateway was asked. If this device owns a gateway, run: cns gateway status, then cns gateway remove NAME (fingerprint ${fp})` });
+  assert.deepEqual(await forgetAtGateway(fp, true), await forgetAtGateway(fp, false));
+  const closed = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
+  process.env.CNS_GATEWAY = `http://127.0.0.1:${closed.port}`;
+  await closed.stop(true);
+  const gone = await forgetAtGateway(fp, false);
+  assert.equal(gone.outcome, "unreachable");
+  assert.match(gone.detail, /^Cannot reach the gateway at http:\/\/127\.0\.0\.1:\d+/);
+  assert.equal(gone.next, later);
+  process.env.CNS_GATEWAY = answering(401, JSON.stringify({ error: "Device x is not an owner of this gateway." }));
+  const refused = await forgetAtGateway(fp, false);
+  assert.equal(refused.outcome, "not permitted");
+  assert.match(refused.detail, /^Device x is not an owner of this gateway\. This device's public key is \S+\.$/);
+  assert.equal(refused.next, "Run this on one of the gateway's owners, with CNS_GATEWAY set to its address");
+  process.env.CNS_GATEWAY = answering(503, JSON.stringify({ error: "This gateway has no owners yet." }));
+  assert.equal((await forgetAtGateway(fp, false)).outcome, "not permitted");
+  process.env.CNS_GATEWAY = answering(502, "<html>Bad gateway</html>");
+  assert.deepEqual(await forgetAtGateway(fp, true), { outcome: "failed", detail: "The gateway answered 502: <html>Bad gateway</html>", next: later });
+  assert.equal(asked, 3);
 });
