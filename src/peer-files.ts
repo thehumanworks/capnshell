@@ -24,11 +24,14 @@ function privateFiles(directory: () => string, what: string) {
     makePrivateDirectory(directory());
     checkDirectories();
   };
-  /** A file's contents, which must be a private regular file; undefined when there is none. */
+  /**
+   * A file's contents, which must be a private regular file; undefined when there is none. Opened
+   * without waiting, so that a FIFO saved there is refused rather than waited on.
+   */
   const read = (name: string): string | undefined => {
     const target = file(name);
     let fd: number;
-    try { checkDirectories(); fd = openSync(target, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)); }
+    try { checkDirectories(); fd = openSync(target, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0)); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
       throw error;

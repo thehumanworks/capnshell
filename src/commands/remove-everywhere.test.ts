@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, renameSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, renameSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -247,6 +248,34 @@ test("a record that is not private, or is a link, still names the device to keep
   const { out } = await quietly(() => removeCommand(undefined, { fingerprint: tablet.fingerprint, state }));
   assert.match(out, new RegExp(`^Removing tablet \\(fingerprint ${tablet.fingerprint}\\) here:\n {2}removed {8}this device: its pairing`));
   assert.ok(revoked(tablet) && !existsSync(path.join(dir, "peers", "tablet")));
+});
+
+test("a FIFO, a link to a device file or a file too large for a record in peers/ is neither waited on nor read", { skip: process.platform === "win32" }, () => {
+  pair("hub", hub);
+  const peers = path.join(dir, "peers");
+  execFileSync("mkfifo", [path.join(peers, "fifo")]);
+  symlinkSync("/dev/zero", path.join(peers, "zero"));
+  writeFileSync(path.join(peers, "huge"), JSON.stringify({ publicKey: phone.publicKey, pad: "x".repeat(70_000) }), { mode: 0o644 });
+  // In a process of its own, so that a read that waits fails the test rather than hanging it.
+  const script = `const { getPeer, listPeers, savedKey } = await import(${JSON.stringify(path.join(import.meta.dir, "..", "peers.ts"))});
+    let strict = "read"; try { getPeer("fifo"); } catch (error) { strict = error.message; }
+    console.log(JSON.stringify({ keys: ["fifo", "zero", "huge"].map((name) => savedKey(name) ?? null), strict, listed: listPeers(() => {}).map((peer) => peer.name) }));`;
+  const ran = spawnSync(process.execPath, ["-e", script], { env: { ...process.env, CNS_CONFIG_DIR: dir }, encoding: "utf8", timeout: 4_000 });
+  assert.equal(ran.signal, null, `it waited: ${ran.stderr}`);
+  const found = JSON.parse(ran.stdout) as { keys: unknown[]; strict: string; listed: string[] };
+  assert.deepEqual(found.keys, [null, null, null], "no key is read from a FIFO, a device file or 70 KB");
+  assert.match(found.strict, /^A saved peer must be a private file owned by your user: /);
+  assert.deepEqual(found.listed, ["hub"]);
+});
+
+test("a revoked directory that is not private stops a removal before anything goes, and says how to fix it", { skip: process.platform === "win32" }, async () => {
+  pair("phone", phone);
+  const revokedDir = path.join(dir, "revoked");
+  mkdirSync(revokedDir);
+  chmodSync(revokedDir, 0o755);
+  // The key goes on the list before the record goes, so a list that cannot be written leaves the record.
+  await assert.rejects(unpair("phone", phone.publicKey, state), { message: `Configuration directory must be private and owned by your user: ${revokedDir}. To make it private, run: chmod 700 '${revokedDir}'` });
+  assert.ok(getPeer("phone"));
 });
 
 test("--everywhere reports the records it cannot read, and a device paired as the gateway is, while no gateway answered", async () => {
