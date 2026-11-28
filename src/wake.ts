@@ -28,10 +28,10 @@ export function magicPacket(mac: string): Buffer {
 
 const toNumber = (ip: string) => ip.split(".").reduce((value, octet) => ((value << 8) | Number(octet)) >>> 0, 0);
 const toAddress = (value: number) => [24, 16, 8, 0].map((shift) => (value >>> shift) & 255).join(".");
-function network(cidr: string): { address: number; mask: number; prefix: number } {
+function network(cidr: string): { address: number; mask: number } {
   const [ip = "", bits = "32"] = cidr.split("/");
   const prefix = Number(bits);
-  return { address: toNumber(ip), mask: prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0, prefix };
+  return { address: toNumber(ip), mask: prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0 };
 }
 
 /** Whether the network of a card with this address and prefix, such as 192.168.1.23/24, holds the IPv4 address `ip`. */
@@ -46,32 +46,35 @@ export function broadcastAddress(cidr: string): string {
   return toAddress((address | ~mask) >>> 0);
 }
 
-/** A card's network, as people write it: 192.168.1.0/24 for 192.168.1.23/24. */
-export function networkName(cidr: string): string {
-  const { address, mask, prefix } = network(cidr);
-  return `${toAddress((address & mask) >>> 0)}/${prefix}`;
-}
-
 /** A card's own IPv4 address. */
 export const cardAddress = (card: LanCard): string => card.cidr.split("/")[0]!;
 
 /**
- * This device's cards on local networks, which it tells paired devices: each IPv4 address that is
- * not loopback, of a card with a MAC address (so not a tunnel, as for a VPN or Tailscale), on a
- * network a broadcast reaches (a prefix of 8 to 30 bits), at most 16.
+ * Whether a card is on a local network a broadcast reaches: a prefix of 8 to 30 bits, and not a
+ * link-local address (169.254.0.0/16), which a card takes when no network gave it one. Cards a
+ * paired device names are held to it too, as a cns that knows lan does not check it.
+ */
+export function usable(card: LanCard): boolean {
+  const prefix = Number(card.cidr.split("/")[1]);
+  return prefix >= 8 && prefix <= 30 && !holds("169.254.0.0/16", cardAddress(card));
+}
+
+/**
+ * This device's cards on local networks, which it tells paired devices: each usable IPv4 address
+ * that is not loopback, of a card with a MAC address (so not a tunnel, as for a VPN or Tailscale),
+ * at most 16, those a packet can wake first, so that bridges never crowd out the card that wakes.
  */
 export function lanCards(interfaces: NodeJS.Dict<os.NetworkInterfaceInfo[]> = os.networkInterfaces()): LanCard[] {
   const seen = new Set<string>();
   return Object.values(interfaces).flat().flatMap((entry) => {
     if (!entry || entry.internal || !(entry.family === "IPv4" || (entry.family as unknown) === 4) || !entry.cidr) return [];
     const mac = macAddress(entry.mac ?? "");
-    const prefix = Number(entry.cidr.split("/")[1]);
-    if (!mac || mac === "00:00:00:00:00:00" || !(prefix >= 8 && prefix <= 30)) return [];
+    if (!mac || mac === "00:00:00:00:00:00") return [];
     const card = lanSchema.element.safeParse({ mac, cidr: entry.cidr }).data;
-    if (!card || seen.has(`${card.mac} ${card.cidr}`)) return [];
+    if (!card || !usable(card) || seen.has(`${card.mac} ${card.cidr}`)) return [];
     seen.add(`${card.mac} ${card.cidr}`);
     return [card];
-  }).slice(0, 16);
+  }).sort((a, b) => Number(wakeable(b)) - Number(wakeable(a))).slice(0, 16);
 }
 
 /**
@@ -126,17 +129,18 @@ export async function sendMagicPacket(mac: string, to: readonly string[], { port
 /**
  * Send the magic packet for `mac` from this device: to the networks here that hold `near`, the
  * card's last address, or to every network here without one. Returns where it went; throws, with
- * what to do, when no network here holds `near` or nothing could be sent.
+ * what to do, when no network here holds `near` or nothing could be sent. What to do comes first:
+ * the device that asked shows only the first 200 characters.
  */
-export async function wakeHere(mac: string, near: string | undefined, cards: readonly LanCard[] = lanCards(), send: SendPacket = sendMagicPacket): Promise<string[]> {
+export async function wakeHere(mac: string, near: string | undefined, cards: readonly LanCard[] = lanCards(), send: SendPacket = sendMagicPacket, platform: NodeJS.Platform = process.platform): Promise<string[]> {
   const to = wakeTargets(cards, near);
   if (near !== undefined && to.length === 1) {
     throw new Error(`No network of this device holds ${near}, so a packet from here would not reach ${mac}: a broadcast does not cross a router. Send it from a device on that network.`);
   }
   const { sent, failed } = await send(mac, to);
   if (!sent.length) {
-    const why = failed.map(({ to, error }) => `${to}: ${error}`).join("; ");
-    throw new Error(`Could not send the magic packet for ${mac} (${why}). Check that this device is on that network; on macOS, that the app cns runs in may use the local network (System Settings > Privacy & Security > Local Network).`);
+    const hint = platform === "darwin" ? "macOS may keep cns off the local network: allow what runs it in System Settings > Privacy & Security > Local Network." : "Check that this device is on that network.";
+    throw new Error(`${hint} No packet for ${mac} went out: ${failed.map(({ to, error }) => `${to}: ${error}`).join("; ")}.`);
   }
   return sent;
 }

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import dgram from "node:dgram";
 import type os from "node:os";
 import test from "node:test";
-import { broadcastAddress, holds, lanCards, LIMITED_BROADCAST, macAddress, magicPacket, networkName, sendMagicPacket, WAKE_PORT, wakeable, wakeHere, wakeTargets, type SendPacket } from "./wake.js";
+import { broadcastAddress, holds, lanCards, macAddress, magicPacket, sendMagicPacket, usable, wakeable, wakeHere, wakeTargets, type SendPacket } from "./wake.js";
 
 const MAC = "3c:22:fb:12:34:56";
 
@@ -28,8 +28,6 @@ test("a card's network says where its broadcasts go and which addresses it holds
   assert.equal(broadcastAddress("10.1.2.3/8"), "10.255.255.255");
   assert.equal(broadcastAddress("172.20.5.9/20"), "172.20.15.255");
   assert.equal(broadcastAddress("192.168.1.5/30"), "192.168.1.7");
-  assert.equal(networkName("192.168.1.23/24"), "192.168.1.0/24");
-  assert.equal(networkName("172.20.5.9/20"), "172.20.0.0/20");
   assert.ok(holds("192.168.1.23/24", "192.168.1.200"));
   assert.ok(holds("10.1.2.3/8", "10.200.0.1"));
   assert.ok(holds("192.168.200.1/16", "192.168.1.5"));
@@ -55,6 +53,8 @@ test("a device tells its paired devices its IPv4 cards on local networks, and no
     wg0: [entry("10.8.0.2", "255.255.255.0", "10.8.0.2/24", "00:00:00:00:00:00")],
     p2p: [entry("10.9.0.0", "255.255.255.254", "10.9.0.0/31", "3c:22:fb:00:00:01")],
     odd: [entry("10.10.0.1", "255.255.255.0", null, "3c:22:fb:00:00:02")],
+    // A card no network gave an address to.
+    unset: [entry("169.254.12.34", "255.255.0.0", "169.254.12.34/16", "3c:22:fb:00:00:03")],
   });
   assert.deepEqual(cards, [
     { mac: MAC, cidr: "192.168.1.23/24" },
@@ -66,31 +66,58 @@ test("a device tells its paired devices its IPv4 cards on local networks, and no
   assert.ok(!wakeable({ mac: "00:15:5d:01:02:03", cidr: "172.23.80.5/20" }), "Hyper-V's, as WSL's own card is");
   assert.ok(!wakeable({ mac: "01:00:5e:00:00:01", cidr: "192.168.1.9/24" }), "a group address");
   assert.ok(wakeable({ mac: "b8:27:eb:01:02:03", cidr: "192.168.1.9/24" }));
+  assert.ok(!usable({ mac: MAC, cidr: "169.254.12.34/16" }));
+  assert.ok(!usable({ mac: MAC, cidr: "10.9.0.0/31" }));
+  assert.ok(!usable({ mac: MAC, cidr: "10.0.0.0/7" }));
+  assert.ok(usable({ mac: MAC, cidr: "10.0.0.1/8" }));
+});
+
+test("of more than 16 cards, those a packet wakes are kept, so bridges never crowd out the one that wakes", () => {
+  const bridges = Object.fromEntries(Array.from({ length: 20 }, (_, index) => [`br-${index}`, [entry(`172.${18 + index}.0.1`, "255.255.0.0", `172.${18 + index}.0.1/16`, `02:42:00:00:00:${(index + 16).toString(16)}`)]]));
+  const cards = lanCards({ ...bridges, enp3s0: [entry("192.168.1.23", "255.255.255.0", "192.168.1.23/24", MAC)] });
+  assert.equal(cards.length, 16);
+  assert.deepEqual(cards[0], { mac: MAC, cidr: "192.168.1.23/24" });
+  assert.equal(cards[1]!.cidr, "172.18.0.1/16", "the others keep their order");
 });
 
 test("a packet goes to the broadcast address of the network that holds the card, then to 255.255.255.255", () => {
   const here = [{ mac: "a6:0b:11:22:33:44", cidr: "192.168.1.24/24" }, { mac: "02:42:ac:11:00:01", cidr: "172.17.0.1/16" }, { mac: MAC, cidr: "192.168.1.25/24" }];
-  assert.equal(LIMITED_BROADCAST, "255.255.255.255");
   assert.deepEqual(wakeTargets(here, "192.168.1.23"), ["192.168.1.255", "255.255.255.255"]);
   assert.deepEqual(wakeTargets(here), ["192.168.1.255", "172.17.255.255", "255.255.255.255"]);
   assert.deepEqual(wakeTargets(here, "10.0.0.5"), ["255.255.255.255"]);
 });
 
-test("the packet goes out in UDP datagrams to port 9, a few times over", async (t) => {
-  assert.equal(WAKE_PORT, 9);
-  // A listener on loopback stands in for the network: the same socket calls, at another port.
+/** A UDP listener on loopback, which stands in for the network: the same socket calls reach it. */
+async function listen(t: test.TestContext, port: number): Promise<{ port: number; received: Buffer[] } | undefined> {
   const listener = dgram.createSocket("udp4");
-  t.after(() => listener.close());
   const received: Buffer[] = [];
   listener.on("message", (message) => received.push(message));
-  await new Promise<void>((resolve) => listener.bind(0, "127.0.0.1", resolve));
-  const { port } = listener.address();
-  const result = await sendMagicPacket(MAC, ["127.0.0.1"], { port, rounds: 3, gapMs: 10 });
-  assert.deepEqual(result, { sent: ["127.0.0.1"], failed: [] });
+  try { await new Promise<void>((resolve, reject) => { listener.once("error", reject); listener.bind(port, "127.0.0.1", resolve); }); }
+  catch { listener.close(); return undefined; }
+  t.after(() => listener.close());
+  return { port: listener.address().port, received };
+}
+
+async function arrived(received: Buffer[], count: number) {
   const until = Date.now() + 5000;
-  while (received.length < 3 && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(received.length, 3);
+  while (received.length < count && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(received.length, count);
   for (const message of received) assert.deepEqual(message, magicPacket(MAC));
+}
+
+test("the packet goes out in UDP datagrams, a few times over", async (t) => {
+  const listener = (await listen(t, 0))!;
+  const result = await sendMagicPacket(MAC, ["127.0.0.1"], { port: listener.port, rounds: 3, gapMs: 10 });
+  assert.deepEqual(result, { sent: ["127.0.0.1"], failed: [] });
+  await arrived(listener.received, 3);
+});
+
+test("the packet goes to UDP port 9 unless told otherwise", async (t) => {
+  // Port 9 is below 1024, which only root may listen on in Linux; macOS and Windows let anyone.
+  const listener = await listen(t, 9);
+  if (!listener) { t.skip("cannot listen on UDP port 9 here"); return; }
+  await sendMagicPacket(MAC, ["127.0.0.1"], { gapMs: 10 });
+  await arrived(listener.received, 3);
 });
 
 test("this device sends only to a network that holds the card, and says what to check when nothing goes out", async () => {
@@ -102,5 +129,8 @@ test("this device sends only to a network that holds the card, and says what to 
   await assert.rejects(wakeHere(MAC, "10.0.0.5", here, send), /^Error: No network of this device holds 10\.0\.0\.5, so a packet from here would not reach 3c:22:fb:12:34:56: a broadcast does not cross a router\. Send it from a device on that network\.$/);
   assert.equal(sent.length, 1, "nothing was sent for it");
   const refused: SendPacket = async (_mac, to) => ({ sent: [], failed: to.map((address) => ({ to: address, error: "send EHOSTUNREACH" })) });
-  await assert.rejects(wakeHere(MAC, "192.168.1.23", here, refused), /Could not send the magic packet for 3c:22:fb:12:34:56 \(192\.168\.1\.255: send EHOSTUNREACH; 255\.255\.255\.255: send EHOSTUNREACH\)\. Check that this device is on that network; on macOS/);
+  await assert.rejects(wakeHere(MAC, "192.168.1.23", here, refused, "linux"),
+    /^Error: Check that this device is on that network\. No packet for 3c:22:fb:12:34:56 went out: 192\.168\.1\.255: send EHOSTUNREACH; 255\.255\.255\.255: send EHOSTUNREACH\.$/);
+  await assert.rejects(wakeHere(MAC, "192.168.1.23", here, refused, "darwin"),
+    /^Error: macOS may keep cns off the local network: allow what runs it in System Settings > Privacy & Security > Local Network\. No packet for 3c:22:fb:12:34:56 went out/);
 });
