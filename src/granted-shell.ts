@@ -1,7 +1,10 @@
 import { RpcTarget } from "capnweb";
 import { z } from "zod";
+import type { AuditEntry, AuditLog } from "./audit.js";
+import { errorMessage } from "./errors.js";
 import { describeGrants, type Permission } from "./peers.js";
 import { envSchema, MAX_ENV_VARIABLES } from "./platform.js";
+import { programExited } from "./pty.js";
 import {
   ShellApi, type AttachOptions, type CaptureOptions, type KeysOptions, type NamedPty, type PtyAttachment, type PtySessionOptions, type PtySink,
   type RunOptions, type ShellInfo, type WaitOptions,
@@ -28,6 +31,52 @@ const secretNamesSchema = z.array(z.string().min(1).max(256)).min(1).max(MAX_ENV
 /** Options that may name secrets, which this device turns into variables before the program starts. */
 export type WithSecrets<T> = T & { secrets?: string[] };
 
+/** Writes an entry to the audit log; the shell adds who made it. */
+type Recorder = (entry: Omit<AuditEntry, "peer" | "fingerprint">) => void;
+/** How many files being read or written in parts a shell remembers, so that each is one entry (#part). */
+const MAX_PARTS = 64;
+
+/** A value a peer sent, as the audit log keeps it. */
+const text = (value: unknown) => typeof value === "string" ? value : "(invalid)";
+/**
+ * What the audit log keeps of a program's options: where it ran, the program a session runs and
+ * the secrets it got here, by name. Never its variables, which can hold the caller's secrets.
+ */
+function program(options: unknown): Partial<AuditEntry> {
+  if (!options || typeof options !== "object") return {};
+  const { cwd, command, secrets } = options as { cwd?: unknown; command?: unknown; secrets?: unknown };
+  const names = secretNamesSchema.safeParse(secrets);
+  return { ...typeof cwd === "string" ? { cwd } : {}, ...typeof command === "string" ? { command } : {}, ...names.success ? { secrets: names.data } : {} };
+}
+/** How a command or a program ended, for its entry. */
+const ended = (exit: { exitCode: number | null; signal: string | null; timedOut: boolean }): Partial<AuditEntry> => ({
+  end: new Date().toISOString(), exitCode: exit.exitCode, ...exit.signal ? { signal: exit.signal } : {}, ...exit.timedOut ? { timedOut: true } : {},
+});
+
+/**
+ * Do `call` and record `entry` once it has settled, with what `after` says of its result, or with
+ * why it failed; `quiet` records only a failure. A call that throws at once still throws at once,
+ * and recording never fails a call.
+ */
+function audited<T>(record: Recorder, entry: Pick<AuditEntry, "action" | "target"> & Partial<AuditEntry>, call: () => T,
+  after: (result: Awaited<T>) => Partial<AuditEntry> | Promise<Partial<AuditEntry>> = () => ({}), quiet = false): T {
+  const start = new Date().toISOString();
+  const failed = (error: unknown) => record({ start, ...entry, error: errorMessage(error) });
+  const settled = (result: Awaited<T>) => {
+    if (quiet) return;
+    try {
+      const more = after(result);
+      if (more instanceof Promise) void more.then((more) => record({ start, ...entry, ...more }), () => {});
+      else record({ start, ...entry, ...more });
+    } catch { /* The call worked; only its entry is lost. */ }
+  };
+  let result: T;
+  try { result = call(); }
+  catch (error) { failed(error); throw error; }
+  if (!(result instanceof Promise)) { settled(result as Awaited<T>); return result; }
+  return result.then((value: Awaited<T>) => { settled(value); return value; }, (error: unknown) => { failed(error); throw error; }) as T;
+}
+
 /**
  * A peer's view of this device's shell, limited to what this device granted it.
  * Permitted methods delegate to the real ShellApi; every other method, including
@@ -50,14 +99,18 @@ export class GrantedShell extends RpcTarget {
   #meshes: (offered: unknown) => unknown[];
   #secrets: (offered: unknown) => unknown[];
   #secretsHere: SecretsHere;
+  #audit: AuditLog;
+  /** Where each file read or written in parts here goes on next, by action and path (#part). */
+  #parts = new Map<string, number>();
   /**
    * `owner` is the peer's fingerprint, the owner of the sessions it starts here.
    * `addresses` says where this device can be reached now, which any paired device may ask.
    * `meshes` takes the mesh member lists the peer offers and answers with the ones it is in (mesh.ts).
    * `secrets` takes the mesh secrets the peer offers and answers with the ones it may read (secrets.ts).
    * `secretsHere` opens the ones this device reads for the programs the peer starts here.
+   * `audit` takes an entry for each command, terminal, session, file and skill file the peer uses (audit.ts).
    */
-  constructor(shell: ShellApi, grants: readonly Permission[] | GrantHolder, peer: string, owner: string | null = null, addresses: () => string[] = () => [], meshes: (offered: unknown) => unknown[] = () => [], secrets: (offered: unknown) => unknown[] = () => [], secretsHere: SecretsHere = noSecrets) {
+  constructor(shell: ShellApi, grants: readonly Permission[] | GrantHolder, peer: string, owner: string | null = null, addresses: () => string[] = () => [], meshes: (offered: unknown) => unknown[] = () => [], secrets: (offered: unknown) => unknown[] = () => [], secretsHere: SecretsHere = noSecrets, audit: AuditLog = () => {}) {
     super();
     this.#shell = shell;
     this.#grants = Array.isArray(grants) ? { current: [...grants] } : grants as GrantHolder;
@@ -67,6 +120,29 @@ export class GrantedShell extends RpcTarget {
     this.#meshes = meshes;
     this.#secrets = secrets;
     this.#secretsHere = secretsHere;
+    this.#audit = audit;
+  }
+  /** Write an entry this peer made; recording never fails a call. */
+  #record: Recorder = (entry) => {
+    try { this.#audit({ ...entry, peer: this.#peer, fingerprint: this.#owner }); } catch { /* Lost; the audit log reports why. */ }
+  };
+  /**
+   * Read or write part of a file, recorded unless it goes on where the last such call on the same
+   * file ended, so that a file read or copied in parts is one entry. `next` is how far the call
+   * went, or undefined when nothing follows. A failure is always recorded.
+   */
+  #part<T>(action: "file.read" | "file.write" | "skill.read", target: string, options: unknown, call: () => Promise<T>, next: (result: T) => number | undefined): Promise<T> {
+    const offset = (options as { offset?: unknown } | undefined)?.offset;
+    const at = typeof offset === "number" ? offset : 0;
+    const key = `${action}\0${target}`;
+    const goesOn = at > 0 && this.#parts.get(key) === at;
+    this.#parts.delete(key);
+    return audited(this.#record, { action, target }, call, undefined, goesOn).then((result) => {
+      const length = next(result);
+      if (length !== undefined) this.#parts.set(key, at + length);
+      if (this.#parts.size > MAX_PARTS) this.#parts.delete(this.#parts.keys().next().value!);
+      return result;
+    });
   }
   /** Where this device can be reached now, so a paired device can keep its saved record current. It needs no grant. */
   addresses(): string[] { return [...this.#addresses()]; }
@@ -92,11 +168,21 @@ export class GrantedShell extends RpcTarget {
    * `secrets` names mesh secrets this device reads, which the program gets as variables. A peer
    * that may start a program here could read them here anyway, and their values stay here.
    */
-  run(command: string, options?: WithSecrets<RunOptions>) { this.#require("shell"); return this.#shell.run(command, this.#withSecrets(options)); }
-  exec(...args: Parameters<ShellApi["exec"]>) { this.#require("shell"); return this.#shell.exec(...args); }
-  openPty(...args: Parameters<ShellApi["openPty"]>) { this.#require("shell"); return this.#shell.openPty(...args); }
-  /** A fork carries the same grants. */
-  fork(): GrantedShell { this.#require("shell"); return new GrantedShell(this.#shell.fork(), this.#grants, this.#peer, this.#owner, this.#addresses, this.#meshes, this.#secrets, this.#secretsHere); }
+  run(command: string, options?: WithSecrets<RunOptions>) {
+    return audited(this.#record, { action: "run", target: text(command), ...program(options) },
+      () => { this.#require("shell"); return this.#shell.run(command, this.#withSecrets(options)); }, ended);
+  }
+  exec(...args: Parameters<ShellApi["exec"]>) {
+    return audited(this.#record, { action: "run", target: text(args[1]), ...program(args[2]) }, () => { this.#require("shell"); return this.#shell.exec(...args); }, ended);
+  }
+  /** A terminal is recorded once its program has ended. */
+  openPty(...args: Parameters<ShellApi["openPty"]>) {
+    const { command, ...options } = program(args[1]);
+    return audited(this.#record, { action: "terminal", target: command ?? "(login shell)", ...options },
+      () => { this.#require("shell"); return this.#shell.openPty(...args); }, (session) => programExited(session).then(ended));
+  }
+  /** A fork carries the same grants, and records to the same audit log. */
+  fork(): GrantedShell { this.#require("shell"); return new GrantedShell(this.#shell.fork(), this.#grants, this.#peer, this.#owner, this.#addresses, this.#meshes, this.#secrets, this.#secretsHere, this.#audit); }
   /** The mesh secrets this device reads, by name and never by value, which run's and startPtySession's `secrets` take. */
   secretNames(): SecretSummary[] { this.#require("shell"); return this.#secretsHere.list(); }
   /** `options` with the secrets it names opened here and added to its variables. */
@@ -113,22 +199,45 @@ export class GrantedShell extends RpcTarget {
   stat(...args: Parameters<ShellApi["stat"]>) { this.#require("files"); return this.#shell.stat(...args); }
   access(...args: Parameters<ShellApi["access"]>) { this.#require("files"); return this.#shell.access(...args); }
   readdir(...args: Parameters<ShellApi["readdir"]>) { this.#require("files"); return this.#shell.readdir(...args); }
-  mkdir(...args: Parameters<ShellApi["mkdir"]>) { this.#require("files"); return this.#shell.mkdir(...args); }
+  mkdir(...args: Parameters<ShellApi["mkdir"]>) {
+    return audited(this.#record, { action: "file.mkdir", target: text(args[0]) }, () => { this.#require("files"); return this.#shell.mkdir(...args); });
+  }
   glob(...args: Parameters<ShellApi["glob"]>) { this.#require("files"); return this.#shell.glob(...args); }
-  readFile(...args: Parameters<ShellApi["readFile"]>) { this.#require("files"); return this.#shell.readFile(...args); }
-  writeFile(...args: Parameters<ShellApi["writeFile"]>) { this.#require("files"); return this.#shell.writeFile(...args); }
-  writeFileAt(...args: Parameters<ShellApi["writeFileAt"]>) { this.#require("files"); return this.#shell.writeFileAt(...args); }
+  readFile(...args: Parameters<ShellApi["readFile"]>) {
+    return this.#part("file.read", text(args[0]), args[1], () => { this.#require("files"); return this.#shell.readFile(...args); }, (chunk) => chunk.eof ? undefined : chunk.data.byteLength);
+  }
+  writeFile(...args: Parameters<ShellApi["writeFile"]>) {
+    return audited(this.#record, { action: "file.write", target: text(args[0]) }, () => { this.#require("files"); return this.#shell.writeFile(...args); });
+  }
+  writeFileAt(...args: Parameters<ShellApi["writeFileAt"]>) {
+    const [file, data, options] = args;
+    return this.#part("file.write", text(file), options, () => { this.#require("files"); return this.#shell.writeFileAt(...args); },
+      () => data instanceof Uint8Array ? data.byteLength : undefined);
+  }
   setModified(...args: Parameters<ShellApi["setModified"]>) { this.#require("files"); return this.#shell.setModified(...args); }
   /** Reading skills needs `skills`, or `files`, which can read the same files anyway. */
   #requireSkills() { if (!this.#grants.current.includes("files")) this.#require("skills"); }
   skills() { this.#requireSkills(); return this.#shell.skills(); }
   skillFiles(...args: Parameters<ShellApi["skillFiles"]>) { this.#requireSkills(); return this.#shell.skillFiles(...args); }
-  readSkillFile(...args: Parameters<ShellApi["readSkillFile"]>) { this.#requireSkills(); return this.#shell.readSkillFile(...args); }
+  readSkillFile(...args: Parameters<ShellApi["readSkillFile"]>) {
+    const [name, file, options] = args;
+    return this.#part("skill.read", `${text(name)}/${text(file)}`, options, () => { this.#requireSkills(); return this.#shell.readSkillFile(...args); },
+      (chunk) => chunk.eof ? undefined : chunk.data.byteLength);
+  }
   ptySessions() { this.#require("sessions:list"); return this.#shell.ptySessions(); }
-  /** Starting a session needs `sessions:create`; the peer then owns it and may view, type into and kill it. */
+  /**
+   * Starting a session needs `sessions:create`; the peer then owns it and may view, type into and
+   * kill it. Its end is recorded too, as this peer's, whoever ends it.
+   */
   startPtySession(name: string, options?: WithSecrets<PtySessionOptions>) {
-    this.#require("sessions:create");
-    return new GrantedNamedPty(this.#shell.startPtySession(name, this.#withSecrets(options)), this.#grants, this.#peer, this.#owner);
+    return audited(this.#record, { action: "session.start", target: text(name), ...program(options) }, () => {
+      this.#require("sessions:create");
+      const start = new Date().toISOString();
+      const session = this.#shell.startPtySession(name, this.#withSecrets(options));
+      try { void programExited(session).then((exit) => this.#record({ start, action: "session.end", target: name, ...ended(exit) }), () => {}); }
+      catch { /* Its end goes unrecorded; the session works all the same. */ }
+      return new GrantedNamedPty(session, this.#grants, this.#peer, this.#owner, name, this.#record);
+    });
   }
   /**
    * A handle on a session, whose every use is checked: info, capture, wait and attach need
@@ -138,7 +247,7 @@ export class GrantedShell extends RpcTarget {
     // A device with no session permission at all learns nothing, not even whether the name exists.
     const any = (["sessions:view", "sessions:control", "sessions:kill", "sessions:create"] as const).some((permission) => this.#grants.current.includes(permission));
     if (!any) this.#require("sessions:view");
-    return new GrantedNamedPty(this.#shell.ptySession(...args), this.#grants, this.#peer, this.#owner);
+    return new GrantedNamedPty(this.#shell.ptySession(...args), this.#grants, this.#peer, this.#owner, text(args[0]), this.#record);
   }
   /** Closing the view closes the shell behind it: its commands end and its handles are revoked. */
   [Symbol.dispose]() { this.#shell[Symbol.dispose](); }
@@ -158,12 +267,16 @@ class GrantedNamedPty extends RpcTarget {
   #grants: GrantHolder;
   #peer: string;
   #owner: string | null;
-  constructor(inner: NamedPty, grants: GrantHolder, peer: string, owner: string | null) {
+  #name: string;
+  #record: Recorder;
+  constructor(inner: NamedPty, grants: GrantHolder, peer: string, owner: string | null, name: string, record: Recorder) {
     super();
     this.#inner = inner;
     this.#grants = grants;
     this.#peer = peer;
     this.#owner = owner;
+    this.#name = name;
+    this.#record = record;
   }
   /** Throw unless the peer holds `permission` for this session, by grant or by owning it. */
   #check(permission: Permission) {
@@ -188,7 +301,7 @@ class GrantedNamedPty extends RpcTarget {
     return new GrantedAttachment(attachment, () => this.#check("sessions:control"), () => this.#check("sessions:view"));
   }
   /** Killing needs `sessions:kill`, unless the peer started the session. */
-  kill() { this.#check("sessions:kill"); return this.#inner.kill(); }
+  kill() { return audited(this.#record, { action: "session.kill", target: this.#name }, () => { this.#check("sessions:kill"); return this.#inner.kill(); }); }
   [Symbol.dispose]() { this.#inner[Symbol.dispose](); }
 }
 

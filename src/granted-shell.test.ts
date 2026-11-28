@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { MessageChannel } from "node:worker_threads";
 import { newMessagePortRpcSession, RpcTarget } from "capnweb";
+import type { AuditEntry, AuditLog } from "./audit.js";
 import { GrantedShell } from "./granted-shell.js";
 import { expandGrants } from "./peers.js";
 import { PtyRegistry, ShellApi, type PtyExit } from "./shell.js";
@@ -156,4 +160,79 @@ test("any paired device may ask where this device is reachable and what it may d
   // What the peer may do here is reported as it stands, also without any grant.
   assert.deepEqual(granted.granted(), []);
   assert.deepEqual(fork.granted(), ["shell"]);
+});
+
+test("a granted shell records what the peer does, by name and fingerprint, with secret names and never their values", { skip: windows }, async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "cns-audited-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const entries: AuditEntry[] = [];
+  const registry = new PtyRegistry();
+  t.after(() => registry[Symbol.dispose]());
+  const secretsHere = { list: () => [], variables: () => ({ API_KEY: "sk-secret-value" }) };
+  const as = (grants: string[], audit: AuditLog = (entry) => entries.push(entry)) => {
+    const shell = new GrantedShell(new ShellApi(registry, { owner: "k7qm" }), expandGrants(grants), "laptop", "k7qm", undefined, undefined, undefined, secretsHere, audit);
+    t.after(() => shell[Symbol.dispose]());
+    return shell;
+  };
+  const shell = as(["all"]);
+  const recorded = (action: string) => entries.filter((entry) => entry.action === action);
+  async function eventually(action: string) {
+    for (const deadline = Date.now() + 10000; !recorded(action).length;) {
+      if (Date.now() > deadline) assert.fail(`No ${action} entry: ${JSON.stringify(entries)}`);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
+
+  // A command, with the mesh secret it got by name, and none of the caller's variables.
+  const result = await shell.run('printf %s "$API_KEY$CALLER"; exit 3', { cwd: dir, secrets: ["home:API_KEY"], env: { CALLER: "caller-secret" } });
+  assert.deepEqual([result.stdout, result.exitCode], ["sk-secret-valuecaller-secret", 3]);
+  const [run] = recorded("run");
+  assert.deepEqual({ ...run, start: undefined, end: undefined }, {
+    start: undefined, end: undefined, action: "run", target: 'printf %s "$API_KEY$CALLER"; exit 3', cwd: dir, secrets: ["home:API_KEY"], exitCode: 3, peer: "laptop", fingerprint: "k7qm",
+  });
+  assert.ok(Date.parse(run!.end!) >= Date.parse(run!.start));
+  class Sink extends RpcTarget { output() {} }
+  assert.equal((await shell.exec(new Sink(), "exit 4")).exitCode, 4);
+  assert.deepEqual(recorded("run").map((entry) => [entry.target, entry.exitCode]), [['printf %s "$API_KEY$CALLER"; exit 3', 3], ["exit 4", 4]]);
+
+  // A file read or written in parts is one entry; reading it again is another, and so is a read from the middle.
+  const file = path.join(dir, "notes.txt");
+  const other = path.join(dir, "other.txt");
+  await writeFile(file, "0123456789");
+  await writeFile(other, "0123456789");
+  for (const offset of [0, 4, 8, 0]) await shell.readFile(file, { offset, length: 4 });
+  await shell.readFile(other, { offset: 4, length: 4 });
+  assert.deepEqual(recorded("file.read").map((entry) => entry.target), [file, file, other]);
+  const copy = path.join(dir, "copy.txt");
+  await shell.writeFileAt(copy, new Uint8Array(3), { offset: 0, truncate: true });
+  await shell.writeFileAt(copy, new Uint8Array(3), { offset: 3 });
+  await shell.writeFile(path.join(dir, "whole.txt"), new Uint8Array(1));
+  await shell.mkdir(path.join(dir, "made"));
+  assert.deepEqual(recorded("file.write").map((entry) => entry.target), [copy, path.join(dir, "whole.txt")]);
+  assert.deepEqual(recorded("file.mkdir").map((entry) => entry.target), [path.join(dir, "made")]);
+
+  // A session's start, its kill and its end; a terminal once its program has ended.
+  const session = shell.startPtySession("work", { command: "sleep 30", secrets: ["API_KEY"] });
+  assert.deepEqual(recorded("session.start").map((entry) => [entry.target, entry.command, entry.secrets]), [["work", "sleep 30", ["API_KEY"]]]);
+  await session.kill();
+  await eventually("session.end");
+  assert.deepEqual(recorded("session.kill").map((entry) => entry.target), ["work"]);
+  assert.deepEqual(recorded("session.end").map((entry) => [entry.target, entry.signal, typeof entry.end]), [["work", "SIGHUP", "string"]]);
+  shell.openPty({ output() {}, exit() {} }, { command: "exit 5" });
+  await eventually("terminal");
+  assert.deepEqual(recorded("terminal").map((entry) => [entry.target, entry.exitCode]), [["exit 5", 5]]);
+  assert.ok(!JSON.stringify(entries).includes("sk-secret-value") && !JSON.stringify(entries).includes("caller-secret"));
+
+  // A refusal is recorded too, and still thrown at once.
+  const reader = as(["sessions:list"]);
+  assert.throws(() => reader.readFile("/etc/hosts"), /Permission denied: files not granted to laptop/);
+  assert.throws(() => reader.readSkillFile("pdf", "SKILL.md"), /skills not granted/);
+  await assert.rejects(async () => { await reader.run("id"); }, /shell not granted/);
+  assert.deepEqual(entries.slice(-3).map((entry) => [entry.action, entry.target, /^Permission denied/.test(entry.error ?? "")]),
+    [["file.read", "/etc/hosts", true], ["skill.read", "pdf/SKILL.md", true], ["run", "id", true]]);
+
+  // An audit log that fails makes nothing else fail.
+  const careless = as(["shell"], () => { throw new Error("disk full"); });
+  assert.equal((await careless.run("printf fine")).stdout, "fine");
+  assert.equal((await careless.fork().run("printf forked")).stdout, "forked");
 });

@@ -678,6 +678,14 @@ class PtyControls extends RpcTarget {
   }
 }
 
+/**
+ * How the program behind a session or a handle on one ends, for this device's own records such
+ * as the audit log. A function rather than a method, so that no RPC caller can reach it.
+ */
+export function programExited(handle: PtySession | NamedPty): Promise<PtyExit> {
+  return accessors.get(handle)!().exited;
+}
+
 /** An unnamed PTY, owned by the caller that opened it. */
 export class PtySession extends PtyControls {
   #pty: Pty;

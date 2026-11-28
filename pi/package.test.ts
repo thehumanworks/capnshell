@@ -157,7 +157,8 @@ for (const [name, runtime] of runtimes) {
     assert.equal(await run.exited, 0, run.output);
     assert.equal(run.stdout, `${home}\n[]`);
     for (const directory of [project, home]) await assert.rejects(stat(path.join(directory, "PRELOADED")), { code: "ENOENT" });
-    const logs = (await readdir(path.join(home, ".cns"))).filter((file) => file.endsWith(".log"));
+    // The daemon's own log; audit.log beside it records the paired device's command.
+    const logs = (await readdir(path.join(home, ".cns"))).filter((file) => file.endsWith(".log") && file !== "audit.log");
     assert.equal(logs.length, 1);
     const log = await readFile(path.join(home, ".cns", logs[0]!), "utf8");
     assert.doesNotMatch(log, /error/i, log);

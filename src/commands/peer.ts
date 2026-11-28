@@ -30,6 +30,7 @@ import { isRegistered, RELAY_PING_MS, startRegistration, stepRegistration, type 
 import { applyMeshes, droppedBy, listMeshes, listsFor, newerLists, removeMesh, writeMesh, type SignedList } from "../mesh.js";
 import { secretsFor, takeSecrets, type SecretCopy } from "../secrets.js";
 import { secretsHere } from "./secret-cli.js";
+import { auditLog } from "../audit.js";
 
 /** CLI exit statuses for failures, as docs/paired-peers.md lists them: 3 unpaired or changed device, 4 permission denied, else 1. */
 export function authExitCode(error: unknown): number {
@@ -97,6 +98,8 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
   const identity: Identity = ensureIdentity().identity;
   /** The mesh secrets this device reads, for the programs paired devices start here. */
   const localSecrets = secretsHere(identity);
+  /** What paired devices do here, one line each in the audit log (audit.ts). */
+  const audit = auditLog();
   // The relay built into cns: the daemon registers there, and paired devices are dialed there after their direct addresses.
   const relay = builtInRelay();
   /** What this device lets an authenticated paired device do here: exactly its saved incoming grants. */
@@ -105,7 +108,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
     if (!entry) throw new AuthError("not-paired", "Not paired with this device.");
     const grants: GrantHolder = { current: entry.grants.incoming };
     const owner = fingerprint(publicKey);
-    return { local: new GrantedShell(new ShellApi(ptys, { owner }), grants, entry.name, owner, advertisedToPeers, answerMeshes(publicKey), answerSecrets(publicKey), localSecrets), name: entry.name, grants };
+    return { local: new GrantedShell(new ShellApi(ptys, { owner }), grants, entry.name, owner, advertisedToPeers, answerMeshes(publicKey), answerSecrets(publicKey), localSecrets, audit), name: entry.name, grants };
   }
   /** Invites handed out and not yet settled (invites.ts). */
   const invites = new InviteBook();
@@ -546,7 +549,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
       const via = isRelayAddress(url) ? "relay" : "direct";
       const grants: GrantHolder = { current: current.grants.incoming };
       const owner = fingerprint(current.publicKey);
-      const local = new GrantedShell(new ShellApi(ptys, { owner }), grants, name, owner, advertisedToPeers, answerMeshes(current.publicKey), answerSecrets(current.publicKey), localSecrets);
+      const local = new GrantedShell(new ShellApi(ptys, { owner }), grants, name, owner, advertisedToPeers, answerMeshes(current.publicKey), answerSecrets(current.publicKey), localSecrets, audit);
       const remote = rpcSession<ShellApi>(channel, local);
       const session = register({ close: (reason) => channel.close(reason), outbound: true, via, dialed: url }, local, remote, new URL(url).host, { name, publicKey: current.publicKey, daemon: true });
       session.grants = grants;
