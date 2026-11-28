@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { createCli } from "./cli-program.js";
-import { complete, completeCommand, localLookups, LOOKUP_MS, MAX_CANDIDATES, quote, SHELLS, unquote, type Borrowed, type Lookups } from "./completion.js";
+import { complete, completeCommand, localLookups, LOOKUP_MS, MAX_CANDIDATES, MAX_NAME, quote, SHELLS, unquote, type Borrowed, type Lookups } from "./completion.js";
 import { makePrivateDirectory } from "./config.js";
 import type { FileKind } from "./files.js";
 import { fingerprint, generateIdentity } from "./identity.js";
@@ -164,14 +164,14 @@ test("without a daemon link, a lookup offers nothing; one that does not answer i
 });
 
 test("names from another device that a shell or terminal would misread are dropped, and the rest capped", async () => {
-  const many = Array.from({ length: MAX_CANDIDATES + 50 }, (_, index) => ({ name: `f${String(index).padStart(4, "0")}`, kind: "file" as const }));
-  const devices = {
-    studio: { directories: { "/home/me": [...["ok", "tab\there", "new\nline", "bell\x07", "rtl\u202eevil", "zero\u200bwidth", "esc\x1b[31m"].map((name) => ({ name, kind: "file" as const })), ...many] } },
-  };
-  const { fake } = lookups(devices);
-  const lines = await printed(["bash", "cp", "studio:"], fake);
-  assert.equal(lines.length, MAX_CANDIDATES);
-  assert.deepEqual(lines.filter((line) => !/^studio:(ok|f\d{4})$/.test(line)), []);
+  const listing = (names: string[]) => lookups({ studio: { directories: { "/home/me": names.map((name) => ({ name, kind: "file" as const })) } } }).fake;
+  const misread = ["tab\there", "new\nline", "bell\x07", "rtl\u202eevil", "zero\u200bwidth", "esc\x1b[31m", "lone\ud800", "\udfffhalf", "x".repeat(MAX_NAME + 1)];
+  assert.deepEqual(await printed(["bash", "cp", "studio:"], listing(["ok", ...misread])), ["studio:ok"]);
+  // A name as long as a file system allows is offered.
+  const long = "y".repeat(MAX_NAME);
+  assert.deepEqual(await printed(["bash", "cp", "studio:"], listing([long])), [`studio:${long}`]);
+  const many = Array.from({ length: MAX_CANDIDATES + 50 }, (_, index) => `f${String(index).padStart(4, "0")}`);
+  assert.deepEqual(await printed(["bash", "cp", "studio:"], listing(many)), many.slice(0, MAX_CANDIDATES).map((name) => `studio:${name}`));
 });
 
 /** What cns __complete prints, line by line, and that it prints nothing on stderr. */

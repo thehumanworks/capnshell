@@ -24,6 +24,8 @@ export type Shell = typeof SHELLS[number];
 export const LOOKUP_MS = 300;
 /** Candidates offered at most. */
 export const MAX_CANDIDATES = 200;
+/** The longest file name offered, in UTF-16 units: no file system allows a longer one. */
+export const MAX_NAME = 255;
 
 /** What each operand of a command is, by the command's words after cns. A kind ending in ... is every operand from there on. */
 const OPERANDS: Record<string, readonly string[]> = {
@@ -118,7 +120,7 @@ async function remotePaths(lookups: Lookups, name: string, typed: string): Promi
     const listed = await remote.readdir(directory);
     // Hidden entries only once a dot is typed, as shells do.
     const entries = (Array.isArray(listed) ? listed : [])
-      .filter((entry) => typeof entry?.name === "string" && entry.name.startsWith(base) && (base.startsWith(".") || !entry.name.startsWith(".")) && safe(entry.name))
+      .filter((entry) => typeof entry?.name === "string" && entry.name.startsWith(base) && (base.startsWith(".") || !entry.name.startsWith(".")) && entry.name.length <= MAX_NAME && safe(entry.name))
       .sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0).slice(0, MAX_CANDIDATES);
     // A directory ends with the separator typed last, else /, which Windows takes too.
     const separator = at < 0 ? "/" : typed[at]!;
@@ -187,8 +189,8 @@ export async function complete(program: Command, words: readonly string[], looku
   return [...new Set(found)].filter((candidate) => candidate.startsWith(current)).sort();
 }
 
-/** Text that shows as itself, with nothing a shell or terminal would take as a line, a field or a control. */
-const safe = (text: string) => text.length > 0 && strictlyPrintable(text) === text;
+/** Text that shows as itself, with nothing a shell or terminal would take as a line, a field or a control, and no half of a UTF-16 pair. */
+const safe = (text: string) => text.length > 0 && !/\p{Cs}/u.test(text) && strictlyPrintable(text) === text;
 
 const SINGLE_QUOTES = "'‘’‚‛";
 const DOUBLE_QUOTES = "\"“”„";
