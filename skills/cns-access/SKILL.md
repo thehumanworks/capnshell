@@ -1,6 +1,6 @@
 ---
 name: cns-access
-description: Explain and, when the user asks, change what the user's devices may do on each other with cns - pairing, grants, revokes, meshes, bot tokens and gateway approvals. Use when cns says Permission denied (exit 4), a device is missing from cns peers, or the user wants to pair a device, grant or revoke access, set up a mesh or add a CI bot.
+description: Explain and, when the user asks, change what the user's devices may do on each other with cns - pairing, grants, revokes, meshes, bot tokens and gateway approvals. Use when cns says Permission denied (exit 4), a device is missing from cns peers, or the user wants to pair a device, grant or revoke access, set up a mesh or add a CI bot, or asks what a device did on another.
 ---
 
 # Access between devices with cns
@@ -38,6 +38,19 @@ cns peers --json        # access (there) and grants (what it may use here), mesh
 cns doctor studio       # asks studio what it grants now, and saves it
 cns mesh list           # meshes, members and limits
 ```
+
+## What devices did here
+
+```sh
+cns audit                            # commands, terminals, sessions, files and skills, newest first
+cns audit --peer laptop --since 1h   # one device, the last hour
+cns run studio -- cns audit --json   # what devices did on studio
+```
+
+Each entry names the device, the command line, path or session, and how it ended; a command
+still running, or cut off by a daemon that stopped, shows as `no end recorded`. A program's
+entry names the mesh secrets it got there (`secrets`) and the variables the device gave it, such
+as a `--secret` (`variables`), but never their values; file contents and typed keys never appear.
 
 ## Permission denied
 
