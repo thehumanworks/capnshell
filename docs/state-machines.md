@@ -2,7 +2,8 @@
 
 Status: survey of 10 November 2026. The first two candidates are explicit in
 `src/link-rules.ts` and `src/invites.ts`, the third, already explicit, now has tests
-in `gateway/consent.test.ts`, and the fourth's decisions are in `src/shell-recovery.ts`.
+in `gateway/consent.test.ts`, the fourth's decisions are in `src/shell-recovery.ts`, and
+the fifth is explicit in `src/relay-registration.ts`.
 
 Several of cns's lifecycles live in flags, timers, map membership and the order of
 callbacks rather than in a named state with named transitions. Their expected behaviour
@@ -27,7 +28,7 @@ transitions take the clock as an argument.
 | 2 | A pairing invite on the inviting daemon | `src/commands/peer.ts` (`PendingInvite`, `pairingFor`, `pairing.*`), `ControlApi` | Security: the invite secret must work once, and neither side may keep half a pairing. Was only tested end to end. | Explicit in `src/invites.ts`, tested by a state × event table |
 | 3 | A connector's consent on the gateway | `gateway/object.ts` (`consents` table) | Security: gates OAuth access to devices. Already a status column, but had no tests. | Tested in `gateway/consent.test.ts` |
 | 4 | A `cns shell` client through outages | `src/commands/paired-shell.ts`, console footer words | The recovery words in docs/paired-peers.md section 7 are states. Revoked access and giving up had no test. | Decisions explicit in `src/shell-recovery.ts`, tested by a failure × situation table |
-| 5 | A daemon's relay registration | `src/commands/peer.ts` (`registerAtRelay`) | What `cns doctor` reports, and backoff against a relay that keeps dropping it. | Later |
+| 5 | A daemon's relay registration | `src/commands/peer.ts` (`registerAtRelay`) | What `cns doctor` reports, and backoff against a relay that keeps dropping it. | Explicit in `src/relay-registration.ts`, tested by a state × event table |
 | 6 | The pairing code's host | `src/pairing-code.ts` (`hostCode`) | Security: three wrong codes end it. | Low: already checked in process |
 | 7 | The daemon process and its state file | `src/commands/daemon.ts`, `daemon-server.ts` | Start arbitration and stale state. Already well tested. | Low |
 | 8 | A named PTY session | `src/pty.ts` (`Pty`, `PtyControls`, `HandleScope`) | Partly explicit; its tests need real terminals anyway. | Low |
@@ -143,11 +144,40 @@ messages cannot.
 
 ## 5. A daemon's relay registration
 
-**States**: connecting, challenged, registered, lost, waiting to retry. Today they are the
-flags `relayRegistered` and `readyAt`, the `lastHeard` time, the backoff `attempt`, which
-resets only after a registration stayed up for 30 s, and `lastFailure`, which keeps the
-same outage from being logged on every retry. A reducer with the clock passed in would let
-`relay-client.test.ts` check backoff, reset and logging without a socket.
+**States**: connecting (opening the connection to the relay); proving (it is open, and the
+daemon answers the relay's challenge until the relay says ready); registered (answering
+the dialers the relay announces); waiting to retry, 1 s doubling to 30 s; and stopped. The
+survey named a challenged state, but the daemon does the same before and after the
+challenge arrives, so it is part of proving; and lost is the registered daemon's
+connection closing, which goes straight to waiting. Only registered counts as registered
+for `cns status` (otherwise "registering") and `cns doctor` ("not registered", with a
+warning).
+
+**Events**: the connection opened, or failed to open; a message from the relay (a
+challenge, an invalid challenge, ready, a dialer, or anything else, such as a pong); the
+30 s ping interval; the connection closing; the wait ending; the daemon stopping.
+
+**What was implicit**: the flags `relayRegistered` and `readyAt`, the `lastHeard` time, the
+backoff `attempt`, which resets only after a registration stayed up for 30 s, and
+`lastFailure`, which keeps the same outage from being logged on every retry, all kept in
+closures and changed by the socket's callbacks. Nothing checked them without a relay and a
+real daemon.
+
+**Now.** `src/relay-registration.ts` holds the states as a pure step,
+`stepRegistration(state, event, now)`, which returns the next state and what to do:
+connect, prove, ping, close, answer a dialer, log a line, or wait. `peer.ts` opens and
+closes the sockets, runs the timers and does what each step returns, and behaves as
+before. `src/relay-registration.test.ts` takes each of the five states through each of 15
+events (the connection opening, opening failing as before or another way, each kind of
+message, a ping due before, at and after 90 s of silence, the connection closing 10 s or
+30 s after ready, the wait ending, stopping) and checks the next state and every effect;
+then backoff against a relay that keeps dropping the registration (1 s doubling to 30 s,
+reset only by a registration that lasted 30 s), a relay that refuses every registration
+(logged once per reason, until a registration), silence, hostile messages, printable log
+lines, and what `cns status` and `cns doctor` show in each state. It runs in about 100 ms,
+and each of 34 rules broken by hand fails it. `relay-client.test.ts` and `relay-e2e.test.ts`
+stay as the wiring checks. Making it explicit found one bug: a relay that sent the JSON
+`null` made the message handler throw, which it no longer does.
 
 ## 6. The pairing code's host
 

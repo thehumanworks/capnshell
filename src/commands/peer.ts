@@ -26,6 +26,7 @@ import { infoSchema } from "./connect-device.js";
 import { describeVersion } from "../version.js";
 import { openDeviceLink, type DeviceLink } from "../device-link.js";
 import { afterDialFailure, dialTurn, keepsOutbound, onDialed, onInbound, redialDelay, worthDialing } from "../link-rules.js";
+import { isRegistered, RELAY_PING_MS, startRegistration, stepRegistration, type Registration, type RegistrationEffect, type RegistrationEvent } from "../relay-registration.js";
 import { applyMeshes, droppedBy, listMeshes, listsFor, newerLists, removeMesh, writeMesh, type SignedList } from "../mesh.js";
 import { secretsFor, takeSecrets, type SecretCopy } from "../secrets.js";
 import { secretsHere } from "./secret-cli.js";
@@ -69,12 +70,8 @@ interface Session {
   /** Local commands borrowing this link, told when it ends. */
   borrowers: Set<() => void>;
 }
-/** A daemon registered at a relay pings it this often, and re-registers if it hears nothing for three times as long. */
-const RELAY_PING_MS = 30_000;
 /** Dialers the relay announced that the daemon is answering at once; more are ignored. */
 const MAX_RELAY_ANSWERS = 32;
-/** A registration that stayed up this long resets the backoff, so a relay that keeps dropping it is not hammered. */
-const RELAY_STABLE_MS = 30_000;
 
 /**
  * Run the paired daemon, or one command on a paired device: the same link machinery, the
@@ -446,7 +443,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
   const pairing: PairingController | undefined = daemon ? {
     identity: () => ({ publicKey: identity.publicKey, fingerprint: identity.fingerprint }),
     addresses: () => advertised(),
-    relayRegistered: () => relay ? relayRegistered : undefined,
+    relayRegistered: () => relay ? isRegistered(registration) : undefined,
     async invite(ttlMs) {
       const invite = createInvite(identity.publicKey, advertised(), ttlMs, suggestedName(os.hostname()));
       invites.open(invite.id, invite.secret, invite.expiresAt, ttlMs);
@@ -561,7 +558,8 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
     void connect();
   }
 
-  let relayRegistered = false;
+  /** Where this daemon's registration at the relay is (relay-registration.ts). */
+  let registration: Registration | undefined;
   /** Answers to relay dialers in progress, by the relay's id, so a relay cannot make this daemon open connections without limit. */
   const relayAnswers = new Map<string, SecureChannel | undefined>();
   /** Log refusals at most a few times per window, so a flood cannot flood the log. */
@@ -586,72 +584,57 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
   /**
    * Stay registered at the relay: prove this device's key, answer each dialer it
    * announces with an encrypted inbound channel, and re-register with backoff when the
-   * relay connection drops or stops answering pings.
+   * relay connection drops or stops answering pings. relay-registration.ts decides what
+   * to do; this opens and closes the connections and runs the timers.
    */
   function registerAtRelay(base: string) {
-    let attempt = 0;
-    let lastFailure = "";
-    const register_ = async () => {
-      if (stopping) return;
-      const url = relayEndpoint(base, "accept", identity.publicKey);
-      let socket: WebSocket;
-      try { socket = await openSocket(url, cancelled.signal); }
-      catch (error) { return retry(printable(errorMessage(error))); }
-      const host = new URL(url).host;
-      let lastHeard = Date.now();
-      let readyAt = 0;
-      const pinger = setInterval(() => {
-        if (Date.now() - lastHeard > 3 * RELAY_PING_MS) { closeSocket(socket, "The relay stopped answering"); return; }
-        try { socket.send(JSON.stringify({ t: "ping" })); } catch { /* Closing follows. */ }
-      }, RELAY_PING_MS);
-      pinger.unref?.();
-      socket.addEventListener("message", (event: MessageEvent) => {
-        lastHeard = Date.now();
-        if (typeof event.data !== "string") return;
-        let message: { t?: string; nonce?: string; id?: string } | null;
-        try { message = JSON.parse(event.data); } catch { return; }
-        // JSON that is not an object, such as null, would throw below.
-        if (typeof message !== "object" || message === null) return;
-        if (message.t === "challenge" && typeof message.nonce === "string" && /^[A-Za-z0-9_-]{22}$/.test(message.nonce)) {
-          void challengeBytes(host, identity.publicKey, message.nonce).then((bytes) => {
-            socket.send(JSON.stringify({ t: "proof", sig: Buffer.from(identity.sign(bytes)).toString("base64url") }));
-          }).catch(() => closeSocket(socket, "Invalid challenge"));
-        } else if (message.t === "challenge") {
-          closeSocket(socket, "Invalid challenge");
-        } else if (message.t === "ready" && !readyAt) {
-          readyAt = Date.now();
-          relayRegistered = true;
-          lastFailure = "";
-          announce(`Registered at the relay ${host}; devices that cannot reach this one directly can reach it there.`);
-        } else if (message.t === "incoming" && typeof message.id === "string" && /^[A-Za-z0-9_-]{22}$/.test(message.id) && readyAt) {
-          if (relayAnswers.has(message.id)) return;
-          if (relayAnswers.size >= MAX_RELAY_ANSWERS) { refused(`Ignored a dialer at the relay ${host}: ${MAX_RELAY_ANSWERS} are already being answered.`); return; }
-          void answerAtRelay(base, message.id);
-        }
-      });
-      const onStop = () => closeSocket(socket, "The daemon is stopping");
-      cancelled.signal.addEventListener("abort", onStop, { once: true });
-      socket.addEventListener("close", (event: CloseEvent) => {
-        clearInterval(pinger);
-        cancelled.signal.removeEventListener("abort", onStop);
-        if (relayRegistered && !stopping) announce(`Left the relay ${host}${event.reason ? `: ${printable(event.reason)}` : ""}; registering again.`);
-        relayRegistered = false;
-        if (readyAt && Date.now() - readyAt >= RELAY_STABLE_MS) attempt = 0;
-        retry(readyAt ? undefined : `Connection closed before registration (${event.code})${event.reason ? `: ${printable(event.reason)}` : ""}`);
-      }, { once: true });
+    const url = relayEndpoint(base, "accept", identity.publicKey);
+    const host = new URL(url).host;
+    /** The open connection to the relay, if any. */
+    let socket: WebSocket | undefined;
+    const step = (event: RegistrationEvent) => {
+      const next = stepRegistration(registration!, event, Date.now());
+      registration = next.state;
+      for (const effect of next.effects) carryOut(effect, socket);
     };
-    const retry = (failure?: string) => {
-      if (stopping) return;
-      // Report the first failure and any changed reason, not the same outage on
-      // every backoff tick. A successful registration resets this suppression.
-      if (failure && failure !== lastFailure) {
-        lastFailure = failure;
-        announce(`Cannot register at the relay ${new URL(base).host}: ${failure} Retrying automatically.`);
+    function carryOut(effect: RegistrationEffect, current: WebSocket | undefined) {
+      switch (effect.do) {
+        case "connect": void connect(); break;
+        case "wait": setTimeout(() => step({ t: "waited" }), effect.ms).unref?.(); break;
+        case "say": announce(effect.message); break;
+        case "close": if (current) closeSocket(current, effect.reason); break;
+        case "ping": try { current?.send(JSON.stringify({ t: "ping" })); } catch { /* Closing follows. */ } break;
+        case "prove":
+          void challengeBytes(host, identity.publicKey, effect.nonce).then((bytes) => {
+            current?.send(JSON.stringify({ t: "proof", sig: Buffer.from(identity.sign(bytes)).toString("base64url") }));
+          }).catch(() => { if (current) closeSocket(current, "Invalid challenge"); });
+          break;
+        case "answer":
+          if (relayAnswers.has(effect.id)) break;
+          if (relayAnswers.size >= MAX_RELAY_ANSWERS) { refused(`Ignored a dialer at the relay ${host}: ${MAX_RELAY_ANSWERS} are already being answered.`); break; }
+          void answerAtRelay(base, effect.id);
       }
-      const timer = setTimeout(() => void register_(), redialDelay(attempt++));
-      timer.unref?.();
-    };
-    void register_();
+    }
+    async function connect() {
+      let opened: WebSocket;
+      try { opened = await openSocket(url, cancelled.signal); }
+      catch (error) { return step({ t: "open-failed", error: errorMessage(error) }); }
+      socket = opened;
+      const pinger = setInterval(() => step({ t: "tick" }), RELAY_PING_MS);
+      pinger.unref?.();
+      opened.addEventListener("message", (event: MessageEvent) => step({ t: "message", data: event.data }));
+      opened.addEventListener("close", (event: CloseEvent) => {
+        clearInterval(pinger);
+        socket = undefined;
+        step({ t: "closed", code: event.code, reason: event.reason });
+      }, { once: true });
+      step({ t: "opened" });
+    }
+    if (stopping) return;
+    const started = startRegistration(host);
+    registration = started.state;
+    cancelled.signal.addEventListener("abort", () => step({ t: "stop" }), { once: true });
+    for (const effect of started.effects) carryOut(effect, socket);
   }
 
   /** Answer one dialer the relay announced: the same as an inbound connection, through the relay. */

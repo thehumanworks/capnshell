@@ -8,6 +8,7 @@ import { AuthError } from "../auth.js";
 import { connectFirst, connectSecure, rpcSession, type SecureChannel } from "../secure.js";
 import { dialAddresses, isRelayAddress } from "../relay-hub.js";
 import { builtInRelay } from "../relay-config.js";
+import { registrationWord } from "../relay-registration.js";
 import { errorMessage } from "../errors.js";
 import { ensureIdentity, fingerprint as fingerprintOf, identityPath, loadIdentity } from "../identity.js";
 import { allPrivate } from "../addresses.js";
@@ -185,7 +186,7 @@ async function report(control: ControlConnection, verb: string, state?: string):
     const version = reportedVersion(status.version);
     console.log(`${verb} as ${status.identity?.fingerprint} (${version ? `cns ${version}, ` : ""}pid ${status.pid}${service ? `, ${describeService(service.kind)}` : ""}), listening at ${status.url}.`);
     if (status.addresses?.length) console.log(`Reachable at ${status.addresses.join(", ")}.`);
-    if (status.relay) console.log(`Relay: ${status.relay}${status.relayRegistered ? ", registered" : ", registering"}.`);
+    if (status.relay) console.log(`Relay: ${status.relay}, ${registrationWord(status.relayRegistered)}.`);
     const paired = listPeers();
     console.log(paired.length
       ? `Paired devices: ${paired.map((peer) => `${peer.name}${peers.some((connected) => connected.peer?.daemon && connected.peer.fingerprint === peer.fingerprint) ? " (online)" : ""}`).join(", ")}.`
@@ -639,7 +640,7 @@ export async function status(options: StatusOptions): Promise<void> {
   else {
     console.log(`Daemon:      ${describeVersion((daemon.version as string | null) ?? undefined)}, pid ${daemon.pid} at ${daemon.url}${(daemon.addresses as string[]).length ? `, reachable at ${(daemon.addresses as string[]).join(", ")}` : ""}`);
     if (drift) console.log(`             Warning: ${drift}`);
-    if (daemon.relay) console.log(`Relay:       ${daemon.relay} (${daemon.relayRegistered ? "registered" : "registering"})`);
+    if (daemon.relay) console.log(`Relay:       ${daemon.relay} (${registrationWord(daemon.relayRegistered)})`);
   }
   console.log(`Paired:      ${paired.length} device${paired.length === 1 ? "" : "s"}${paired.length ? `: ${paired.map((peer) => peer.name).join(", ")}` : ""}`);
   console.log(links.length ? `Links:       ${links.map((link) => `${link.name} (${link.address}, ${link.hostname}, ${link.version ? `cns ${link.version}` : "older cns"})`).join(", ")}` : "Links:       none");
