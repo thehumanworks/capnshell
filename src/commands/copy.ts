@@ -23,7 +23,7 @@ export interface CopyRequest {
 }
 
 /** The peer's path style, from the platform its handshake reported. */
-export const pathsOf = (info: Pick<ShellInfo, "platform">) => info.platform === "win32" ? path.win32 : path.posix;
+const pathsOf = (info: Pick<ShellInfo, "platform">) => info.platform === "win32" ? path.win32 : path.posix;
 
 /** Where `value` points on the peer, whose home is `info.cwd`: scp's rules, plus ~ and ~/ for that home. */
 export function remotePath(info: Pick<ShellInfo, "platform" | "cwd">, value: string): string {

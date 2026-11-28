@@ -17,8 +17,6 @@ interface FakeDevice {
   platform?: string;
   cwd?: string;
   directories?: Record<string, Array<{ name: string; kind: FileKind }>>;
-  /** What each link points to, by its absolute path. */
-  links?: Record<string, FileKind>;
   sessions?: string[];
   /** No daemon link to it: borrow finds none. */
   unlinked?: boolean;
@@ -46,7 +44,6 @@ function lookups(devices: Record<string, FakeDevice>) {
           if (!entries) throw new Error(`ENOENT: no such file or directory, scandir '${directory}'`);
           return entries;
         },
-        stat: async (target) => ({ kind: device.links?.[target] ?? "file" }),
         sessions: async () => device.hangs === "sessions" ? never : (device.sessions ?? []).map((session) => ({ name: session })),
         close: () => { closed.push(name); },
       };
@@ -61,11 +58,10 @@ const studio: FakeDevice = {
   cwd: "/home/me",
   sessions: ["build", "work"],
   directories: {
-    "/home/me": [{ name: "notes.txt", kind: "file" }, { name: "My Docs", kind: "directory" }, { name: ".config", kind: "directory" }, { name: "src", kind: "symlink" }, { name: "gone", kind: "symlink" }],
+    "/home/me": [{ name: "notes.txt", kind: "file" }, { name: "My Docs", kind: "directory" }, { name: ".config", kind: "directory" }, { name: "src", kind: "symlink" }],
     "/home/me/My Docs": [{ name: "report.txt", kind: "file" }],
     "/srv": [{ name: "app", kind: "directory" }, { name: "apt.log", kind: "file" }],
   },
-  links: { "/home/me/src": "directory", "/home/me/gone": "symlink" },
 };
 const at = (words: string[], devices: Record<string, FakeDevice> = { studio, stash: { outgoing: ["shell"] }, nas: {} }) => {
   const { fake } = lookups(devices);
@@ -124,10 +120,10 @@ test("cns cp completes DEVICE: and then the device's paths, one directory at a t
   // A local path is left to the shell.
   assert.deepEqual(await at(["cp", "./st"]), []);
   assert.deepEqual(await at(["cp", "/tmp/x"]), []);
-  // The home, with hidden entries once a dot is typed; a link to a directory is one.
-  assert.deepEqual(await at(["cp", "studio:"]), ["studio:My Docs/", "studio:gone", "studio:notes.txt", "studio:src/"]);
+  // The home, with hidden entries once a dot is typed; a link is offered as a file, wherever it points.
+  assert.deepEqual(await at(["cp", "studio:"]), ["studio:My Docs/", "studio:notes.txt", "studio:src"]);
   assert.deepEqual(await at(["cp", "studio:."]), ["studio:.config/"]);
-  assert.deepEqual(await at(["cp", "studio:~/"]), ["studio:~/My Docs/", "studio:~/gone", "studio:~/notes.txt", "studio:~/src/"]);
+  assert.deepEqual(await at(["cp", "studio:~/"]), ["studio:~/My Docs/", "studio:~/notes.txt", "studio:~/src"]);
   assert.deepEqual(await at(["cp", "studio:~"]), ["studio:~/"]);
   assert.deepEqual(await at(["cp", "studio:~/My"]), ["studio:~/My Docs/"]);
   assert.deepEqual(await at(["cp", "studio:My Docs/"]), ["studio:My Docs/report.txt"]);

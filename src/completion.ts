@@ -1,7 +1,7 @@
 import type { Command, Option } from "commander";
-import { pathsOf, remotePath } from "./commands/copy.js";
+import { remotePath } from "./commands/copy.js";
 import { strictlyPrintable } from "./errors.js";
-import type { DirectoryEntry, FileKind, FileStat } from "./files.js";
+import type { DirectoryEntry, FileKind } from "./files.js";
 import { shouldAsk } from "./fleet-sessions.js";
 import { loadIdentity } from "./identity.js";
 import { splitRemote } from "./options.js";
@@ -38,7 +38,6 @@ const VALUES: Record<string, string> = { device: "device", via: "device", peer: 
 export interface Borrowed {
   info(): Promise<Pick<ShellInfo, "platform" | "cwd">>;
   readdir(directory: string): Promise<Array<{ name: string; kind: FileKind }>>;
-  stat(target: string): Promise<{ kind: FileKind }>;
   sessions(): Promise<Array<{ name: string }>>;
   close(): void;
 }
@@ -70,7 +69,6 @@ export function localLookups(): Lookups {
       return {
         info: () => plain(remote.info() as unknown as Promise<ShellInfo>),
         readdir: (directory) => plain(remote.readdir(directory) as unknown as Promise<DirectoryEntry[]>),
-        stat: (target) => plain(remote.stat(target) as unknown as Promise<FileStat>),
         sessions: () => plain(remote.ptySessions() as unknown as Promise<PtySessionInfo[]>),
         close() {
           if (closed) return;
@@ -114,7 +112,6 @@ async function remotePaths(lookups: Lookups, name: string, typed: string): Promi
   if (typed === "~") return [`${name}:~/`];
   return await through(lookups, name, async (remote) => {
     const info = await remote.info();
-    const paths = pathsOf(info);
     const at = Math.max(typed.lastIndexOf("/"), info.platform === "win32" ? typed.lastIndexOf("\\") : -1);
     const [typedDirectory, base] = [typed.slice(0, at + 1), typed.slice(at + 1)];
     const directory = remotePath(info, typedDirectory);
@@ -123,12 +120,10 @@ async function remotePaths(lookups: Lookups, name: string, typed: string): Promi
     const entries = (Array.isArray(listed) ? listed : [])
       .filter((entry) => typeof entry?.name === "string" && entry.name.startsWith(base) && (base.startsWith(".") || !entry.name.startsWith(".")) && safe(entry.name))
       .sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0).slice(0, MAX_CANDIDATES);
-    // A link to a directory is completed as one.
-    const kinds = await Promise.all(entries.map((entry) => entry.kind !== "symlink" ? entry.kind
-      : remote.stat(paths.join(directory, entry.name)).then((target) => target.kind, () => entry.kind)));
     // A directory ends with the separator typed last, else /, which Windows takes too.
     const separator = at < 0 ? "/" : typed[at]!;
-    return entries.map((entry, index) => `${name}:${typedDirectory}${entry.name}${kinds[index] === "directory" ? separator : ""}`);
+    // A link is offered as a file: finding what it points to would take a call for each.
+    return entries.map((entry) => `${name}:${typedDirectory}${entry.name}${entry.kind === "directory" ? separator : ""}`);
   }) ?? [];
 }
 
