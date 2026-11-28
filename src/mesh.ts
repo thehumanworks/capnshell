@@ -2,7 +2,7 @@ import { z } from "zod";
 import { errorMessage } from "./errors.js";
 import { verify, type Identity, type PublicKey } from "./identity.js";
 import { endedMeshFiles, meshFiles, peerNamePattern, removePeerFile, validatePeerUrl } from "./peer-files.js";
-import { expandGrants, grantsSchema, listPeers, publicKeySchema, savePairedPeer, updatePairedPeer, type PairedPeer, type PeerEntry, type Permission } from "./peers.js";
+import { expandGrants, grantsSchema, listPeers, publicKeySchema, savePairedPeer, UnreadablePeer, updatePairedPeer, type PairedPeer, type PeerEntry, type Permission } from "./peers.js";
 import { pruneSecrets } from "./secrets.js";
 
 /**
@@ -121,22 +121,27 @@ export interface MeshPlan {
   remove: Array<{ name: string; publicKey: PublicKey }>;
 }
 
+/** A saved record this cns cannot read: its name, and the key it names when that is a valid one. */
+export interface SavedKey { name: string; publicKey?: PublicKey }
+
 /**
  * What to save, change and remove so this device's records match `list`, given every record
  * it has now. Members get a record tagged with the mesh, named as the admin names them or,
  * when that name is taken here, name-2 and so on, granted memberGrants. A device this one
  * paired with directly, or knows through another mesh, keeps its record. When this device
  * is not in the list, as after the admin removed it, every record of the mesh goes. Records
- * are between members: the admin is paired with each of them directly.
+ * are between members: the admin is paired with each of them directly. `unreadable` are the
+ * saved records this cns cannot read, such as a newer cns's (UnreadablePeer): their names
+ * stay taken, and a member one of them names gets no record beside it.
  */
-export function planMesh({ self, mesh, allow, list, records, now }: { self: PublicKey; mesh: string; allow: readonly Permission[]; list: MemberList; records: readonly PeerEntry[]; now: number }): MeshPlan {
+export function planMesh({ self, mesh, allow, list, records, unreadable = [], now }: { self: PublicKey; mesh: string; allow: readonly Permission[]; list: MemberList; records: readonly PeerEntry[]; unreadable?: readonly SavedKey[]; now: number }): MeshPlan {
   const plan: MeshPlan = { create: [], update: [], remove: [] };
   // Every member is paired with the admin directly, as it joined through that pairing, so the
   // admin keeps no records for its mesh and nobody keeps one for the admin. A device the list
   // does not hold keeps none.
   const members = self !== list.admin && list.members.some((member) => member.key === self) ? list.members.filter((member) => member.key !== self && member.key !== list.admin) : [];
   const keys = new Set(members.map((member) => member.key));
-  const taken = new Set<string>();
+  const taken = new Set(unreadable.map((record) => record.name));
   for (const record of records) {
     if (record.mesh === mesh && !keys.has(record.publicKey)) plan.remove.push({ name: record.name, publicKey: record.publicKey });
     else taken.add(record.name); // applyMeshes removes old keys before it creates their replacements.
@@ -150,6 +155,7 @@ export function planMesh({ self, mesh, allow, list, records, now }: { self: Publ
       if (current.length !== incoming.length || current.some((permission, index) => permission !== incoming[index])) plan.update.push({ name: existing.name, incoming });
       continue;
     }
+    if (unreadable.some((record) => record.publicKey === member.key)) continue;
     let name = member.name;
     for (let n = 2; taken.has(name); n++) name = `${member.name.slice(0, 60)}-${n}`;
     taken.add(name);
@@ -248,6 +254,13 @@ export function removeMesh(name: string): void {
   if (meshFiles.exists(name)) meshFiles.remove(name);
 }
 
+/** Every saved record this cns can read, and those it cannot, for planMesh. */
+function savedRecords(): { records: PeerEntry[]; unreadable: SavedKey[] } {
+  const unreadable: SavedKey[] = [];
+  const records = listPeers((name, error) => unreadable.push({ name, publicKey: error instanceof UnreadablePeer ? error.publicKey : undefined }));
+  return { records, unreadable };
+}
+
 /**
  * Bring this device's records in line with every mesh's list (planMesh), and say what
  * changed. Records of a mesh this device no longer has go first. A device dropped from one
@@ -267,7 +280,7 @@ export function applyMeshes(self: PublicKey, now = Date.now()): MeshPlan {
   for (let pass = 0; pass < 2; pass++) {
     let removed = false;
     for (const state of states) {
-      const plan = planMesh({ self, mesh: state.name, allow: state.allow, list: state.list, records: listPeers(() => {}), now });
+      const plan = planMesh({ self, mesh: state.name, allow: state.allow, list: state.list, ...savedRecords(), now });
       for (const { name } of plan.remove) removePeerFile(name);
       for (const { name, incoming } of plan.update) updatePairedPeer(name, (peer) => ({ ...peer, grants: { ...peer.grants, incoming } }));
       for (const { name, record } of plan.create) savePairedPeer(name, record);

@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { generateIdentity, fingerprint, type PublicKey } from "./identity.js";
-import { droppedBy, firstList, listsFor, memberGrants, newerLists, nextList, openList, planMesh, signList, type Member, type MemberList, type MeshState } from "./mesh.js";
-import type { PeerEntry, Permission } from "./peers.js";
+import { applyMeshes, droppedBy, firstList, listsFor, memberGrants, newerLists, nextList, openList, planMesh, signList, writeMesh, type Member, type MemberList, type MeshState } from "./mesh.js";
+import { peerNames } from "./peer-files.js";
+import { savePairedPeer, type PeerEntry, type Permission } from "./peers.js";
 
 const admin = generateIdentity();
 const laptop = generateIdentity();
@@ -83,6 +87,35 @@ test("a member that missed the removal reuses the bot's alias for its replacemen
   const plan = planMesh({ self: laptop.publicKey, mesh: "home", list, allow: [], now: NOW, records: [record("studio", oldKey, { mesh: "home" })] });
   assert.deepEqual(plan.remove, [{ name: "studio", publicKey: oldKey }]);
   assert.deepEqual(plan.create.map(({ name, record }) => [name, record.publicKey]), [["studio", studio.publicKey]]);
+});
+
+test("a member whose saved record this cns cannot read gets no mesh record beside it", () => {
+  const list = homeList(2, [member(laptop.publicKey, "laptop"), member(studio.publicKey, "studio"), member(stranger.publicKey, "spare")]);
+  // studio's record needs a feature from a newer cns, such as an expiry that narrows what it
+  // may do; spare's file cannot be read at all, so it names no key but keeps its name.
+  const unreadable = [{ name: "st", publicKey: studio.publicKey }, { name: "spare" }];
+  const plan = planMesh({ self: laptop.publicKey, mesh: "home", list, allow: ["shell"], now: NOW, records: [], unreadable });
+  assert.deepEqual(plan.create.map(({ name, record }) => [name, record.publicKey]), [["spare-2", stranger.publicKey]]);
+  // A mesh record this cns can read still follows the list, so a narrower allow reaches it.
+  const held = planMesh({ self: laptop.publicKey, mesh: "home", list, allow: [], now: NOW, records: [record("studio", studio.publicKey, { mesh: "home", grants: { incoming: ["shell"], outgoing: [] } })], unreadable });
+  assert.deepEqual(held.update, [{ name: "studio", incoming: [] }]);
+});
+
+test("applying a mesh leaves a member alone when a newer cns saved its record", { skip: process.platform === "win32" }, () => {
+  const previous = process.env.CNS_CONFIG_DIR;
+  const dir = mkdtempSync(path.join(os.tmpdir(), "cns-mesh-"));
+  process.env.CNS_CONFIG_DIR = dir;
+  try {
+    savePairedPeer("admin", { publicKey: admin.publicKey, addresses: [], pairedAt: new Date(NOW).toISOString(), grants: { incoming: [], outgoing: [] } });
+    writeFileSync(path.join(dir, "peers", "st"), JSON.stringify({ version: 2, needs: ["expiry"], publicKey: studio.publicKey, addresses: [], pairedAt: new Date(NOW).toISOString(), grants: { incoming: [], outgoing: [] } }), { mode: 0o600 });
+    writeMesh({ name: "home", admin: admin.publicKey, allow: ["shell"], signed: signList(homeList(), admin) });
+    const plan = applyMeshes(laptop.publicKey, NOW);
+    assert.deepEqual([plan.create, plan.update, plan.remove], [[], [], []]);
+    assert.deepEqual(peerNames(), ["admin", "st"]);
+  } finally {
+    if (previous === undefined) delete process.env.CNS_CONFIG_DIR; else process.env.CNS_CONFIG_DIR = previous;
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("a device takes only a newer list its mesh's admin signed, for a mesh it is in", () => {
