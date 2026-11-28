@@ -6,6 +6,7 @@ import net from "node:net";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { connectControl } from "./commands/daemon.js";
+import { generateIdentity } from "./identity.js";
 import { launchCli, settledLink, testDevices, unusedPort, type TestDevice } from "./test-support.js";
 
 const posix = process.platform !== "win32";
@@ -318,4 +319,24 @@ test("with only the port's grant, over its own link: other ports refused, one au
   assert.equal(await within(nextConnection.exited, "the forward exiting at the next connection", () => nextConnection.output), 3, nextConnection.output);
   assert.match(nextConnection.stderr, notSaved);
   await within(lateClosed, "the next connection closing", () => nextConnection.output);
+
+  // Another device's key saved under studio's name while forwarding: neither the next connection
+  // nor the next link reaches whoever has that name now, and each forward ends with 3.
+  await repair();
+  const atConnection = await forwarding(t, laptop, ["studio", String(echoPort), "--local", local]);
+  const atLink = await forwarding(t, laptop, ["studio", String(echoPort), "--local", await unusedPort("127.0.0.1")]);
+  const saved = JSON.parse(await readFile(file, "utf8"));
+  await writeFile(file, JSON.stringify({ ...saved, publicKey: generateIdentity().publicKey }));
+  const anotherDevice = /cns: studio is saved here for another device now; start cns forward again to reach it\.\n/;
+  const rekeyed = net.connect({ host: "127.0.0.1", port: Number(local) });
+  rekeyed.on("error", () => {});
+  const rekeyedClosed = once(rekeyed, "close");
+  assert.equal(await within(atConnection.exited, "the forward exiting at the next connection once re-keyed", () => atConnection.output), 3, atConnection.output);
+  assert.match(atConnection.stderr, anotherDevice);
+  await within(rekeyedClosed, "the re-keyed connection closing", () => atConnection.output);
+  const restopped = await devices.cli(studio, ["stop", "--state", studio.state]);
+  assert.equal(restopped.code, 0, restopped.output);
+  await devices.up(studio, studio.port);
+  assert.equal(await within(atLink.exited, "the forward exiting at the next link once re-keyed", () => atLink.output), 3, atLink.output);
+  assert.match(atLink.stderr, anotherDevice);
 });
