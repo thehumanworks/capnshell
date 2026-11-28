@@ -10,8 +10,8 @@ import {
 import { listSkillFiles, listSkills, readSkillFile } from "./skills.js";
 import { bash, commandSchema, optionsSchema, powershell, powershellArgs, type RunOptions } from "./platform.js";
 import {
-  HandleScope, MAX_PTYS, NamedPty, openUnnamedPty, ptyOptionsSchema, PtyRegistry,
-  type PtyOptions, type PtySession, type PtySessionInfo, type PtySessionOptions, type PtySink,
+  HandleScope, MAX_PTYS, openUnnamedPty, ptyOptionsSchema, PtyRegistry,
+  type PtyOptions, type PtySession, type PtySessionOptions, type PtySink, type SessionHost,
 } from "./pty.js";
 
 export { MAX_TIMEOUT_MS, type RunOptions } from "./platform.js";
@@ -23,7 +23,7 @@ export {
   FINISHED_SESSION_MS, MAX_NAMED_PTYS, MAX_PTY_BACKLOG_BYTES, MAX_PTY_INPUT_BYTES, MAX_SCREEN_HISTORY, sessionNameSchema,
   type AttachOptions, type CaptureOptions, type KeysOptions, type PtyExit, type PtyOptions, type PtyScreen,
   type PtySessionInfo, type PtySessionOptions, type PtySink, type PtyWait, type WaitOptions,
-  HandleScope, NamedPty, PtyAttachment, PtyRegistry, PtySession,
+  HandleScope, NamedPty, PtyAttachment, PtyRegistry, PtySession, type SessionHandle, type SessionHost,
 } from "./pty.js";
 
 export const MAX_OUTPUT_BYTES = 1024 * 1024;
@@ -102,13 +102,13 @@ export function localShellInfo(): ShellInfo {
   };
 }
 
-export class ShellApi extends RpcTarget {
+export class ShellApi<H extends SessionHost = PtyRegistry> extends RpcTarget {
   #children = new Set<ChildProcess>();
   #ptys = new Set<PtySession>();
-  #forks = new Set<ShellApi>();
+  #forks = new Set<ShellApi<H>>();
   /** The named-session handles and attachments this shell issued; closing it revokes them. */
   #handles = new HandleScope();
-  #registry: PtyRegistry;
+  #registry: H;
   #closed = false;
   #released = Promise.withResolvers<void>();
   /** Set on forks, which close with their parent and cannot fork again. */
@@ -117,11 +117,12 @@ export class ShellApi extends RpcTarget {
   #owner: string | null;
 
   /**
-   * Named PTY sessions live in the registry, shared by this process's connections.
+   * Named PTY sessions live in the registry, shared by this process's connections: in this
+   * process, or in a holder process each, for the daemon (held-sessions.ts).
    * `owner` marks the sessions this shell starts, such as with a paired device's
    * fingerprint. It is set here, never by a caller over RPC.
    */
-  constructor(registry = new PtyRegistry(), { owner = null }: { owner?: string | null } = {}) {
+  constructor(registry: H = new PtyRegistry() as SessionHost as H, { owner = null }: { owner?: string | null } = {}) {
     super();
     this.#registry = registry;
     this.#owner = owner;
@@ -375,23 +376,23 @@ export class ShellApi extends RpcTarget {
    * than the connection, so later connections can reach it with ptySession(name).
    * The returned handle is this shell's: closing the shell revokes it.
    */
-  startPtySession(name: string, options: PtySessionOptions = {}): NamedPty {
+  startPtySession(name: string, options: PtySessionOptions = {}): ReturnType<H["startSession"]> {
     if (this.#closed) throw new Error("This shell session is closed.");
-    return new NamedPty(this.#registry, name, this.#registry.start(name, options, this.#owner), this.#handles);
+    return this.#registry.startSession(name, options, this.#owner, this.#handles) as ReturnType<H["startSession"]>;
   }
 
   /**
    * A handle on a named session. Releasing the handle leaves the session running.
    * Closing this shell revokes the handle and the attachments made through it.
    */
-  ptySession(name: string): NamedPty {
+  ptySession(name: string): ReturnType<H["openSession"]> {
     if (this.#closed) throw new Error("This shell session is closed.");
-    return new NamedPty(this.#registry, name, this.#registry.get(name), this.#handles);
+    return this.#registry.openSession(name, this.#handles) as ReturnType<H["openSession"]>;
   }
 
-  ptySessions(): PtySessionInfo[] {
+  ptySessions(): ReturnType<H["list"]> {
     if (this.#closed) throw new Error("This shell session is closed.");
-    return this.#registry.list();
+    return this.#registry.list() as ReturnType<H["list"]>;
   }
 
   /**
@@ -400,12 +401,12 @@ export class ShellApi extends RpcTarget {
    * revokes the named-session handles it issued, so a caller can cancel a run without
    * closing the connection. The named sessions themselves keep running.
    */
-  fork(): ShellApi {
+  fork(): ShellApi<H> {
     if (this.#closed) throw new Error("This shell session is closed.");
     // One level only, so MAX_FORKS bounds what a connection can hold.
     if (this.#onClose) throw new Error("A forked shell cannot fork; fork the original shell.");
     if (this.#forks.size >= MAX_FORKS) throw new Error("Too many forked shells; release some first.");
-    const fork = new ShellApi(this.#registry, { owner: this.#owner });
+    const fork = new ShellApi<H>(this.#registry, { owner: this.#owner });
     fork.#onClose = () => this.#forks.delete(fork);
     this.#forks.add(fork);
     return fork;
