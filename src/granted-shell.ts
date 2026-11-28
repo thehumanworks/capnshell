@@ -3,7 +3,7 @@ import { RpcTarget } from "capnweb";
 import { z } from "zod";
 import { clip, type AuditEntry, type AuditLog } from "./audit.js";
 import { errorMessage } from "./errors.js";
-import { describeGrants, type Permission } from "./peers.js";
+import { describeGrants, type LanCard, type Permission } from "./peers.js";
 import { envSchema, MAX_ENV_VARIABLES } from "./platform.js";
 import { programExited } from "./pty.js";
 import {
@@ -135,6 +135,7 @@ export class GrantedShell extends RpcTarget {
   #secrets: (offered: unknown) => unknown[];
   #secretsHere: SecretsHere;
   #audit: AuditLog;
+  #lan: () => LanCard[];
   /** Where each file read or written in parts here goes on next, by action and path (#part). */
   #parts = new Map<string, number>();
   /**
@@ -144,8 +145,9 @@ export class GrantedShell extends RpcTarget {
    * `secrets` takes the mesh secrets the peer offers and answers with the ones it may read (secrets.ts).
    * `secretsHere` opens the ones this device reads for the programs the peer starts here.
    * `audit` takes an entry for each command, terminal, session, file and skill file the peer uses (audit.ts).
+   * `lan` says which network cards this device has on which local networks, for cns wake (wake.ts).
    */
-  constructor(shell: ShellApi, grants: readonly Permission[] | GrantHolder, peer: string, owner: string | null = null, addresses: () => string[] = () => [], meshes: (offered: unknown) => unknown[] = () => [], secrets: (offered: unknown) => unknown[] = () => [], secretsHere: SecretsHere = noSecrets, audit: AuditLog = () => {}) {
+  constructor(shell: ShellApi, grants: readonly Permission[] | GrantHolder, peer: string, owner: string | null = null, addresses: () => string[] = () => [], meshes: (offered: unknown) => unknown[] = () => [], secrets: (offered: unknown) => unknown[] = () => [], secretsHere: SecretsHere = noSecrets, audit: AuditLog = () => {}, lan: () => LanCard[] = () => []) {
     super();
     this.#shell = shell;
     this.#grants = Array.isArray(grants) ? { current: [...grants] } : grants as GrantHolder;
@@ -156,6 +158,7 @@ export class GrantedShell extends RpcTarget {
     this.#secrets = secrets;
     this.#secretsHere = secretsHere;
     this.#audit = audit;
+    this.#lan = lan;
   }
   /** Write an entry this peer made; recording never fails a call. */
   #record: Recorder = (entry) => {
@@ -181,6 +184,12 @@ export class GrantedShell extends RpcTarget {
   }
   /** Where this device can be reached now, so a paired device can keep its saved record current. It needs no grant. */
   addresses(): string[] { return [...this.#addresses()]; }
+  /**
+   * This device's network cards on local networks, each a MAC address and an IPv4 address with its
+   * prefix, so that a paired device can have another one on the same network wake this one while
+   * it sleeps (cns wake). It needs no grant, as addresses does not.
+   */
+  lan(): LanCard[] { return this.#lan().map((card) => ({ ...card })); }
   /**
    * Swap mesh member lists: this device keeps any offered list that is newer than its own and
    * signed by that mesh's admin, and answers with the lists of the meshes the peer is in. It
@@ -219,7 +228,7 @@ export class GrantedShell extends RpcTarget {
       () => { this.#require("shell"); return this.#shell.openPty(...args); }, { after: (session) => programExited(session).then(ended), starts: true });
   }
   /** A fork carries the same grants, and records to the same audit log. */
-  fork(): GrantedShell { this.#require("shell"); return new GrantedShell(this.#shell.fork(), this.#grants, this.#peer, this.#owner, this.#addresses, this.#meshes, this.#secrets, this.#secretsHere, this.#audit); }
+  fork(): GrantedShell { this.#require("shell"); return new GrantedShell(this.#shell.fork(), this.#grants, this.#peer, this.#owner, this.#addresses, this.#meshes, this.#secrets, this.#secretsHere, this.#audit, this.#lan); }
   /** The mesh secrets this device reads, by name and never by value, which run's and startPtySession's `secrets` take. */
   secretNames(): SecretSummary[] { this.#require("shell"); return this.#secretsHere.list(); }
   /** `options` with the secrets it names opened here and added to its variables. */
