@@ -1,6 +1,6 @@
 ---
 name: cns-access
-description: Explain and, when the user asks, change what the user's devices may do on each other with cns - pairing, grants, revokes, meshes, bot tokens and gateway approvals. Use when cns says Permission denied (exit 4), a device is missing from cns peers, or the user wants to pair a device, grant or revoke access, set up a mesh or add a CI bot, or asks what a device did on another.
+description: Explain and, when the user asks, change what the user's devices may do on each other with cns - pairing, grants, revokes, meshes, bot tokens and gateway approvals. Use when cns says Permission denied (exit 4), a device is missing from cns peers, or the user wants to pair a device, grant or revoke access, remove a lost or stolen device, set up a mesh or add a CI bot, or asks what a device did on another.
 ---
 
 # Access between devices with cns
@@ -11,8 +11,9 @@ until a person on it paired with the other device, or joined a mesh, and chose w
 ## Rules for agents
 
 - Changing access is the user's decision. Run `cns pair`, `cns peer grant`, `cns peer revoke`,
-  `cns peer remove`, `cns mesh join|allow|add|remove|delete|token` or `cns gateway approve`
-  only when the user asks for that change. Otherwise give them the exact command to run.
+  `cns peer remove` (with or without `--everywhere`), `cns mesh join|allow|add|remove|delete|token`
+  or `cns gateway approve` only when the user asks for that change. Otherwise give them the
+  exact command to run.
 - Ask for the narrowest grant that does the job.
 - Pairing needs a person on both devices to compare fingerprints. Use `--yes` only after they
   have, and say so.
@@ -34,7 +35,7 @@ A device may always view, type into and kill the sessions it started.
 
 ```sh
 cns peers               # ACCESS: what this device may use on each one
-cns peers --json        # access (there) and grants (what it may use here), mesh
+cns peers --json        # access (there) and grants (what it may use here), mesh, revoked
 cns doctor studio       # asks studio what it grants now, and saves it
 cns mesh list           # meshes, members and limits
 ```
@@ -70,7 +71,26 @@ cns peer grant laptop files            # on the granting device: allow more, at 
 cns peer revoke laptop shell           # allow less; work that used it ends now
 cns peer revoke laptop                 # nothing at all
 cns peer remove laptop                 # unpair
+cns peer remove phone --everywhere --dry-run   # lost or stolen: what would change
+cns peer remove phone --everywhere            # and change it
 ```
+
+`--everywhere` takes a lost device out of every place this device may change already: its
+pairing here, the meshes this device runs, the gateway `CNS_GATEWAY` names if this device is an
+owner, and each paired device that lets this one run commands, by that device's own
+`cns peer remove --fingerprint FINGERPRINT --meshes`. Each place says what became of it and what
+to run there or later; pass those on to the user. It exits 4 while a place still needs something
+run there, and 1 while one was unreachable or failed. Running it again is safe, but narrows
+again a mesh allowed again since; once the device is gone here, name it by the fingerprint
+`cns peers` shows on another device:
+`cns peer remove --fingerprint FINGERPRINT --everywhere`. A removed device's key goes on the
+device's revoked list, so no mesh gives it a record there again; pairing with it directly again
+is the only way back. A mesh the removed device runs is narrowed there: its members may use
+nothing on that device until the user leaves it (`cns mesh leave MESH`, the step the report
+gives, which also drops the secrets taken from it) or allows them again
+(`cns mesh allow MESH GRANTS`), only once `cns mesh list MESH` shows no device the user does not
+know: whoever has the removed key may have added one. A record of a removed device left or
+restored is `removed` in `cns peers`, and cns does not connect to it.
 
 A device that is in a mesh gets its grants from the mesh: `cns peer grant` refuses it, and
 `cns mesh allow MESH GRANTS` on the granting device sets what every member may use there.

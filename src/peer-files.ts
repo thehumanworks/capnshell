@@ -9,6 +9,12 @@ import { checkConfigDirectory, checkPrivateDirectory, configDirectory, isPrivate
 export const peerNamePattern = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
 const namePattern = peerNamePattern;
 
+/**
+ * Open without waiting, so that a FIFO saved where a record belongs is refused rather than waited
+ * on. Windows has no such files there, and no such flag: Node leaves it out of fs.constants there.
+ */
+const NO_WAIT = process.platform === "win32" ? 0 : constants.O_NONBLOCK ?? 0;
+
 /** A private directory under the configuration directory, holding one private file per name. */
 function privateFiles(directory: () => string, what: string) {
   /** The configuration directory and this one are private and on a trusted path. */
@@ -24,11 +30,11 @@ function privateFiles(directory: () => string, what: string) {
     makePrivateDirectory(directory());
     checkDirectories();
   };
-  /** A file's contents, which must be a private regular file; undefined when there is none. */
+  /** A file's contents, which must be a private regular file; undefined when there is none. Opened without waiting (NO_WAIT). */
   const read = (name: string): string | undefined => {
     const target = file(name);
     let fd: number;
-    try { checkDirectories(); fd = openSync(target, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)); }
+    try { checkDirectories(); fd = openSync(target, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | NO_WAIT); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
       throw error;
@@ -38,8 +44,20 @@ function privateFiles(directory: () => string, what: string) {
       return readFileSync(fd, "utf8");
     } finally { closeSync(fd); }
   };
+  /**
+   * A file's contents without the private-file check, through a link too: a regular file of at
+   * most 64 KiB, else undefined. Only for what narrows access, such as keeping a device out.
+   */
+  const readLoosely = (name: string): string | undefined => {
+    let fd: number;
+    try { checkDirectories(); fd = openSync(file(name), constants.O_RDONLY | NO_WAIT); } catch { return undefined; }
+    try {
+      const stats = fstatSync(fd);
+      return stats.isFile() && stats.size <= 65536 ? readFileSync(fd, "utf8") : undefined;
+    } catch { return undefined; } finally { closeSync(fd); }
+  };
   return {
-    checkDirectories, file, prepare, read,
+    checkDirectories, file, prepare, read, readLoosely,
     /** Create a private file that must not exist yet. */
     create(name: string, content: string): void {
       const target = file(name);
@@ -107,6 +125,8 @@ export const rewritePeerFile: (name: string, content: string) => void = peers.re
 export const peerFileExists: (name: string) => boolean = peers.exists;
 /** Read a saved peer's file, which must be a private regular file; undefined when there is none. */
 export const readPeerFile: (name: string) => string | undefined = peers.read;
+/** Read a saved peer's file even when it is not private or is a link, for keeping its device out only; undefined when there is none to read. */
+export const readPeerFileLoosely: (name: string) => string | undefined = peers.readLoosely;
 /** The names of every saved peer, sorted; [] when nothing has been saved yet. */
 export const peerNames: () => string[] = peers.names;
 /** Remove a saved peer's file. */
@@ -118,6 +138,8 @@ export const meshFiles = privateFiles(() => path.join(configDirectory(), "meshes
 export const endedMeshFiles = privateFiles(() => path.join(configDirectory(), "meshes-ended"), "mesh");
 /** The mesh secrets this device keeps, one file per secret, named by its id (secrets.ts). */
 export const secretFiles = privateFiles(() => path.join(configDirectory(), "secrets"), "secret");
+/** The devices removed here, which no mesh gives a record, one file per fingerprint (peers.ts). */
+export const revokedFiles = privateFiles(() => path.join(configDirectory(), "revoked"), "revoked device");
 
 export function validatePeerUrl(value: string): string {
   const parsed = new URL(value);

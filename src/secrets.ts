@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 import sodium from "libsodium-wrappers-sumo";
 import { z } from "zod";
-import { publicKeyBytes, verify, withSeed, type Identity, type PublicKey } from "./identity.js";
+import { fingerprint, publicKeyBytes, verify, withSeed, type Identity, type PublicKey } from "./identity.js";
 import type { MeshState } from "./mesh.js";
 import { peerNamePattern, secretFiles } from "./peer-files.js";
-import { publicKeySchema } from "./peers.js";
+import { publicKeySchema, revokedDevices } from "./peers.js";
 
 /**
  * Secrets shared in a mesh (docs/adr/0007-mesh-secrets.md).
@@ -87,10 +87,15 @@ export function mayRead(record: SecretRecord, state: MeshState, key: PublicKey):
   return isMember(state, key) && (record.device === undefined || key === record.device || key === record.owner);
 }
 
-/** The mesh in which this device keeps the record, if it still may: its owner, and the member it is for, are members, and this device may read it. */
-function meshOf(record: SecretRecord, states: readonly MeshState[], self: PublicKey): MeshState | undefined {
+/**
+ * The mesh in which this device keeps the record, if it still may: its owner, and the member it
+ * is for, are members, and this device may read it. A device removed here (`revoked`, by
+ * fingerprint) counts as no member, so what it set, or what was set for it, is not kept.
+ */
+function meshOf(record: SecretRecord, states: readonly MeshState[], self: PublicKey, revoked: ReadonlySet<string>): MeshState | undefined {
   const state = states.find((candidate) => candidate.name === record.mesh && candidate.admin === record.admin);
-  if (!state || !isMember(state, record.owner) || (record.device !== undefined && !isMember(state, record.device))) return undefined;
+  const member = (key: PublicKey) => isMember(state!, key) && !revoked.has(fingerprint(key));
+  if (!state || !member(record.owner) || (record.device !== undefined && !member(record.device))) return undefined;
   return mayRead(record, state, self) ? state : undefined;
 }
 
@@ -165,12 +170,13 @@ export function keepSecret(copy: SecretCopy): void {
  * included. A file that cannot be read or no longer counts is left out; pruneSecrets removes it.
  */
 export function heldSecrets(self: PublicKey, states: readonly MeshState[]): HeldSecret[] {
+  const revoked = revokedDevices();
   return secretFiles.names().flatMap((id) => {
     try {
       const content = secretFiles.read(id);
       if (content === undefined) return [];
       const { record, copy } = openCopy(JSON.parse(content));
-      const state = secretId(record) === id ? meshOf(record, states, self) : undefined;
+      const state = secretId(record) === id ? meshOf(record, states, self, revoked) : undefined;
       return state ? [{ id, record, copy, state }] : [];
     } catch { return []; }
   });
@@ -188,10 +194,15 @@ export function pruneSecrets(self: PublicKey, states: readonly MeshState[]): num
   return removed;
 }
 
-/** The records to offer `peer`: those it may read, each with its key sealed to it. */
+/**
+ * The records to offer `peer`: those it may read, each with its key sealed to it. None of a mesh
+ * whose admin was removed here: its last list may name devices that whoever has that key added.
+ */
 export function secretsFor(peer: PublicKey, identity: Identity, states: readonly MeshState[]): SecretCopy[] {
-  if (peer === identity.publicKey) return [];
-  const offered = heldSecrets(identity.publicKey, states).filter(({ record, state }) => mayRead(record, state, peer)).slice(0, MAX_OFFER);
+  const revoked = revokedDevices();
+  // A device removed here gets no link (the daemon refuses it), and if it had one, it would get nothing.
+  if (peer === identity.publicKey || revoked.has(fingerprint(peer))) return [];
+  const offered = heldSecrets(identity.publicKey, states).filter(({ record, state }) => !revoked.has(fingerprint(state.admin)) && mayRead(record, state, peer)).slice(0, MAX_OFFER);
   if (!offered.length) return [];
   const keys = boxKeys(identity);
   try {
@@ -205,10 +216,12 @@ export function secretsFor(peer: PublicKey, identity: Identity, states: readonly
 
 /**
  * Keep the records `from`, a member, offered that are newer than this device's and that it
- * may keep (see above), and return them. Anything else offered is ignored.
+ * may keep (see above), and return them. Anything else offered is ignored, and so is every
+ * record of a mesh whose admin was removed here, as for secretsFor.
  */
 export function takeSecrets(from: PublicKey, identity: Identity, states: readonly MeshState[], offered: unknown): SecretRecord[] {
   if (!Array.isArray(offered) || from === identity.publicKey) return [];
+  const revoked = revokedDevices();
   const self = identity.publicKey;
   const held = new Map(heldSecrets(self, states).map((secret) => [secret.id, secret.record]));
   const count = (mesh: string, admin: PublicKey) => [...held.values()].filter((record) => record.mesh === mesh && record.admin === admin).length;
@@ -219,8 +232,8 @@ export function takeSecrets(from: PublicKey, identity: Identity, states: readonl
       let opened: ReturnType<typeof openCopy>;
       try { opened = openCopy(value); } catch { continue; }
       const { record } = opened;
-      const state = meshOf(record, states, self);
-      if (!state || !isMember(state, from)) continue;
+      const state = meshOf(record, states, self, revoked);
+      if (!state || revoked.has(fingerprint(state.admin)) || !isMember(state, from)) continue;
       const id = secretId(record);
       const current = held.get(id);
       if (current ? record.version <= current.version : count(record.mesh, record.admin) >= MAX_SECRETS) continue;

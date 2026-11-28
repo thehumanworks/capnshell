@@ -20,7 +20,8 @@ export function checkPrivateDirectory(target: string): void {
   if (process.platform === "win32") {
     const others = windowsOthers(target);
     if (others.length) throw new Error(`${message}. Its ACL also lets ${others.join(", ")} in. To make it private, run: ${windowsHardenCommand(target)}`);
-  } else if ((stat.mode & 0o077) !== 0 || stat.uid !== process.getuid?.()) throw new Error(message);
+  } else if (stat.uid !== process.getuid?.()) throw new Error(message);
+  else if ((stat.mode & 0o077) !== 0) throw new Error(`${message}. To make it private, run: chmod 700 '${target.replaceAll("'", "'\\''")}'`);
 }
 
 // Windows: a directory is private when its DACL allows nobody but this user, SYSTEM and

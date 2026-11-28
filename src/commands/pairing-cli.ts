@@ -16,7 +16,7 @@ import { endpointUrl } from "../options.js";
 import { decisionSchema, decodeInvite, DEFAULT_INVITE_MS, INVITE_PREFIX, MAX_INVITE_MS, suggestedName, type Decision, type Invite, type PairingApi, type Proposal } from "../pairing.js";
 import { hostCode, inviteForCode, isPairingCode, MAX_WRONG_CODES, PairingCodeError, parseCode, type HostedCode } from "../pairing-code.js";
 import { peerFileExists, peerNamePattern, removePeerFile, validatePeerUrl } from "../peer-files.js";
-import { describeGrants, expandGrants, findPairedPeer, getPeer, listPeers, savePairedPeer, updatePairedPeer, PERMISSIONS, type Permission } from "../peers.js";
+import { describeGrants, expandGrants, findPairedPeer, getPeer, isRevoked, listPeers, refuseRemoved, revokeDevice, revokedDevices, savedKey, savePairedPeer, updatePairedPeer, PERMISSIONS, type Permission } from "../peers.js";
 import { plain } from "../terminal.js";
 import { selfCheck, type SelfFacts } from "../self-check.js";
 import type { ShellApi } from "../shell.js";
@@ -554,6 +554,7 @@ async function inviteAndWait(options: PairOptions): Promise<void> {
       `  It asks to use this machine's: ${describeGrants(proposal.requests)}`,
       `  It lets this machine use its:  ${describeGrants(proposal.offers)}`,
       ...proposal.addresses?.length ? [`  This machine will dial it at:  ${proposal.addresses.join(", ")}`] : [],
+      ...isRevoked(peer) ? [REMOVED_BEFORE] : [],
     ].join("\n"));
     const decline = async (reason: string, message: string) => {
       await control!.remote.decide(created.id, { accept: false, reason });
@@ -585,6 +586,9 @@ async function inviteAndWait(options: PairOptions): Promise<void> {
   }
 }
 
+/** Said on either side, with --yes too, when the other device was removed here (revokeDevice), which pairing again ends. */
+const REMOVED_BEFORE = "  It was removed from this device before (cns peer remove); pairing again lets it back in, and meshes here give it records again.";
+
 async function acceptInvite(text: string, options: PairOptions): Promise<void> {
   let invite: Invite;
   // An expired or unreadable invite is a refused pairing, as an unknown one is.
@@ -603,6 +607,7 @@ async function acceptInvite(text: string, options: PairOptions): Promise<void> {
     const existing = findPairedPeer(invite.key);
     if (existing) throw new Error(`This device is already paired with it as ${existing.name}. To pair again, remove it first with cns peer remove ${existing.name}.`);
     if (options.name !== undefined) checkFreeName(options.name);
+    const removedBefore = isRevoked(invite.key);
     const peerFingerprint = fingerprintOf(invite.key);
     // --grant, or --yes alone, decides without asking; --yes never grants what --grant does not name.
     const askGrants = options.grant === undefined && !prompt.yes;
@@ -611,6 +616,7 @@ async function acceptInvite(text: string, options: PairOptions): Promise<void> {
       `  This device will ask to use its: ${describeGrants(requests)}`,
       ...askGrants ? [] : [`  and let it use this device's:   ${describeGrants(offers)}`],
       `  This device is ${identity.fingerprint}; the other side will see that.`,
+      ...removedBefore ? [REMOVED_BEFORE] : [],
     ].join("\n"));
     if (!(await prompt.confirm("Pair with it?", true))) { console.log("Not paired."); process.exitCode = 3; return; }
     const name = await chooseName(prompt, "Save it as", options.name, invite.name ?? "peer");
@@ -751,6 +757,7 @@ export async function doctor(name: string | undefined, options: DoctorOptions): 
   if (name === undefined) return doctorSelf(options);
   const entry = getPeer(name);
   if (!entry) throw new Error(`No paired device is saved as ${name}. cns peers lists the paired devices.`);
+  refuseRemoved(entry);
   const report: Record<string, unknown> = { name };
   const lines: string[] = [];
   const identity = ensureIdentity().identity;
@@ -879,28 +886,27 @@ export async function address(name: string, urls: string[], options: { remove?: 
   console.log(updated.addresses.length ? `${name} is dialed at: ${updated.addresses.join(", ")}.` : `${name} has no saved address.`);
 }
 
-/** `cns peer remove NAME`: unpair a device here; the running daemon drops its links at once. */
-export async function removePeer(name: string, options: { state?: string }, expectedKey?: string): Promise<void> {
-  let publicKey: string | undefined;
-  let mesh: string | undefined;
-  try { ({ publicKey, mesh } = getPeer(name) ?? {}); }
-  catch { /* An explicit peer remove can forget an unreadable record. */ }
-  // A mesh removal selected a member by key. Never unpair a different device now using its alias.
-  if (expectedKey !== undefined && publicKey !== expectedKey) throw new Error(`The pairing for ${name} changed; it was not removed. Check cns peer list.`);
-  if (mesh !== undefined) notMeshMember(name, `It goes when the mesh's admin removes it, or when this device leaves the mesh: cns mesh leave ${mesh}.`);
+/**
+ * Unpair the device saved as `name`, which must still name the key `publicKey`: put it on the
+ * revoked list, so no mesh gives it a record here again (revokeDevice), then forget it, and have
+ * the running daemon end its links at once. `cns peer remove` (remove-everywhere.ts) and
+ * `cns mesh remove --unpair` call it.
+ */
+export async function unpair(name: string, publicKey: string, state?: string): Promise<void> {
+  // Found by key, then removed by name: never a different device now saved under that name.
+  if (savedKey(name)?.publicKey !== publicKey) throw new Error(`${name} now names another device, or none, so it was left as it is. Check cns peers.`);
+  // Revoked first, so that no mesh list arriving meanwhile gives it a record once its pairing is gone.
+  revokeDevice(fingerprintOf(publicKey), publicKey);
   removePeerFile(name);
-  if (publicKey) {
-    const control = await daemonIfRunning(options.state);
-    if (control) {
-      try { await control.remote.forget(publicKey); } finally { control.close(); }
-    }
-  }
-  console.log(`Removed ${name}.`);
+  const control = await daemonIfRunning(state);
+  if (control) { try { await control.remote.forget(publicKey); } finally { control.close(); } }
 }
 
 /** `cns peers`: every paired device with its status. */
 export async function peers(options: PeersOptions): Promise<void> {
   const saved = listPeers();
+  // A record left or restored of a device removed here: cns neither dials it nor lets it in.
+  const removed = revokedDevices();
   let online = new Map<string, { via: "direct" | "relay"; version: string | undefined }>();
   const control = await daemonIfRunning(options.state);
   if (control) {
@@ -911,20 +917,25 @@ export async function peers(options: PeersOptions): Promise<void> {
   const rows = saved.map((peer) => {
     const link = online.get(peer.fingerprint);
     // Known only while linked: what a device runs can change whenever it is offline.
-    return { name: peer.name, fingerprint: peer.fingerprint, status: link ? "online" : "offline", connection: link?.via ?? null, version: link?.version ?? null, access: peer.grants.outgoing, grants: peer.grants.incoming, addresses: peer.addresses, mesh: peer.mesh ?? null };
+    return { name: peer.name, fingerprint: peer.fingerprint, status: link ? "online" : "offline", connection: link?.via ?? null, version: link?.version ?? null, access: peer.grants.outgoing, grants: peer.grants.incoming, addresses: peer.addresses, mesh: peer.mesh ?? null, revoked: removed.has(peer.fingerprint) };
   });
   if (options.json) { console.log(JSON.stringify(rows, null, 2)); return; }
   if (!rows.length) { console.error("No paired devices. Run cns pair to pair with another device."); return; }
   // Only when there is a mesh member, so the table of a device in no mesh stays as it was.
   const meshes = rows.some((row) => row.mesh !== null);
   const table = [["NAME", "STATUS", "CONNECTION", "VERSION", "ACCESS", ...meshes ? ["MESH"] : [], "FINGERPRINT"], ...rows.map((row) => [
-    row.name, row.status, row.connection ?? "-", row.status === "online" ? row.version ?? "older" : "-", describeGrants(row.access), ...meshes ? [row.mesh ?? "-"] : [], row.fingerprint,
+    row.name, row.revoked ? "removed" : row.status, row.connection ?? "-", row.status === "online" ? row.version ?? "older" : "-", describeGrants(row.access), ...meshes ? [row.mesh ?? "-"] : [], row.fingerprint,
   ])];
   const widths = table.reduce((max, row) => row.map((cell, index) => Math.max(cell.length, max[index] ?? 0)), [] as number[]);
   console.log(table.map((row) => row.map((cell, index) => index === row.length - 1 ? cell : cell.padEnd(widths[index]!)).join("  ")).join("\n"));
   // A mesh member's access is learned over its first link, and cns mesh allow, not cns peer grant, widens it.
-  const blocked = rows.flatMap((row) => !row.access.length && row.mesh === null ? [row.name] : []);
+  const blocked = rows.flatMap((row) => !row.access.length && row.mesh === null && !row.revoked ? [row.name] : []);
   if (blocked.length) console.error(`\n${noAccessHint(blocked)}`);
+  const left = rows.flatMap((row) => row.revoked ? [row.name] : []);
+  if (left.length) {
+    const one = left.length === 1;
+    console.error(`\n${left.join(", ")} ${one ? "was" : "were"} removed from this device (cns peer remove), so cns neither connects to ${one ? "it" : "them"} nor lets ${one ? "it" : "them"} in; ${one ? "its record is" : "their records are"} left over, as from a backup. To delete ${one ? "it" : "one"}: cns peer remove ${one ? left[0] : "NAME"}.`);
+  }
   const behind = rows.flatMap((row) => {
     if (row.status !== "online") return [];
     const order = versionOrder(row.version ?? undefined);

@@ -20,7 +20,7 @@ export const READ_TOOLS: readonly ToolName[] = ["list_peers", "read_file", "list
 
 export interface GatewayOptions { url?: string; json?: boolean }
 
-function gatewayUrl(options: GatewayOptions): string {
+export function gatewayUrl(options: GatewayOptions): string {
   const value = options.url ?? process.env.CNS_GATEWAY ?? DEFAULT_GATEWAY;
   let url: URL;
   try { url = new URL(value); } catch { throw new Error(`The gateway address must be a URL such as ${DEFAULT_GATEWAY}.`); }
@@ -29,25 +29,34 @@ function gatewayUrl(options: GatewayOptions): string {
   return url.origin;
 }
 
+/**
+ * A request the gateway refused, with its HTTP status (401 when this device is not one of its
+ * owners) and the error it gave, `said`; or no answer at all, with neither.
+ */
+export class GatewayError extends Error {
+  constructor(message: string, readonly status?: number, readonly said?: string, options?: ErrorOptions) { super(message, options); }
+}
+
 /** One signed owner request; returns the gateway's answer or throws its error. */
-async function call<T>(options: GatewayOptions, action: string, input: Record<string, unknown> = {}): Promise<T> {
+export async function call<T>(options: GatewayOptions, action: string, input: Record<string, unknown> = {}, signal?: AbortSignal): Promise<T> {
   const identity = loadIdentity();
   if (!identity) throw new Error("This device has no identity yet; run cns identity, then add its public key to the gateway's OWNER_KEYS.");
   const url = `${gatewayUrl(options)}/admin/${action}`;
   const body = new TextEncoder().encode(JSON.stringify(input));
   let response: Response;
+  let text: string;
   try {
-    response = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", [OWNER_HEADER]: ownerProof(identity, "POST", url, body) }, body });
+    response = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json", [OWNER_HEADER]: ownerProof(identity, "POST", url, body) }, body, signal });
+    text = await response.text();
   } catch (error) {
-    throw new Error(`Cannot reach the gateway at ${gatewayUrl(options)}: ${(error as Error).message}`, { cause: error });
+    throw new GatewayError(`Cannot reach the gateway at ${gatewayUrl(options)}: ${(error as Error).message}`, undefined, undefined, { cause: error });
   }
-  const text = await response.text();
   let answer: unknown;
-  try { answer = JSON.parse(text); } catch { throw new Error(`The gateway answered ${response.status}: ${text.slice(0, 200)}`); }
+  try { answer = JSON.parse(text); } catch { throw new Error(`The gateway answered ${response.status} and said: ${JSON.stringify(text.slice(0, 200))}`); }
   if (!response.ok) {
-    const message = (answer as { error?: string }).error ?? `The gateway answered ${response.status}.`;
-    if (response.status === 401) throw new Error(`${message} This device's public key is ${identity.publicKey}.`);
-    throw new Error(message);
+    const said = (answer as { error?: unknown } | null)?.error;
+    const message = typeof said === "string" ? said : `The gateway answered ${response.status}.`;
+    throw new GatewayError(response.status === 401 ? `${message} This device's public key is ${identity.publicKey}.` : message, response.status, typeof said === "string" ? said.slice(0, 200) : undefined);
   }
   return answer as T;
 }
@@ -62,7 +71,7 @@ interface Grant { id: string; client: string; devices: string[]; tools: string[]
 
 interface GatewayMesh { name: string; admin: string; version: number; members: string[] }
 /** `meshes` is absent from a gateway deployed before 2.6.0. */
-interface GatewayStatus { fingerprint: string; name: string; relay: string; devices: Device[]; meshes?: GatewayMesh[]; pending: Consent[]; grants: Grant[]; owner: string; version?: unknown; tools?: unknown }
+export interface GatewayStatus { fingerprint: string; name: string; relay: string; devices: Device[]; meshes?: GatewayMesh[]; pending: Consent[]; grants: Grant[]; owner: string; version?: unknown; tools?: unknown }
 
 /**
  * What the gateway was deployed from: its cns version and the tools it can grant. A gateway

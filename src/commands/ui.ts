@@ -2,7 +2,7 @@ import { openDeviceLink, type DeviceLink } from "../device-link.js";
 import { errorMessage, printable } from "../errors.js";
 import { listEverywhere, LIST_TIMEOUT_MS, type FleetDevice } from "../fleet-sessions.js";
 import { ensureIdentity, type Identity } from "../identity.js";
-import { explainDenial, listPeers, resolvePeer, type Permission } from "../peers.js";
+import { explainDenial, reachablePeers, resolvePeer, type Permission } from "../peers.js";
 import { secureReady } from "../secure.js";
 import { describeExit } from "../session-text.js";
 import { sessionNameSchema, type PtySessionInfo } from "../shell.js";
@@ -83,7 +83,7 @@ export async function ui(options: UiOptions = {}): Promise<number> {
   }
   const { identity } = ensureIdentity();
   await secureReady();
-  const devices: UiDevice[] = listPeers().map((peer) => ({ name: peer.name, publicKey: peer.publicKey, addresses: peer.addresses, outgoing: peer.grants.outgoing }));
+  const devices: UiDevice[] = reachablePeers().map((peer) => ({ name: peer.name, publicKey: peer.publicKey, addresses: peer.addresses, outgoing: peer.grants.outgoing }));
   if (!devices.length) throw new Error("No paired devices. Run cns pair to pair with another device.");
   const byName = (name: string) => devices.find((device) => device.name === name);
 

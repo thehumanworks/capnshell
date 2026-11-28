@@ -17,7 +17,7 @@ import { ensureIdentity, fingerprint, type Identity, type PublicKey } from "../i
 import { GrantedShell, type GrantHolder } from "../granted-shell.js";
 import { createInvite, decisionSchema, PairingApi, suggestedName } from "../pairing.js";
 import { InviteBook } from "../invites.js";
-import { advertisedSchema, describeGrants, explainDenial, findPairedPeer, getPeer, grantsSchema, learnAddresses, listPeers, savePairedPeer, updatePairedPeer } from "../peers.js";
+import { advertisedSchema, describeGrants, explainDenial, findPairedPeer, getPeer, grantsSchema, isRevoked, learnAddresses, listPeers, revokedDevices, savePairedPeer, updatePairedPeer } from "../peers.js";
 import { listeningAddresses } from "../addresses.js";
 import { serveControl, type PairingController } from "./daemon-server.js";
 import { removeStaleState } from "./daemon.js";
@@ -102,9 +102,14 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
   const audit = auditLog();
   // The relay built into cns: the daemon registers there, and paired devices are dialed there after their direct addresses.
   const relay = builtInRelay();
+  /**
+   * The record of a device paired here, unless it was removed here (revokeDevice): a record left
+   * behind, such as one restored from a backup, does not let it in. Pairing again clears that.
+   */
+  const pairedHere = (publicKey: PublicKey) => isRevoked(publicKey) ? undefined : findPairedPeer(publicKey);
   /** What this device lets an authenticated paired device do here: exactly its saved incoming grants. */
   function offerTo(publicKey: PublicKey): { local: GrantedShell; name: string; grants: GrantHolder } {
-    const entry = findPairedPeer(publicKey);
+    const entry = pairedHere(publicKey);
     if (!entry) throw new AuthError("not-paired", "Not paired with this device.");
     const grants: GrantHolder = { current: entry.grants.incoming };
     const owner = fingerprint(publicKey);
@@ -325,7 +330,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
   function meshesFrom(from: PublicKey, offered: unknown): SignedList[] {
     if (!daemon || stopping) return [];
     const states = listMeshes();
-    const newer = newerLists(states, offered);
+    const newer = newerLists(states, offered, revokedDevices());
     const dropped = droppedBy(from, identity.publicKey, states, offered);
     for (const state of newer) {
       if (state.list.members.some((member) => member.key === identity.publicKey)) {
@@ -425,10 +430,10 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
     }
   }
 
-  /** The responder's view of who may connect: paired devices, and devices that hold a live invite. */
+  /** The responder's view of who may connect: paired devices, and devices that hold a live invite, which may pair a removed one again. */
   function authorize(peer: PublicKey, invite?: { id: string }): Refusal | undefined {
     if (invite) return undefined;
-    if (findPairedPeer(peer)) return undefined;
+    if (pairedHere(peer)) return undefined;
     return { code: "not-paired", reason: "Not paired with this device. Run cns pair on it and type the code it shows here with cns pair CODE." };
   }
   const secretFor = (id: string) => invites.secretFor(id);
@@ -523,7 +528,9 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
     async function attempt_() {
       const current = getPeer(name);
       const addresses = current && worthDialing(current, relay) ? dialAddresses(current, relay) : [];
-      if (!current || current.publicKey !== expectedKey || !addresses.length) return stop();
+      // A device removed here is not dialed, even when a record of it is left or restored, as this
+      // link would offer it what that record grants. Checked on every attempt, the first included.
+      if (!current || current.publicKey !== expectedKey || !addresses.length || isRevoked(current.publicKey)) return stop();
       // With a link up, wait, unless it runs through the relay while a direct one may work (link-rules.ts).
       const existing = linkTo(current.publicKey);
       const turn = dialTurn(existing, addresses, Date.now());

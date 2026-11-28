@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { createPeerFile, peerFile, peerNames, readPeerFile, rewritePeerFile, validatePeerUrl } from "./peer-files.js";
+import { createPeerFile, peerFile, peerNames, readPeerFile, readPeerFileLoosely, revokedFiles, rewritePeerFile, validatePeerUrl } from "./peer-files.js";
 import { isIP } from "node:net";
 import { errorMessage } from "./errors.js";
 import { fingerprint, type PublicKey } from "./identity.js";
@@ -218,6 +218,40 @@ export function getPeer(name: string): PeerEntry | undefined {
   return content === undefined ? undefined : entryFor(name, content);
 }
 
+/**
+ * The key the file saved as `name` names, also when this cns cannot use the record, or when the
+ * file is not private or is a link (`loose`), as after a backup was restored; undefined when it
+ * names none. For keeping a device out only (revokeDevice), which narrows, never to let one in.
+ */
+export function savedKey(name: string): { publicKey: PublicKey; loose: boolean } | undefined {
+  const found = (publicKey: PublicKey | undefined, loose: boolean) => publicKey === undefined ? undefined : { publicKey, loose };
+  try { return found(getPeer(name)?.publicKey, false); } catch (error) {
+    if (error instanceof UnreadablePeer) return found(error.publicKey, false);
+    try { return found(publicKeySchema.safeParse((JSON.parse(readPeerFileLoosely(name) ?? "null") as { publicKey?: unknown } | null)?.publicKey).data, true); }
+    catch { return undefined; }
+  }
+}
+
+/**
+ * Keep a removed device out (docs/adr/0010-removing-a-lost-device.md): no mesh gives the device
+ * with fingerprint `fp` a record here again (planMesh), until this device pairs with it directly
+ * (savePairedPeer). A fingerprint, so that a device never seen here can be kept out too.
+ */
+export function revokeDevice(fp: string, publicKey?: PublicKey): void {
+  try { revokedFiles.create(fp, JSON.stringify({ version: 1, ...publicKey ? { publicKey } : {}, revokedAt: new Date().toISOString() }) + "\n"); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+}
+
+/** The fingerprints of the devices removed here (revokeDevice). */
+export function revokedDevices(): Set<string> {
+  return new Set(revokedFiles.names());
+}
+
+/** Whether the device with this key was removed here (revokeDevice): one look at the revoked directory, cheap enough for every connection. */
+export function isRevoked(publicKey: PublicKey): boolean {
+  return revokedFiles.exists(fingerprint(publicKey));
+}
+
 /** The paired device with this key, under whatever alias it was saved. */
 export function findPairedPeer(publicKey: PublicKey): PeerEntry | undefined {
   // Called for every connection: bad files are reported by listings, not here.
@@ -231,7 +265,13 @@ export function savePairedPeer(name: string, peer: Omit<PairedPeer, "version">):
   const existing = findPairedPeer(peer.publicKey);
   if (existing) throw new Error(`This device is already paired as ${existing.name}.`);
   const record: PairedPeer = pairedPeerSchema.parse({ version: 2, ...peer });
+  // Pairing with a removed device again is the way back for it (revokeDevice); a mesh's record is
+  // not. Looked up first, so that a revoked directory that cannot be read stops the pairing; the
+  // entry goes only once the pairing is saved, so a pairing that fails leaves the device revoked.
+  const fp = fingerprint(record.publicKey);
+  const back = record.mesh === undefined && revokedFiles.exists(fp);
   createPeerFile(name, recordText(record));
+  if (back) revokedFiles.remove(fp);
 }
 
 /** Change a paired device's record, for example its grants or addresses. Fields this cns does not know stay as they were. */
@@ -273,9 +313,26 @@ export function learnAddresses(saved: readonly string[], advertised: readonly st
   return [...all.filter((url) => !isRelayAddress(url)).slice(0, 16 - relays.length), ...relays];
 }
 
+/**
+ * Refuse to connect to a device removed here (revokeDevice), whose record was left or restored, as
+ * from a backup: the connection would send whoever has its key what the command sends, such as a
+ * file, and take what it serves, such as a skill. Every connection a command makes to a paired
+ * device checks this (openDeviceLink, cns doctor, Pi); the daemon's dial loop checks it too.
+ */
+export function refuseRemoved(device: { name: string; publicKey: PublicKey }): void {
+  if (isRevoked(device.publicKey)) throw new Error(`${device.name} was removed from this device (cns peer remove), so cns does not connect to it. To delete the record of it left here, run: cns peer remove ${device.name}. To use it again, pair with it again after that: cns pair.`);
+}
+
+/** The paired devices a command that reaches every device asks: those saved, but for those removed here (refuseRemoved). */
+export function reachablePeers(report?: (name: string, error: unknown) => void): PeerEntry[] {
+  const removed = revokedDevices();
+  return listPeers(report).filter((peer) => !removed.has(peer.fingerprint));
+}
+
 /** The paired device a command names: the identity to expect and every address to try. */
 export function resolvePeer(name: string): { name: string; publicKey: PublicKey; outgoing: Permission[]; addresses: string[] } {
   const entry = getPeer(name);
   if (!entry) throw new Error(`No paired device is saved as ${name}. Pair with it first: cns pair. cns peers lists the paired devices.`);
+  refuseRemoved(entry);
   return { name, publicKey: entry.publicKey, outgoing: entry.grants.outgoing, addresses: entry.addresses };
 }

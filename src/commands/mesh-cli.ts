@@ -7,11 +7,11 @@ import { meshFiles, peerNamePattern } from "../peer-files.js";
 import { DEFAULT_INVITE_MS, MAX_INVITE_MS, suggestedName } from "../pairing.js";
 import { botTokenForCode, hostCode, MAX_WRONG_CODES, PairingCodeError, parseCode } from "../pairing-code.js";
 import { builtInRelay } from "../relay-config.js";
-import { describeGrants, expandGrants, getPeer, listPeers, resolvePeer, savePairedPeer, type Permission } from "../peers.js";
+import { describeGrants, expandGrants, getPeer, listPeers, resolvePeer, revokedDevices, savePairedPeer, type Permission } from "../peers.js";
 import { heldSecrets } from "../secrets.js";
 import { connectDevice } from "./connect-device.js";
 import { connectControl } from "./daemon.js";
-import { removePeer } from "./pairing-cli.js";
+import { unpair } from "./pairing-cli.js";
 
 interface StateOption { state?: string }
 
@@ -35,7 +35,7 @@ function adminOf(name: string, self: PublicKey): MeshState {
 }
 
 /** What this device calls a mesh's admin. */
-function adminName(state: MeshState): string {
+export function adminName(state: MeshState): string {
   return listPeers(() => {}).find((peer) => peer.publicKey === state.admin && peer.mesh === undefined)?.name ?? `the device with fingerprint ${fingerprint(state.admin)}`;
 }
 
@@ -51,7 +51,7 @@ function checkRoom(name: string): void {
  * line and offers linked devices the new lists. With no daemon, bring the records in line
  * here; the daemon offers the lists when it starts. Says whether a daemon took the change.
  */
-async function settle(options: StateOption, self: PublicKey): Promise<boolean> {
+export async function settle(options: StateOption, self: PublicKey): Promise<boolean> {
   let control: Awaited<ReturnType<typeof connectControl>>;
   try { control = await connectControl(options.state); }
   catch { applyMeshes(self); return false; }
@@ -245,7 +245,7 @@ export async function removeMembers(name: string, devices: string[], options: St
   const live = await settle(options, identity.publicKey);
   console.log(`Removed ${devices.join(", ")} from the mesh ${name} (version ${list.version}). The other members drop ${keys.length === 1 ? "it" : "them"} when they get this list.`);
   for (const peer of paired) {
-    if (options.unpair) await removePeer(peer.name, options, peer.publicKey);
+    if (options.unpair) { await unpair(peer.name, peer.publicKey, options.state); console.log(`Removed ${peer.name}.`); }
     else console.log(`Still paired with this device: ${peer.name}. To unpair: cns peer remove ${peer.name}.`);
   }
   if (!live) console.log("Start this device's daemon so members get the new list: cns up.");
@@ -322,6 +322,10 @@ export async function allowMembers(name: string, words: string[], options: State
   writeMesh({ ...state, allow });
   await settle(options, identity.publicKey);
   console.log(`Members of the mesh ${name} may use here: ${describeGrants(allow)}.`);
+  // Allowed all the same: the person may have checked the list already.
+  if (allow.length && revokedDevices().has(fingerprint(state.admin))) {
+    console.error(`Warning: ${adminName(state)}, which runs the mesh ${name}, was removed from this device (cns peer remove), so its last list stays here, and that list may name devices whoever has its key added. Check that cns mesh list ${name} shows no device you do not know; to end the mesh here instead: cns mesh leave ${name}.`);
+  }
 }
 
 /** The members of a mesh other than this device, its admin, by the names cns mesh remove takes. */
@@ -377,6 +381,7 @@ export function listMeshesCommand(name: string | undefined, options: { json?: bo
   const { identity } = ensureIdentity();
   const states = name === undefined ? listMeshes() : [requireMesh(name)];
   const here = new Map(listPeers(() => {}).map((peer) => [peer.publicKey, peer.name]));
+  const revoked = revokedDevices();
   const rows = states.map((state) => ({
     name: state.name,
     admin: state.admin === identity.publicKey ? "this device" : adminName(state),
@@ -389,6 +394,8 @@ export function listMeshesCommand(name: string | undefined, options: { json?: bo
       admin: member.key === state.admin,
       gateway: member.gateway === true,
       limit: member.limit ?? null,
+      // Removed here (cns peer remove): it gets no record here from this mesh, and lists it signs are not taken.
+      revoked: revoked.has(fingerprint(member.key)),
     })),
   }));
   if (options.json) { console.log(JSON.stringify(rows, null, 2)); return; }
@@ -396,7 +403,7 @@ export function listMeshesCommand(name: string | undefined, options: { json?: bo
   for (const row of rows) {
     console.log(`${row.name}: run by ${row.admin}, version ${row.version}${row.allow ? `; members may use here: ${describeGrants(row.allow)}` : ""}`);
     for (const member of row.members) {
-      console.log(`  ${member.name}${member.admin ? " (admin)" : member.gateway ? " (gateway)" : ""}\t${member.fingerprint}${member.limit ? `\tlimited to ${describeGrants(member.limit)}` : ""}`);
+      console.log(`  ${member.name}${member.admin ? " (admin)" : member.gateway ? " (gateway)" : ""}${member.revoked ? " (revoked)" : ""}\t${member.fingerprint}${member.limit ? `\tlimited to ${describeGrants(member.limit)}` : ""}`);
     }
   }
 }

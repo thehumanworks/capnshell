@@ -75,13 +75,39 @@ export function createCli(): Command {
   });
   const alias = program.command("peer").description("Manage paired devices: their names, grants and addresses");
   const pairedDevice = "A paired device's name, or --device";
-  alias.command("remove").usage("[options] <name>").argument("[name]", pairedDevice).description("Unpair a device: forget it here, and end its links at once")
+  alias.command("remove").usage("[options] <name>").argument("[name]", pairedDevice).description("Unpair a device: forget it here, and end its links at once; with --everywhere, a lost one everywhere")
     .addOption(deviceOption("The paired device, in place of the NAME argument"))
+    .option("-F, --fingerprint <fingerprint>", "The device with this fingerprint, in place of its name: one another device names otherwise, or one removed here already")
+    .option("-E, --everywhere", "For a lost or stolen device: also take it out of the meshes this device runs, the gateway CNS_GATEWAY names if this device is an owner, and every paired device that lets this one run commands")
+    // What --everywhere runs on each device: also the meshes this device runs, and those the device runs.
+    .addOption(new Option("--meshes").hideHelp())
+    .option("-n, --dry-run", "Show what would change in each place, and change nothing")
+    .option("-j, --json", "Print each place as JSON: [{ device, place, outcome, detail, next }], device null for this device and the gateway")
     .option("-S, --state <path>", "Local daemon state file")
-    .action(async (name: string | undefined, given: { device?: string; state?: string }) => {
-      const { device, after, options } = paired("peer remove", "NAME", [name], given);
-      once("peer remove", "NAME", after);
-      const { removePeer } = await import("./commands/pairing-cli.js"); await removePeer(device, options);
+    .addHelpText("after", [
+      "",
+      "For a lost device, on one you trust:  cns peer remove phone --everywhere --dry-run",
+      "                                      cns peer remove phone --everywhere",
+      "That also takes it out of the meshes this device runs, the gateway CNS_GATEWAY names, and each",
+      "paired device that lets this one run commands, by that device's own cns peer remove. Each place",
+      "is reported with what to run there or later. Running it again is safe, but narrows again a mesh",
+      "allowed again since; once the device is gone here, name it by its fingerprint.",
+      "A removed device gets no record here from any mesh again, until you pair with it directly. A mesh",
+      "it runs stays at its last list here, and its members may use nothing here; to end it here: cns",
+      "mesh leave NAME. cns mesh allow undoes that, but only once cns mesh list NAME shows no device you",
+      "do not know.",
+      "Exit status with --everywhere, --fingerprint, --dry-run or --json: 0 when done, 4 when a place",
+      "still needs something run there, 1 when a place was unreachable or failed.",
+    ].join("\n"))
+    .action(async (name: string | undefined, given: { device?: string; fingerprint?: string; everywhere?: boolean; meshes?: boolean; dryRun?: boolean; json?: boolean; state?: string }) => {
+      const { device: _device, ...options } = given;
+      // --fingerprint names the device in place of NAME or --device.
+      if (options.fingerprint !== undefined && (name !== undefined || given.device !== undefined)) throw new Error("Name the device once: cns peer remove NAME, or cns peer remove --fingerprint FINGERPRINT.");
+      const chosen = options.fingerprint === undefined ? paired("peer remove", "NAME", [name], given) : undefined;
+      if (chosen) once("peer remove", "NAME", chosen.after);
+      const { removeCommand, removePeer } = await import("./commands/remove-everywhere.js");
+      process.exitCode = chosen && !options.everywhere && !options.meshes && !options.dryRun && !options.json
+        ? await removePeer(chosen.device, options) : await removeCommand(chosen?.device, options);
     });
   alias.command("grant").usage("[options] <name> <grants...>").argument("[name]", pairedDevice).argument("[grants...]").description("Let a paired device use more of this device: shell, files, skills, sessions, all or permissions")
     .addOption(deviceOption("The paired device, in place of the NAME argument"))
@@ -107,10 +133,11 @@ export function createCli(): Command {
       const { address } = await import("./commands/pairing-cli.js"); await address(device, after, options);
     });
   alias.command("list").description("List paired devices")
-    .option("-j, --json", "Print a JSON array sorted by name, [] when there are none: { name, fingerprint, publicKey, addresses, grants, mesh? } per device")
+    .option("-j, --json", "Print a JSON array sorted by name, [] when there are none: { name, fingerprint, publicKey, addresses, grants, mesh?, revoked } per device")
     .action(async (options: { json?: boolean }) => {
-      const { listPeers } = await import("./peers.js");
-      const peers = listPeers().map((peer) => ({ name: peer.name, fingerprint: peer.fingerprint, publicKey: peer.publicKey, addresses: peer.addresses, grants: peer.grants, ...peer.mesh === undefined ? {} : { mesh: peer.mesh } }));
+      const { listPeers, revokedDevices } = await import("./peers.js");
+      const removed = revokedDevices();
+      const peers = listPeers().map((peer) => ({ name: peer.name, fingerprint: peer.fingerprint, publicKey: peer.publicKey, addresses: peer.addresses, grants: peer.grants, ...peer.mesh === undefined ? {} : { mesh: peer.mesh }, revoked: removed.has(peer.fingerprint) }));
       if (options.json) console.log(JSON.stringify(peers, null, 2));
       else for (const peer of peers) console.log(`${peer.name}\t${peer.fingerprint}\t${peer.addresses[0] ?? "-"}`);
     });

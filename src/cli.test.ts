@@ -116,7 +116,8 @@ test("paired devices are listed and removed across CLI invocations", { skip: pro
   // JSON lists the same devices, sorted by name.
   const json = JSON.parse((await call(["peer", "list", "--json"])).stdout);
   assert.deepEqual(json.map((peer: { name: string; fingerprint: string }) => [peer.name, peer.fingerprint]), [["build", build.fingerprint], ["studio", studio.fingerprint]]);
-  assert.deepEqual(json.map((peer: object) => Object.keys(peer)), [["name", "fingerprint", "publicKey", "addresses", "grants"], ["name", "fingerprint", "publicKey", "addresses", "grants"]]);
+  assert.deepEqual(json.map((peer: object) => Object.keys(peer)), [["name", "fingerprint", "publicKey", "addresses", "grants", "revoked"], ["name", "fingerprint", "publicKey", "addresses", "grants", "revoked"]]);
+  assert.deepEqual(json.map((peer: { revoked: boolean }) => peer.revoked), [false, false]);
   assert.equal((await call(["peer", "remove", "build"])).stdout, "Removed build.");
   // Errors are the same with --json: a message on stderr, nothing on stdout and a failing status.
   await chmod(env.CNS_CONFIG_DIR, 0o755);

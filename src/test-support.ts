@@ -166,7 +166,7 @@ export async function testDevices(t: TestContext, prefix = "cns-devices-") {
     /**
      * Pair two devices: `host`, whose daemon runs, prints an invite that `guest` pastes. Each
      * saves the other under its name. `hostGrants` is what the guest may do on the host;
-     * `guestGrants` what the host may do on the guest.
+     * `guestGrants` what the host may do on the guest. Returns what each side printed.
      */
     async pair(host: TestDevice, guest: TestDevice, { hostGrants = "all", guestGrants = "none" }: { hostGrants?: string; guestGrants?: string } = {}) {
       // --long: an invite to paste, even for a device that has a relay to show a code through.
@@ -177,6 +177,7 @@ export async function testDevices(t: TestContext, prefix = "cns-devices-") {
       const accepting = await cli(guest, ["pair", invite, "--yes", "--name", host.name, "--grant", guestGrants, "--state", guest.state]);
       if (accepting.code !== 0) throw new Error(`Pairing failed on ${guest.name}:\n${accepting.output}`);
       if (await inviting.exited !== 0) throw new Error(`Pairing failed on ${host.name}:\n${inviting.output}`);
+      return { host: inviting.output, guest: accepting.output };
     },
   };
 }

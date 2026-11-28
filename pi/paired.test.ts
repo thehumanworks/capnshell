@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { generateIdentity } from "../src/identity.js";
+import { revokeDevice, savePairedPeer } from "../src/peers.js";
 import { launchCli, unusedPort } from "../src/test-support.js";
 import { connectPaired } from "./host.js";
 import { parseTarget, targetLabel } from "./target.js";
@@ -78,4 +81,15 @@ test("Pi attaches to a paired device by name over an encrypted link, within its 
   const { writeFile } = await import("node:fs/promises");
   await writeFile(path.join(shellOnly.dir, "peers", "broken"), '{"version":9}', { mode: 0o600 });
   assert.throws(() => parseTarget("broken"), /The saved peer broken cannot be read/);
+
+  // A device removed here is not dialed, by a record of it left or restored, as from a backup.
+  let dialed = 0;
+  const server = net.createServer((socket) => { dialed++; socket.destroy(); });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => { server.close(); });
+  const lost = generateIdentity();
+  savePairedPeer("phone", { publicKey: lost.publicKey, addresses: [`ws://127.0.0.1:${(server.address() as net.AddressInfo).port}`], pairedAt: new Date().toISOString(), grants: { incoming: [], outgoing: ["shell"] } });
+  revokeDevice(lost.fingerprint, lost.publicKey);
+  await assert.rejects(connectPaired(parseTarget("phone") as never, AbortSignal.timeout(10000)), /^Error: phone was removed from this device \(cns peer remove\), so cns does not connect to it\./);
+  assert.equal(dialed, 0);
 });

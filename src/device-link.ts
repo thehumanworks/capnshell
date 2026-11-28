@@ -1,6 +1,7 @@
 import type { RpcStub } from "capnweb";
 import { connectControl, type ControlConnection } from "./commands/daemon.js";
 import type { Identity } from "./identity.js";
+import { refuseRemoved } from "./peers.js";
 import { RefusingShell } from "./refusing-shell.js";
 import { builtInRelay } from "./relay-config.js";
 import { dialAddresses, isRelayAddress } from "./relay-hub.js";
@@ -40,6 +41,8 @@ type Device = { name: string; publicKey: string; addresses: readonly string[] };
  * outbound link works. Otherwise dial it at its saved addresses, then the relay.
  */
 export async function openDeviceLink(device: Device, identity: Identity, signal: AbortSignal): Promise<DeviceLink> {
+  // Before the daemon is asked too: one from an older cns may still have a link to it.
+  refuseRemoved(device);
   const lent = await borrow(device, identity, signal);
   if (lent) return lent;
   signal.throwIfAborted();
