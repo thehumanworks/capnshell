@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, copyFileSync, existsSync, readdirSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
@@ -148,6 +148,7 @@ test("a trusted device removes a lost one everywhere it may, and the lost one ca
   // before, deleting its pairing made way for one, with the shell tv lets members use. The mesh
   // phone runs is narrowed there, and tv says which meshes list phone.
   assert.equal((await runs(phone!, "tv")).code, 4);
+  const backup = JSON.parse(readFileSync(path.join(tv!.dir, "peers", "phone"), "utf8")) as { addresses: string[]; grants: { incoming: string[] } };
   const plainly = await devices.cli(tv!, ["peer", "remove", "phone", "--state", tv!.state]);
   assert.deepEqual([plainly.code, plainly.stdout], [0, [
     "Removed phone.",
@@ -159,10 +160,18 @@ test("a trusted device removes a lost one everywhere it may, and the lost one ca
   const stillOut = await runs(phone!, "tv");
   assert.equal(stillOut.code, 3, stillOut.output);
   assert.ok(!has(tv!, "phone") && revoked(tv!, lost.fingerprint));
-  // A record of phone left on tv, say restored from a backup, lets it in no more: tv's daemon refuses a device removed there.
-  await writeFile(path.join(tv!.dir, "peers", "phone"), JSON.stringify({ version: 2, publicKey: lost.publicKey, addresses: [], pairedAt: new Date().toISOString(), grants: { incoming: ["shell"], outgoing: [] } }), { mode: 0o600 });
-  const leftover = await runs(phone!, "tv");
+  // phone's record restored on tv from a backup, with its address and now with shell, lets it in no
+  // more, after tv restarts too: tv's daemon neither accepts it nor dials it, which would offer it
+  // that shell on tv's own link.
+  assert.ok(backup.addresses.length, "the record has an address for tv to dial");
+  await writeFile(path.join(tv!.dir, "peers", "phone"), JSON.stringify({ ...backup, grants: { ...backup.grants, incoming: ["shell"] } }), { mode: 0o600 });
+  await stopDaemon(tv!.state);
+  await devices.up(tv!, tv!.port);
+  await eventually("tv links to hub again", async () => (await devices.cli(tv!, ["status", "--json", "--state", tv!.state])).stdout.includes("\"hub\""));
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+  const leftover = await devices.cli(phone!, ["run", "tv", "--", "echo", "pwned"]);
   assert.equal(leftover.code, 3, leftover.output);
+  assert.ok(!leftover.stdout.includes("pwned"));
   await rm(path.join(tv!.dir, "peers", "phone"));
   // phone adds nas to its mesh: hub takes that list and offers it on, and tv, which removed phone, does not take it.
   assert.equal((await mesh(phone!, ["add", "work", "nas"])).code, 0);

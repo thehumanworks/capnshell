@@ -498,7 +498,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
   function dial(name: string) {
     if (links.has(name) || stopping) return;
     const entry = getPeer(name);
-    if (!entry || !worthDialing(entry, relay) || isRevoked(entry.publicKey)) return;
+    if (!entry || !worthDialing(entry, relay)) return;
     const expectedKey = entry.publicKey;
     let attempt = 0;
     let stopped = false;
@@ -528,6 +528,8 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
     async function attempt_() {
       const current = getPeer(name);
       const addresses = current && worthDialing(current, relay) ? dialAddresses(current, relay) : [];
+      // A device removed here is not dialed, even when a record of it is left or restored, as this
+      // link would offer it what that record grants. Checked on every attempt, the first included.
       if (!current || current.publicKey !== expectedKey || !addresses.length || isRevoked(current.publicKey)) return stop();
       // With a link up, wait, unless it runs through the relay while a direct one may work (link-rules.ts).
       const existing = linkTo(current.publicKey);
