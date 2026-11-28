@@ -1,0 +1,40 @@
+# How cns restarts a daemon that runs as a launchd agent, from inside that
+# agent's own processes, as cns upgrade does: only a real Mac can show that
+# launchd lets the restart's own process unload the agent and load it again.
+# No other workflow runs on macOS. A macOS runner costs several times the
+# minutes of a Linux one, and this repository's Actions minutes are limited, so
+# it runs once when a pull request is opened, again each time the "macos" label
+# is added to one, and on demand from the Actions tab or
+# `gh workflow run macos.yml`, and runs only the launchd test.
+name: macOS
+
+on:
+  pull_request:
+    types: [opened, labeled]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  launchd:
+    if: github.event_name == 'workflow_dispatch' || github.event.action == 'opened' || github.event.label.name == 'macos'
+    # One run per pull request: one opened with the label on it is opened and labeled at once.
+    # On the job, not the workflow, so that adding another label, whose run skips this job,
+    # does not cancel a run in progress.
+    concurrency:
+      group: macos-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
+    runs-on: macos-latest
+    timeout-minutes: 15
+    env:
+      # Lets src/service-macos.test.ts load a real launchd agent for the runner's account.
+      CNS_TEST_LAUNCHD: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - run: bun run typecheck
+      - run: bun test --timeout 30000 src/service-macos.test.ts

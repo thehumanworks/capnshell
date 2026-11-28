@@ -53,8 +53,9 @@ Reviews found these ways that removing something could still give the lost devic
     every command's connection is made (`openDeviceLink`, before the daemon is asked to lend its
     link), and by `cns doctor` and Pi, which dial on their own. A command named for the device
     says so, with the command that deletes the record; one that asks every device, such as
-    `cns sessions`, `cns skills` or `cns ui`, leaves it out (`reachablePeers`), and
-    `--everywhere` reports it as `not used`, so it does not learn the fingerprint being removed.
+    `cns sessions`, `cns skills`, `cns ui` or `cns upgrade --all`, leaves it out
+    (`reachablePeers`), and `--everywhere` reports it as `not used`, so it does not learn the
+    fingerprint being removed.
     Pairing is not refused, as it is the way back. `cns peers` marks it `removed`, and
     `cns peers --json` and `cns peer list --json` give `revoked`. `secure.ts` does not check, as
     the gateway's Worker shares it and keeps no revoked list.

@@ -1,6 +1,6 @@
 import { spawn, type SpawnOptionsWithoutStdio } from "node:child_process";
 import { EventEmitter, once } from "node:events";
-import { mkdtemp, realpath, rm } from "node:fs/promises";
+import { chmod, cp, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -61,9 +61,22 @@ export function cliEnvironment(overrides: NodeJS.ProcessEnv = {}): NodeJS.Proces
   return { ...process.env, CNS_BIND: undefined, CNS_PORT: undefined, CNS_CWD: undefined, CNS_KEY: undefined, CNS_KITTY_KEYS: undefined, ...overrides };
 }
 
-/** Exercise actual CLI processes, keeping exact streams available for run assertions. */
-export function launchCli(t: TestContext, args: string[], options: SpawnOptionsWithoutStdio = {}) {
-  const invocation = cliInvocation(args);
+/**
+ * A copy of this cns's source that says it is `version` in its package.json, as an older or newer
+ * release would; returns the command that runs it, for launchCli.
+ */
+export async function cnsAs(root: string, version: string): Promise<string[]> {
+  const dir = path.join(root, `cns-${version}`);
+  await cp(path.join(PROJECT_ROOT, "src"), path.join(dir, "src"), { recursive: true });
+  const manifest = JSON.parse(await readFile(path.join(PROJECT_ROOT, "package.json"), "utf8"));
+  await writeFile(path.join(dir, "package.json"), JSON.stringify({ ...manifest, version }));
+  await symlink(path.join(PROJECT_ROOT, "node_modules"), path.join(dir, "node_modules"), "junction");
+  return [process.execPath, path.join(dir, "src", "cli.ts")];
+}
+
+/** Exercise actual CLI processes, keeping exact streams available for run assertions. `cns` runs another cns, as from cnsAs. */
+export function launchCli(t: TestContext, args: string[], options: SpawnOptionsWithoutStdio = {}, cns?: string[]) {
+  const invocation = cns ? { file: cns[0]!, args: [...cns.slice(1), ...args] } : cliInvocation(args);
   const child = spawn(invocation.file, invocation.args, {
     ...options, env: cliEnvironment(options.env), stdio: ["pipe", "pipe", "pipe"],
   });
@@ -142,8 +155,8 @@ export async function testDevices(t: TestContext, prefix = "cns-devices-") {
     }
     await rm(root, { recursive: true, force: true });
   });
-  const cli = async (device: TestDevice, args: string[], input = "") => {
-    const child = launchCli(t, args, { env: device.env });
+  const cli = async (device: TestDevice, args: string[], input = "", cns?: string[]) => {
+    const child = launchCli(t, args, { env: device.env }, cns);
     child.child.stdin.end(input);
     return { code: await child.exited, stdout: child.stdout, stderr: child.stderr, output: child.output };
   };
@@ -155,10 +168,10 @@ export async function testDevices(t: TestContext, prefix = "cns-devices-") {
       makePrivateDirectory(dir); // Applies the private ACL as well as mode 0700 on the respective platforms.
       return { name, dir, env: { CNS_CONFIG_DIR: dir, HOME: dir, ...env }, state: path.join(dir, "daemon.json") };
     },
-    /** Start the device's daemon on loopback. */
-    async up(device: TestDevice, port?: string): Promise<string> {
+    /** Start the device's daemon on loopback, with this cns or with `cns`. */
+    async up(device: TestDevice, port?: string, cns?: string[]): Promise<string> {
       device.port = port ?? await unusedPort("127.0.0.1");
-      const result = await cli(device, ["up", "--bind", "127.0.0.1", "--port", device.port, "--state", device.state]);
+      const result = await cli(device, ["up", "--bind", "127.0.0.1", "--port", device.port, "--state", device.state], "", cns);
       if (result.code !== 0) throw new Error(`cns up failed on ${device.name}:\n${result.output}`);
       daemons.push(device);
       return device.port;
@@ -227,4 +240,44 @@ export function kittyKeyboard(screen: ModelTerminal, reply: (text: string) => vo
     /** Both screens: the flags in force and the depth, normal screen first. */
     get all() { return [modes.main.flags, modes.main.depth, modes.alternate.flags, modes.alternate.depth]; },
   };
+}
+
+/**
+ * A stand-in for systemctl --user that runs the unit's ExecStart as systemd would, and stops it
+ * with cns stop. It finds the unit as cns does, so it also works for the commands of the daemon
+ * it started, which has only HOME and the unit's environment. FAKE_LOG, when set, logs each call;
+ * FAKE_SYSTEMCTL_FAIL, when set, makes that command, such as restart, fail as a broken unit's does.
+ */
+const FAKE_SYSTEMCTL = String.raw`
+const { appendFileSync, readFileSync } = require("node:fs");
+const { spawn, spawnSync } = require("node:child_process");
+const args = process.argv.slice(2);
+if (process.env.FAKE_LOG) appendFileSync(process.env.FAKE_LOG, args.join(" ") + "\n");
+if (process.env.FAKE_SYSTEMCTL_FAIL && args.includes(process.env.FAKE_SYSTEMCTL_FAIL)) {
+  console.error("Job for cns.service failed because the control process exited with error code.");
+  process.exit(1);
+}
+const unitPath = (process.env.XDG_CONFIG_HOME || process.env.HOME + "/.config") + "/systemd/user/cns.service";
+const unquote = (word) => word.slice(1, -1).replace(/\\(.)/g, "$1").replace(/%%/g, "%").replace(/\$\$/g, "$");
+function unit() {
+  const text = readFileSync(unitPath, "utf8");
+  const exec = text.match(/^ExecStart=(.*)$/m)[1].match(/"(?:[^"\\]|\\.)*"/g).map(unquote);
+  const env = {};
+  for (const [, line] of text.matchAll(/^Environment=("(?:[^"\\]|\\.)*")$/gm)) { const pair = unquote(line); env[pair.slice(0, pair.indexOf("="))] = pair.slice(pair.indexOf("=") + 1); }
+  return { exec, env };
+}
+const { exec, env } = (args.includes("restart") || args.includes("start") || args.includes("--now")) ? unit() : { exec: [], env: {} };
+const stop = () => spawnSync(exec[0], [...exec.slice(1, exec.indexOf("daemon")), "stop", "--state", exec[exec.indexOf("--state") + 1]], { stdio: "ignore" });
+if (args.includes("restart") || args.includes("start")) {
+  if (args.includes("restart")) stop();
+  spawn(exec[0], exec.slice(1), { detached: true, stdio: "ignore", env: { HOME: process.env.HOME, ...env } }).unref();
+}
+if (args.includes("--now")) stop();
+`;
+
+/** Put the stand-in for systemctl in `bin`, which goes first on the PATH of the processes that should use it. */
+export async function fakeSystemctl(bin: string): Promise<void> {
+  const file = path.join(bin, "systemctl");
+  await writeFile(file, `#!${process.execPath}\n${FAKE_SYSTEMCTL}`);
+  await chmod(file, 0o755);
 }

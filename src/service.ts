@@ -241,8 +241,12 @@ function must(runner: Runner, file: string, args: string[], next?: string): void
 
 const launchdDomain = () => `gui/${process.getuid?.() ?? 0}`;
 
-/** Write the service file, privately, and start the daemon through the service manager; a scheduled task is only registered, for runTask to run. */
-export async function installService(file: ServiceFile, runner: Runner = runCommand): Promise<void> {
+/**
+ * Write the service file, privately, and start the daemon through the service manager; a scheduled
+ * task is only registered, for runTask to run. With `start` false, the service manager only learns
+ * of the file, and a running daemon is left alone for the restart worker to replace.
+ */
+export async function installService(file: ServiceFile, runner: Runner = runCommand, start = true): Promise<void> {
   await mkdir(path.dirname(file.path), { recursive: true });
   // launchd opens the log itself, so its directory must exist first.
   await mkdir(configDirectory(), { recursive: true, mode: 0o700 });
@@ -254,14 +258,49 @@ export async function installService(file: ServiceFile, runner: Runner = runComm
   if (file.kind === "schtasks") {
     must(runner, schtasks(), ["/Create", "/TN", taskName(), "/XML", file.path, "/F"], "Run cns up to start the daemon without a service.");
   } else if (file.kind === "launchd") {
-    // Replace a loaded copy; bootout fails when none is loaded, which is fine.
-    runner("launchctl", ["bootout", `${launchdDomain()}/${SERVICE_LABEL}`]);
-    must(runner, "launchctl", ["bootstrap", launchdDomain(), file.path]);
+    if (start) await loadLaunchAgent(file.path, { runner });
   } else {
     must(runner, "systemctl", ["--user", "daemon-reload"]);
     must(runner, "systemctl", ["--user", "enable", SERVICE_UNIT]);
-    must(runner, "systemctl", ["--user", "restart", SERVICE_UNIT]);
+    if (start) must(runner, "systemctl", ["--user", "restart", SERVICE_UNIT]);
   }
+}
+
+/** How the restart worker runs the service manager, and where it says what each step did. */
+export interface ServiceSteps { runner?: Runner; sleep?: (ms: number) => Promise<unknown>; log?: (line: string) => void }
+
+/**
+ * Load the launchd agent's file, replacing a loaded copy, which starts its daemon. Unlike a
+ * kickstart, which runs the copy launchd loaded before, this runs what the file says now. Just
+ * after a bootout, while launchd still takes the old job down, a bootstrap can fail with
+ * "5: Input/output error", so it is tried five times, a second apart.
+ */
+async function loadLaunchAgent(file: string, { runner = runCommand, sleep = wait, log = () => {} }: ServiceSteps = {}): Promise<void> {
+  const job = `${launchdDomain()}/${SERVICE_LABEL}`;
+  // bootout fails when none is loaded, which is fine.
+  const out = runner("launchctl", ["bootout", job]);
+  log(`launchctl bootout ${job}: ${out.code === 0 ? "done" : `exit ${out.code}${out.output ? `, ${out.output}` : ""}`}.`);
+  for (let attempt = 1; ; attempt++) {
+    const result = runner("launchctl", ["bootstrap", launchdDomain(), file]);
+    const step = `launchctl bootstrap ${launchdDomain()} ${file}`;
+    if (result.code === 0) { log(`${step}: done.`); return; }
+    const failed = `${step} failed${result.output ? `: ${result.output}` : ` (exit ${result.code})`}`;
+    if (attempt === 5) throw new Error(failed);
+    log(`${failed}; trying again in a second.`);
+    await sleep(1000);
+  }
+}
+
+/**
+ * Start the installed service's daemon once the restart worker has stopped it, or restart it
+ * through systemd. launchd starts the agent it loaded, unless `reload`, after its file changed,
+ * as cns up --install does: then the file is loaded again.
+ */
+export async function startInstalledService(kind: "launchd" | "systemd", file: string, reload: boolean, steps: ServiceSteps = {}): Promise<void> {
+  const { runner = runCommand, log = () => {} } = steps;
+  if (kind === "systemd") { log(`systemctl --user restart ${SERVICE_UNIT}`); restartService(runner); }
+  else if (reload) await loadLaunchAgent(file, steps);
+  else { log(`launchctl kickstart ${launchdDomain()}/${SERVICE_LABEL}`); startService("launchd", runner); }
 }
 
 /** Stop the daemon through the service manager and remove the service file. Returns whether one was installed. */

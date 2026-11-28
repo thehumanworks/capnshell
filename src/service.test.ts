@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { installService, installedService, installedServiceRuns, launchdPlist, serviceEnvironment, serviceFailed, serviceFile, serviceOverrides, servicePath, systemdUnit, uninstallService, type Runner, type ServiceSpec } from "./service.js";
-import { launchCli, unusedPort } from "./test-support.js";
+import { connectControl } from "./commands/daemon.js";
+import { installService, installedService, installedServiceRuns, launchdPlist, serviceEnvironment, serviceFailed, serviceFile, serviceOverrides, servicePath, startInstalledService, systemdUnit, uninstallService, type Runner, type ServiceSpec } from "./service.js";
+import { fakeSystemctl, launchCli, unusedPort } from "./test-support.js";
 
 const spec: ServiceSpec = {
   program: { file: "/opt/cns & co/bin/cns", args: ["daemon", "--service", "--state", "/home/a b/.cns/daemon.json", "--relay-ish", "100%", "$HOME", "say \"hi\"\\"] },
@@ -79,8 +80,10 @@ test("installing writes a private file and starts the service; uninstalling stop
     assert.deepEqual(calls, kind === "systemd"
       ? ["systemctl --user daemon-reload", "systemctl --user enable cns.service", "systemctl --user restart cns.service"]
       : [`launchctl bootout gui/${process.getuid!()}/com.thehumanworks.cns`, `launchctl bootstrap gui/${process.getuid!()} ${file.path}`]);
-    // Installing again replaces the file.
-    await installService(file, runner);
+    // Installing again replaces the file. Without starting, a running daemon is left to the restart worker.
+    calls.length = 0;
+    await installService(file, runner, false);
+    assert.deepEqual(calls, kind === "systemd" ? ["systemctl --user daemon-reload", "systemctl --user enable cns.service"] : []);
     calls.length = 0;
     assert.equal(await uninstallService(kind, runner, home, {}), true);
     assert.equal(calls.length > 0, true);
@@ -91,29 +94,50 @@ test("installing writes a private file and starts the service; uninstalling stop
   await assert.rejects(installService(serviceFile("systemd", spec, home, {}), failing), /systemctl --user enable cns\.service failed: Failed to connect to bus/);
 });
 
-/** A stand-in for systemctl that runs the unit's ExecStart as systemd would, and stops it with cns stop. */
-const FAKE_SYSTEMCTL = String.raw`
-const { appendFileSync, readFileSync } = require("node:fs");
-const { spawn, spawnSync } = require("node:child_process");
-const args = process.argv.slice(2);
-appendFileSync(process.env.FAKE_LOG, args.join(" ") + "\n");
-const unitPath = process.env.XDG_CONFIG_HOME + "/systemd/user/cns.service";
-const unquote = (word) => word.slice(1, -1).replace(/\\(.)/g, "$1").replace(/%%/g, "%").replace(/\$\$/g, "$");
-function unit() {
-  const text = readFileSync(unitPath, "utf8");
-  const exec = text.match(/^ExecStart=(.*)$/m)[1].match(/"(?:[^"\\]|\\.)*"/g).map(unquote);
-  const env = {};
-  for (const [, line] of text.matchAll(/^Environment=("(?:[^"\\]|\\.)*")$/gm)) { const pair = unquote(line); env[pair.slice(0, pair.indexOf("="))] = pair.slice(pair.indexOf("=") + 1); }
-  return { exec, env };
-}
-const { exec, env } = (args.includes("restart") || args.includes("start") || args.includes("--now")) ? unit() : { exec: [], env: {} };
-const stop = () => spawnSync(exec[0], [...exec.slice(1, exec.indexOf("daemon")), "stop", "--state", exec[exec.indexOf("--state") + 1]], { stdio: "ignore" });
-if (args.includes("restart") || args.includes("start")) {
-  if (args.includes("restart")) stop();
-  spawn(exec[0], exec.slice(1), { detached: true, stdio: "ignore", env: { HOME: process.env.HOME, ...env } }).unref();
-}
-if (args.includes("--now")) stop();
-`;
+test("the restart worker kickstarts a launchd agent, and loads its file again only after cns up --install rewrote it, trying a busy bootstrap again", async () => {
+  const calls: string[] = [];
+  const logged: string[] = [];
+  const slept: number[] = [];
+  let busy = 0;
+  const runner: Runner = (file, args) => {
+    calls.push([file, ...args].join(" "));
+    if (args[0] === "bootstrap" && busy > 0) { busy--; return { code: 5, output: "Bootstrap failed: 5: Input/output error" }; }
+    return { code: 0, output: "" };
+  };
+  const steps = { runner, sleep: async (ms: number) => { slept.push(ms); }, log: (line: string) => { logged.push(line); } };
+  const domain = `gui/${process.getuid?.() ?? 0}`;
+  const job = `${domain}/com.thehumanworks.cns`;
+
+  // A plain cns daemon restart: the agent launchd has loaded starts again.
+  await startInstalledService("launchd", "/p/cns.plist", false, steps);
+  assert.deepEqual(calls, [`launchctl kickstart ${job}`]);
+
+  // After cns up --install: unloaded and loaded from the file, through a bootstrap launchd refuses for a moment.
+  calls.length = 0;
+  logged.length = 0;
+  busy = 2;
+  await startInstalledService("launchd", "/p/cns.plist", true, steps);
+  assert.deepEqual(calls, [`launchctl bootout ${job}`, ...Array(3).fill(`launchctl bootstrap ${domain} /p/cns.plist`)]);
+  assert.deepEqual(slept, [1000, 1000]);
+  assert.deepEqual(logged, [
+    `launchctl bootout ${job}: done.`,
+    `launchctl bootstrap ${domain} /p/cns.plist failed: Bootstrap failed: 5: Input/output error; trying again in a second.`,
+    `launchctl bootstrap ${domain} /p/cns.plist failed: Bootstrap failed: 5: Input/output error; trying again in a second.`,
+    `launchctl bootstrap ${domain} /p/cns.plist: done.`,
+  ]);
+
+  // Refused five times: the worker then starts the daemon without the service.
+  calls.length = 0;
+  busy = 5;
+  await assert.rejects(startInstalledService("launchd", "/p/cns.plist", true, steps), /^Error: launchctl bootstrap gui\/\d+ \/p\/cns\.plist failed: Bootstrap failed: 5: Input\/output error$/);
+  assert.equal(calls.filter((call) => call.includes("bootstrap")).length, 5);
+
+  // systemd restarts the unit, with what its file says since daemon-reload.
+  calls.length = 0;
+  await startInstalledService("systemd", "/u/cns.service", true, steps);
+  assert.deepEqual(calls, ["systemctl --user restart cns.service"]);
+});
+
 
 test("cns up --install runs the daemon from the unit; cns up starts it again after cns stop; --uninstall stops it", { skip: process.platform !== "linux", timeout: 90000 }, async (t) => {
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-install-")));
@@ -121,9 +145,7 @@ test("cns up --install runs the daemon from the unit; cns up starts it again aft
   const bin = path.join(root, "bin");
   await mkdir(path.join(home, ".cns"), { recursive: true, mode: 0o700 });
   await mkdir(bin);
-  const systemctl = path.join(bin, "systemctl");
-  await writeFile(systemctl, `#!${process.execPath}\n${FAKE_SYSTEMCTL}`);
-  await chmod(systemctl, 0o755);
+  await fakeSystemctl(bin);
   const log = path.join(root, "systemctl.log");
   await writeFile(log, "");
   const env = { HOME: home, CNS_CONFIG_DIR: path.join(home, ".cns"), XDG_CONFIG_HOME: path.join(home, ".config"), PATH: `${bin}:${process.env.PATH}`, FAKE_LOG: log };
@@ -136,19 +158,22 @@ test("cns up --install runs the daemon from the unit; cns up starts it again aft
   t.after(async () => { await cli(["stop", "--state", state]); await rm(root, { recursive: true, force: true }); });
   const port = await unusedPort("127.0.0.1");
 
-  // A daemon cns up started is replaced by the service, which keeps its settings.
+  // A daemon cns up started is replaced by the service, which keeps its settings, through the restart's own process.
   const first = await cli(["up", "--bind", "127.0.0.1", "--port", port, "--state", state]);
   assert.equal(first.code, 0, first.stderr);
   const installed = await cli(["up", "--install", "--state", state]);
   assert.equal(installed.code, 0, installed.stderr);
-  assert.match(installed.stderr, /Stopped the running daemon; the service runs it from now on\./);
   assert.match(installed.stderr, /Installed a systemd user service at .*\/systemd\/user\/cns\.service/);
-  assert.match(installed.stdout, /^Running as \S+ \(cns [\d.]+, pid \d+, a systemd user service\), listening at ws:\/\/127\.0\.0\.1:\d+\./);
+  assert.match(installed.stdout, /^Restarted as \S+ \(cns [\d.]+, pid \d+, a systemd user service\), listening at ws:\/\/127\.0\.0\.1:\d+\./);
+  assert.notEqual(/pid (\d+)/.exec(installed.stdout)![1], /pid (\d+)/.exec(first.stdout)![1]);
   assert.ok(installed.stdout.includes(`ws://127.0.0.1:${port}`));
   const unit = await readFile(path.join(home, ".config", "systemd", "user", "cns.service"), "utf8");
   assert.match(unit, /"daemon" "--service" "--state"/);
   assert.ok(unit.includes(`"--bind" "127.0.0.1" "--port" "${port}"`));
   assert.ok(installedService(state, home, env));
+  // cns up --install tells the restart worker the file is new, which launchd needs to load it again; cns daemon restart does not.
+  const worker = async () => /^Restarting the daemon \(pid \d+\)(.*)\.$/m.exec(await readFile(path.join(home, ".cns", "restart.log"), "utf8"))?.[1];
+  assert.equal(await worker(), " from its service's new file");
 
   // cns stop ends the daemon; cns up then starts it through the service, not as a detached process.
   assert.equal((await cli(["stop", "--state", state])).code, 0);
@@ -165,12 +190,72 @@ test("cns up --install runs the daemon from the unit; cns up starts it again aft
   assert.match(restarted.stdout, /^Restarted as \S+ \(cns [\d.]+, pid \d+, a systemd user service\)/);
   assert.notEqual(/pid (\d+)/.exec(restarted.stdout)![1], /pid (\d+)/.exec(again.stdout)![1]);
   assert.equal(await restarts(), restartsBefore + 1);
+  assert.equal(await worker(), "");
 
   const removed = await cli(["up", "--uninstall", "--state", state]);
   assert.equal(removed.code, 0, removed.stderr);
   assert.match(removed.stdout, /^Removed the systemd user service; the daemon is stopped\./);
   assert.match((await cli(["status", "--state", state])).stdout, /Daemon:\s+not running/);
   assert.match((await cli(["up", "--uninstall", "--state", state])).stdout, /^No systemd user service is installed\./);
+});
+
+test("when the service does not start the daemon the restart worker stopped, the worker starts it without the service", { skip: process.platform !== "linux", timeout: 90000 }, async (t) => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-fallback-")));
+  const home = path.join(root, "home");
+  const bin = path.join(root, "bin");
+  await mkdir(path.join(home, ".cns"), { recursive: true, mode: 0o700 });
+  await mkdir(bin);
+  await fakeSystemctl(bin);
+  const env = { HOME: home, CNS_CONFIG_DIR: path.join(home, ".cns"), XDG_CONFIG_HOME: path.join(home, ".config"), PATH: `${bin}:${process.env.PATH}`, FAKE_SYSTEMCTL_FAIL: "restart" };
+  const state = path.join(home, ".cns", "daemon.json");
+  const cli = async (args: string[]) => {
+    const child = launchCli(t, args, { env });
+    child.child.stdin.end();
+    return { code: await child.exited, stdout: child.stdout, stderr: child.stderr };
+  };
+  t.after(async () => { await cli(["stop", "--state", state]); await rm(root, { recursive: true, force: true }); });
+  const port = await unusedPort("127.0.0.1");
+  const first = await cli(["up", "--bind", "127.0.0.1", "--port", port, "--state", state]);
+  assert.equal(first.code, 0, first.stderr);
+
+  // The unit is installed, but systemctl restart fails, as for a unit that cannot run.
+  const installed = await cli(["up", "--install", "--state", state]);
+  const log = await readFile(path.join(home, ".cns", "restart.log"), "utf8");
+  assert.equal(installed.code, 0, `${installed.stderr}\n${log}`);
+  assert.match(log, /The systemd user service did not start the daemon \(systemctl --user restart cns\.service failed: Job for cns\.service failed because the control process exited with error code\.\); starting it without the service\./);
+  assert.ok(log.includes(`Starting it detached at ws://127.0.0.1:${port}.`), log);
+  // What runs is reported, not the service that is installed.
+  assert.match(installed.stdout, new RegExp(`^Restarted as \\S+ \\(cns [\\d.]+, pid \\d+\\), listening at ws://127\\.0\\.0\\.1:${port}\\.`));
+  assert.notEqual(/pid (\d+)/.exec(installed.stdout)![1], /pid (\d+)/.exec(first.stdout)![1]);
+  const control = await connectControl(state);
+  try { assert.notEqual((await control.remote.status()).service, true); } finally { control.close(); }
+});
+
+test("cns up --install refuses, writing nothing, while a service it did not install runs the daemon", { skip: process.platform !== "linux", timeout: 60000 }, async (t) => {
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-system-")));
+  const bin = path.join(root, "bin");
+  await mkdir(path.join(root, ".cns"), { recursive: true, mode: 0o700 });
+  await mkdir(bin);
+  await fakeSystemctl(bin);
+  const env = { HOME: root, CNS_CONFIG_DIR: path.join(root, ".cns"), XDG_CONFIG_HOME: path.join(root, ".config"), PATH: `${bin}:${process.env.PATH}` };
+  const state = path.join(root, ".cns", "daemon.json");
+  // Had it not refused, the restart would have started a daemon of its own.
+  t.after(async () => {
+    const stop = launchCli(t, ["stop", "--state", state], { env });
+    stop.child.stdin.end();
+    await stop.exited;
+    await rm(root, { recursive: true, force: true });
+  });
+  // As the NixOS module runs it: a system service, with no user unit.
+  const daemon = launchCli(t, ["daemon", "--service", "--state", state, "--bind", "127.0.0.1", "--port", await unusedPort("127.0.0.1")], { env });
+  await daemon.waitFor("listening at");
+  const installing = launchCli(t, ["up", "--install", "--state", state], { env });
+  installing.child.stdin.end();
+  assert.equal(await installing.exited, 1);
+  assert.match(installing.stderr, /A system service runs this daemon, such as the NixOS module's cns\.service, so a user service would run a second daemon beside it\./);
+  await assert.rejects(stat(path.join(root, ".config", "systemd", "user", "cns.service")), /ENOENT/);
+  const control = await connectControl(state);
+  try { assert.equal((await control.remote.status()).service, true, "the daemon runs on"); } finally { control.close(); }
 });
 
 test("the Nix modules run the daemon command that cns up --install writes", async () => {

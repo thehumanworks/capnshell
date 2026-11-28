@@ -15,6 +15,8 @@ export interface PairingController {
   addresses(): string[];
   /** Whether the daemon is registered at its relay, when it has one. */
   relayRegistered(): boolean | undefined;
+  /** The names of the daemon's named sessions whose program runs. */
+  sessions(): string[];
   /** A single-use invite for another device, valid for `ttlMs`. */
   invite(ttlMs: number): Promise<{ id: string; text: string; expiresAt: number }>;
   /** Resolves once a device has authenticated with the invite and proposed a pairing. */
@@ -84,7 +86,7 @@ export class ControlApi extends RpcTarget {
     return {
       ...(this.#listener ?? { url: "", bind: "", port: 0, remote: false }), pid: process.pid, startedAt: this.#startedAt, peers,
       version: CNS_VERSION, executable: selfPath(),
-      ...this.#pairing ? { identity: this.#pairing.identity(), addresses: this.#pairing.addresses(), relayRegistered: this.#pairing.relayRegistered() } : {},
+      ...this.#pairing ? { identity: this.#pairing.identity(), addresses: this.#pairing.addresses(), relayRegistered: this.#pairing.relayRegistered(), sessions: this.#pairing.sessions() } : {},
     };
   }
   #paired(): PairingController {

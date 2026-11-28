@@ -43,6 +43,8 @@ export interface DaemonStatus extends ListenerInfo {
   version?: string;
   /** The executable the daemon runs, or its script when run from source. */
   executable?: string;
+  /** The names of the named sessions whose program runs, which a restart ends; absent from daemons before they were reported. */
+  sessions?: string[];
 }
 
 const legacyStateSchema = z.strictObject({
