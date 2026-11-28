@@ -63,6 +63,8 @@ class PeerFiles extends RpcTarget {
 export class ControlApi extends RpcTarget {
   #controller: PeerController;
   #stop: () => void;
+  /** The named sessions that keep running once the daemon stops. */
+  #kept: () => string[];
   #listener: ListenerInfo | undefined;
   #startedAt: number;
   #pairing: PairingController | undefined;
@@ -71,10 +73,11 @@ export class ControlApi extends RpcTarget {
   #closed = new AbortController();
   /** Close this control connection, as the daemon does when a link it lent over it ends. */
   #hangUp: (reason: string) => void;
-  constructor(controller: PeerController, stop: () => void, listener: ListenerInfo | undefined, startedAt: number, pairing?: PairingController, hangUp: (reason: string) => void = () => {}) {
+  constructor(controller: PeerController, stop: () => void, listener: ListenerInfo | undefined, startedAt: number, pairing?: PairingController, hangUp: (reason: string) => void = () => {}, kept: () => string[] = () => []) {
     super();
     this.#controller = controller;
     this.#stop = stop;
+    this.#kept = kept;
     this.#listener = listener;
     this.#startedAt = startedAt;
     this.#pairing = pairing;
@@ -146,9 +149,11 @@ export class ControlApi extends RpcTarget {
     if (!files) throw new Error("This daemon offers no file access.");
     return new PeerFiles(files.call(this.#controller, id));
   }
-  stop() {
+  /** Stop the daemon. Answers with the named sessions that keep running without it. */
+  stop(): string[] {
     // Let Cap'n Web send the successful result before closing the transport.
     setTimeout(this.#stop, 25);
+    return this.#kept();
   }
   /** Cap'n Web calls this when the control connection ends. */
   [Symbol.dispose]() {
@@ -159,7 +164,7 @@ export class ControlApi extends RpcTarget {
   }
 }
 
-export async function serveControl(controller: PeerController, stop: () => void, statePath?: string, listener?: ListenerInfo, pairing?: PairingController): Promise<() => Promise<void>> {
+export async function serveControl(controller: PeerController, stop: () => void, statePath?: string, listener?: ListenerInfo, pairing?: PairingController, kept?: () => string[]): Promise<() => Promise<void>> {
   const token = process.env.CNS_DAEMON_TOKEN ?? randomBytes(32).toString("hex");
   const startedAt = Date.now();
   delete process.env.CNS_DAEMON_TOKEN;
@@ -182,7 +187,7 @@ export async function serveControl(controller: PeerController, stop: () => void,
       maxPayloadLength: 8 * 1024 * 1024,
       open(ws) {
         const hangUp = (reason: string) => { try { ws.close(1000, reason); } catch { /* Already closed. */ } };
-        ws.data.transport = newBunWebSocketRpcSession(ws, new ControlApi(controller, stop, listener, startedAt, pairing, hangUp)).transport;
+        ws.data.transport = newBunWebSocketRpcSession(ws, new ControlApi(controller, stop, listener, startedAt, pairing, hangUp, kept)).transport;
       },
       message(ws, message) { ws.data.transport?.dispatchMessage(message); },
       close(ws, code, reason) { ws.data.transport?.dispatchClose(code, reason); },

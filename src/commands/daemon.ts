@@ -7,6 +7,7 @@ import path from "node:path";
 import { newWebSocketRpcSession, type RpcStub } from "capnweb";
 import { z } from "zod";
 import { closeSocket, terminateSocket } from "../connect.js";
+import { printable } from "../errors.js";
 import { openConsole, type PeerController } from "../console.js";
 import { strictlyPrintable } from "../errors.js";
 import { selfInvocation } from "../runtime.js";
@@ -27,6 +28,13 @@ export interface ListenerInfo {
   relay?: string;
   /** The daemon runs under a service manager: cns daemon --service, as cns up --install and the Nix modules start it. */
   service?: boolean;
+  /** Named sessions outlive the daemon, in holder processes of their own; absent from daemons before them (held-sessions.ts). */
+  keepsSessions?: boolean;
+}
+
+/** What the daemon and cns stop say about the named sessions that keep running once the daemon has stopped. */
+export function keptSessions(names: string[]): string {
+  return `Named sessions keep running: ${names.join(", ")}. Once the daemon runs again, cns kill DEVICE NAME on a paired device ends one.`;
 }
 export interface DaemonStatus extends ListenerInfo {
   pid: number;
@@ -374,12 +382,21 @@ export async function attachDaemon(statePath?: string): Promise<void> {
 
 /** Stop the daemon and return its pid once it has removed its state. */
 export async function stopDaemon(statePath?: string): Promise<number> {
+  return (await stopDaemonKeeping(statePath)).pid;
+}
+
+/** Stop the daemon, as stopDaemon does, and say which named sessions keep running without it. */
+export async function stopDaemonKeeping(statePath?: string): Promise<{ pid: number; sessions: string[] }> {
   const file = daemonStatePath(statePath);
   const state = await readState(file);
   // Keep the authenticated target and cleanup ownership bound to the same snapshot.
   const connection = await connectToState(state);
-  try { await connection.remote.stop(); }
-  finally { connection.close(); }
+  let sessions: string[] = [];
+  try {
+    // A daemon from before holders answers nothing: its sessions end with it.
+    const kept: unknown = await connection.remote.stop();
+    if (Array.isArray(kept)) sessions = kept.filter((name): name is string => typeof name === "string");
+  } finally { connection.close(); }
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
     try {
@@ -397,5 +414,5 @@ export async function stopDaemon(statePath?: string): Promise<number> {
   } catch (error) {
     if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
   }
-  return state.pid;
+  return { pid: state.pid, sessions: sessions.map(printable) };
 }
