@@ -75,7 +75,8 @@ test("a holder runs the session, forwards to it until its shell closes, and ends
   assert.match((await other.capture()).text, /got:one/);
   await until(() => !running(record.pid), "the holder to end");
   await until(async () => (await records()).length === 0, "the record to go");
-  assert.deepEqual(sessions.names, []);
+  // The daemon hears of it once the connection breaks, which can come after the record has gone.
+  await until(() => sessions.names.length === 0, "the daemon to let the session go");
   assert.throws(() => sessions.openSession("work", new HandleScope()), /No PTY session named work\./);
 });
 
