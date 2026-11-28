@@ -360,17 +360,19 @@ export function createCli(): Command {
   const stopCommand = (command: Command) => command
     .option("-S, --state <path>", "Local daemon state file")
     .addOption(new Option("-E, --end-sessions", "End the named sessions too, also those an older cns left running out of its reach").hideHelp(process.platform === "win32"))
-    .addHelpText("after", process.platform === "win32" ? "" : "\nNamed sessions keep running once the daemon stops, and the next daemon adopts them. cns stop names\neach with its holder's pid; --end-sessions ends them, also when no daemon runs.")
+    .addHelpText("after", process.platform === "win32" ? "" : "\nNamed sessions keep running once the daemon stops, and the next daemon adopts them. cns stop names\neach with its holder's pid; --end-sessions ends them, also when no daemon runs, as after a crash.")
     .action(async (options: { state?: string; endSessions?: boolean }) => {
-      const [{ daemonStatePath, keptSessions, stopDaemon }, { sessionFacts }, { sessionsHint }, { sessionsLeft }] = await Promise.all([
+      const [{ daemonStatePath, keptSessions, removeStaleState, stopDaemon }, { sessionFacts }, { sessionsHint }, { sessionsLeft }] = await Promise.all([
         import("./commands/daemon.js"), import("./commands/pairing-cli.js"), import("./version.js"), import("./held-sessions.js"),
       ]);
       const state = daemonStatePath(options.state);
       let stopped: Awaited<ReturnType<typeof stopDaemon>> | undefined;
       try { stopped = await stopDaemon(options.state); }
       catch (error) {
-        // With no daemon to stop, --end-sessions still ends the sessions one left running.
-        if (!options.endSessions || !(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+        // With no daemon to stop, --end-sessions still ends the sessions one left running: also one
+        // that crashed and left its state file, which goes once its daemon does not answer and its pid is gone.
+        const none = error instanceof Error && "code" in error && error.code === "ENOENT";
+        if (!options.endSessions || !(none || await removeStaleState(options.state))) throw error;
       }
       console.log(stopped ? "Daemon stopped." : "No daemon is running.");
       if (stopped?.ended.length) {
