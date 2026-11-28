@@ -1,14 +1,15 @@
-import { spawn, type SpawnOptionsWithoutStdio } from "node:child_process";
+import { spawn, spawnSync, type SpawnOptionsWithoutStdio } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { EventEmitter, once } from "node:events";
-import { chmod, cp, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import type { TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
-import { connectControl, processExited, stopDaemon } from "./commands/daemon.js";
+import { connectControl, stopDaemon } from "./commands/daemon.js";
 import { makePrivateDirectory } from "./config.js";
-import { holderDirectory } from "./held-sessions.js";
+import { sessionsLeft } from "./held-sessions.js";
 import { KeyboardModes } from "./kitty-keyboard.js";
 import { selfInvocation } from "./runtime.js";
 
@@ -48,24 +49,27 @@ export async function daemonHome(t: TestContext, prefix = "cns-daemon-"): Promis
 
 /**
  * End the holders of the named sessions a test's daemon started, which outlive the daemon
- * (held-sessions.ts): each hangs up its program and removes its record on SIGTERM.
+ * (held-sessions.ts), as cns stop --end-sessions does: only those whose socket answers with their
+ * record's token, never a pid alone, which on a busy machine may be another process's by now.
  */
 export async function endHolders(statePath: string): Promise<void> {
-  const dir = holderDirectory(statePath);
-  let files: string[];
-  try { files = (await readdir(dir)).filter((file) => file.endsWith(".json")); } catch { return; }
-  const pids: number[] = [];
-  for (const file of files) {
-    try {
-      const { pid } = JSON.parse(await readFile(path.join(dir, file), "utf8")) as { pid: number };
-      if (pid === process.pid) continue;
-      process.kill(pid, "SIGTERM");
-      pids.push(pid);
-    } catch { /* Gone already. */ }
-  }
-  for (const pid of pids) {
-    if (!(await processExited(pid, 5000))) try { process.kill(pid, "SIGKILL"); } catch { /* Gone. */ }
-  }
+  try { await sessionsLeft(statePath, true); } catch { /* A directory the test made loose, or gone. */ }
+}
+
+/**
+ * Whether `pid` is a child of this process, as a holder a test started here is until it has been
+ * reaped: a pid that is no longer the test's, reused by another process, is not.
+ */
+export function childOfThisProcess(pid: number): boolean {
+  try {
+    if (process.platform === "linux") {
+      // After the program's name, in parentheses: state ppid ...
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      return Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1]) === process.pid;
+    }
+    const ps = spawnSync("ps", ["-o", "ppid=", "-p", String(pid)], { encoding: "utf8" });
+    return ps.status === 0 && Number(ps.stdout.trim()) === process.pid;
+  } catch { return false; }
 }
 
 /**

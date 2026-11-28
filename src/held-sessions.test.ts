@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { spawn } from "node:child_process";
 import { chmod, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
@@ -11,7 +12,7 @@ import { connectHolder, daemonSessions, HeldSessions, HOLDERS, keepsSessions, so
 import { HOLDER_CAPNWEB, HOLDER_PROTOCOL, holderRecordSchema, type HolderRecord } from "./holder.js";
 import { HandleScope, type PtyExit } from "./pty.js";
 import { OutputSink } from "./terminal.js";
-import { PROJECT_ROOT, TEST_TMP } from "./test-support.js";
+import { childOfThisProcess, PROJECT_ROOT, TEST_TMP } from "./test-support.js";
 
 const running = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
@@ -106,7 +107,8 @@ process.once("exit", () => {
     for (const file of existsSync(dir) ? readdirSync(dir).filter((name) => name.endsWith(".json")) : []) {
       try {
         const record = holderRecordSchema.safeParse(JSON.parse(readFileSync(path.join(dir, file), "utf8")));
-        if (record.success) process.kill(record.data.pid, "SIGKILL");
+        // Only a holder this process started and has not reaped: never a pid another process has by now.
+        if (record.success && childOfThisProcess(record.data.pid)) process.kill(record.data.pid, "SIGKILL");
       } catch { /* Gone. */ }
     }
   }
@@ -128,8 +130,10 @@ async function holders(t: TestContext, options: ConstructorParameters<typeof Hel
   };
   t.after(async () => {
     sessions[Symbol.dispose]();
-    for (const record of await records()) { for (const signal of ["SIGTERM", "SIGCONT"] as const) { try { process.kill(record.pid, signal); } catch { /* Gone. */ } } }
-    await until(async () => !(await records()).some((record) => running(record.pid)), "the holders to end");
+    // Only holders this process started: a record a test changed may name another process.
+    const ours = (await records()).map((record) => record.pid).filter(childOfThisProcess);
+    for (const pid of ours) { for (const signal of ["SIGTERM", "SIGCONT"] as const) { try { process.kill(pid, signal); } catch { /* Gone. */ } } }
+    await until(() => !ours.some((pid) => childOfThisProcess(pid) && running(pid)), "the holders to end");
     await rm(path.dirname(dir), { recursive: true, force: true });
   });
   return { dir, sessions, records };
@@ -243,7 +247,7 @@ test("a stopped holder holds up neither the list nor a kill, which kills the hol
   const { sessions, records } = await holders(t, { killMs: 1000 });
   const stuck = await sessions.startSession("stuck", { command: "sleep 60" }, null, new HandleScope());
   await sessions.startSession("fine", { command: "sleep 60" }, null, new HandleScope());
-  const { pid } = (await records()).find((record) => record.name === "stuck")!;
+  const { pid, socket } = (await records()).find((record) => record.name === "stuck")!;
   process.kill(pid, "SIGSTOP");
   let started = Date.now();
   assert.deepEqual((await sessions.list(500)).map((info) => info.name), ["fine"]);
@@ -257,9 +261,66 @@ test("a stopped holder holds up neither the list nor a kill, which kills the hol
   const exit = await killing;
   assert.ok(Date.now() - started >= 1000, "the holder had killMs to answer");
   assert.deepEqual([exit.exitCode, exit.signal, exit.error], [null, null, `The session's holder (pid ${pid}) did not answer, so it was killed.`]);
+  // Killed, the holder could not remove its record and socket: the kill did.
+  assert.deepEqual([existsSync(socket), (await records()).map((record) => record.name)], [false, ["fine"]]);
   assert.ok(await processExited(pid), "SIGKILL ends even a stopped holder");
   await sessions.startSession("stuck", { command: "sleep 60" }, null, new HandleScope());
   assert.deepEqual(sessions.names, ["fine", "stuck"]);
+});
+
+test("a session still ending takes its place at the cap, and a start then is told to try again in a moment", { skip: !HOLDERS, timeout: 30000 }, async (t) => {
+  const { sessions, records } = await holders(t, { max: 2, killMs: 1000 });
+  await sessions.startSession("a", { command: "sleep 60" }, null, new HandleScope());
+  const b = await sessions.startSession("b", { command: "sleep 60" }, null, new HandleScope());
+  // b's holder is stopped, so that its kill takes killMs.
+  process.kill((await records()).find((record) => record.name === "b")!.pid, "SIGSTOP");
+  const killing = b.kill();
+  await until(() => !sessions.names.includes("b"), "the kill to start");
+  await assert.rejects(sessions.startSession("c", { command: "sleep 60" }, null, new HandleScope()),
+    /^Error: Too many named PTY sessions for now: b is still ending\. Try again in a moment\.$/);
+  await killing;
+  await sessions.startSession("c", { command: "sleep 60" }, null, new HandleScope());
+  assert.deepEqual(sessions.names, ["a", "c"]);
+  assert.equal((await records()).length, 2, "never more holders than the cap");
+});
+
+test("a killed session's name stays taken until its holder's connection has gone, not only until a signal was sent", { skip: !HOLDERS, timeout: 30000 }, async (t) => {
+  const { dir, sessions, records } = await holders(t);
+  await sessions.startSession("work", { command: "sleep 60" }, null, new HandleScope());
+  const [record] = await records() as [HolderRecord];
+  sessions[Symbol.dispose]();
+  // Its record names another process, as a pid reused would: SIGKILL ends that one, and the holder, stopped, runs on.
+  const decoy = spawn("sleep", ["60"]);
+  const decoyEnded = new Promise((resolve) => decoy.once("exit", resolve));
+  t.after(() => { decoy.kill("SIGKILL"); });
+  const file = path.join(dir, `${path.basename(record.socket, ".sock")}.json`);
+  await writeFile(file, JSON.stringify({ ...record, pid: decoy.pid }));
+  const next = new HeldSessions(dir, () => {}, { killMs: 500 });
+  t.after(() => next[Symbol.dispose]());
+  await next.adopt();
+  process.kill(record.pid, "SIGSTOP");
+  let ended = false;
+  const killing = next.openSession("work", new HandleScope()).kill().finally(() => { ended = true; });
+  await decoyEnded;
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(ended, false, "the kill waits for the holder's connection, which the decoy's end did not break");
+  await assert.rejects(next.startSession("work", { command: "true" }, null, new HandleScope()), /^Error: The PTY session work is still ending\./);
+  process.kill(record.pid, "SIGKILL");
+  assert.match((await killing).error ?? "", /did not answer, so it was killed\.$/);
+  assert.deepEqual([existsSync(record.socket), existsSync(file)], [false, false]);
+});
+
+test("a holder that does not answer is named with kill -9, which a stopped or hung one needs", { skip: !HOLDERS, timeout: 30000 }, async (t) => {
+  const { dir, sessions, records } = await holders(t);
+  await sessions.startSession("work", { command: "sleep 60" }, null, new HandleScope());
+  const [record] = await records() as [HolderRecord];
+  sessions[Symbol.dispose]();
+  process.kill(record.pid, "SIGSTOP");
+  const said: string[] = [];
+  const next = new HeldSessions(dir, (message) => said.push(message));
+  t.after(() => next[Symbol.dispose]());
+  await next.adopt();
+  assert.deepEqual(said, [`Cannot reach the holder of the session work (pid ${record.pid}): The session's holder did not answer. It keeps running; kill -9 ${record.pid} ends it.`]);
 });
 
 test("a holder that starts wrong is killed, not left running", { skip: !HOLDERS, timeout: 30000 }, async (t) => {
@@ -271,7 +332,7 @@ test("a holder that starts wrong is killed, not left running", { skip: !HOLDERS,
   const start = { dir, name: "work", options: {}, owner: null, finishedMs: 1000 };
   await assert.rejects(startHolder(start, 10_000, { file: process.execPath, args: ["-e", script] }), /^Error: The session's holder sent no record\.$/);
   const pid = Number(await readFile(pidFile, "utf8"));
-  t.after(() => { try { process.kill(pid, "SIGKILL"); } catch { /* Gone. */ } });
+  t.after(() => { if (childOfThisProcess(pid)) process.kill(pid, "SIGKILL"); });
   assert.ok(await processExited(pid, 3000), "the holder was killed");
 });
 

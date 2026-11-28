@@ -96,6 +96,8 @@ function unitKillMode(unit: string, user: boolean): string | undefined {
 
 interface Held {
   record: HolderRecord;
+  /** The holder's record, which it removes as it ends, unless it is killed. */
+  file: string;
   main: RpcStub<HolderApi>;
   /** The daemon's own handle on the session, to list and kill it. */
   base: RpcStub<NamedPty>;
@@ -152,7 +154,7 @@ export async function connectHolder(record: Pick<HolderRecord, "socket" | "token
   try {
     const rest = await new Promise<string>((resolve, reject) => {
       let buffer = "";
-      const timer = setTimeout(() => finish(new Error("The session's holder did not answer.")), timeoutMs);
+      const timer = setTimeout(() => finish(new NoAnswer()), timeoutMs);
       const onData = (chunk: string) => {
         buffer += chunk;
         const end = buffer.indexOf("\n");
@@ -279,10 +281,10 @@ export class HeldSessions implements SessionHost {
     const { name, pid, protocol } = found;
     const remove = () => Promise.all([file, socket].map((leftover) => unlink(leftover).catch(() => {})));
     /** Names the pid to kill only once its socket answered and the pid runs: a pid alone may be another process by now. */
-    const unreachable = (why: string, answered: boolean | undefined) => {
+    const unreachable = (why: string, answered: boolean | undefined, kill = "kill") => {
       const confirmed = answered && processExists(pid);
       // Peers read it, when they ask for the session.
-      const message = `${why} ${confirmed ? `It keeps running; kill ${pid} ends it.` : `Its name stays taken while its record, ${strictlyPrintable(file)}, is there.`}`;
+      const message = `${why} ${confirmed ? `It keeps running; ${kill} ${pid} ends it.` : `Its name stays taken while its record, ${strictlyPrintable(file)}, is there.`}`;
       this.#unreachable.set(name, message);
       this.#say(message);
     };
@@ -300,7 +302,8 @@ export class HeldSessions implements SessionHost {
     try { connection = await connectHolder(record); }
     catch (error) {
       if (gone(error)) { await remove(); return; }
-      unreachable(`Cannot reach the holder of the session ${name} (pid ${pid}): ${strictlyPrintable(errorMessage(error))}`, await listening(socket));
+      // One that does not answer, stopped or hung, never runs its SIGTERM handler: only SIGKILL ends it.
+      unreachable(`Cannot reach the holder of the session ${name} (pid ${pid}): ${strictlyPrintable(errorMessage(error))}`, await listening(socket), error instanceof NoAnswer ? "kill -9" : "kill");
       return;
     }
     const kept = this.#held.get(name);
@@ -309,16 +312,16 @@ export class HeldSessions implements SessionHost {
       if (kept) this.#say(`Two holders run a session named ${name}, pids ${kept.record.pid} and ${pid}: this daemon reaches the first. kill ${pid} ends the other.`);
       return;
     }
-    const held = this.#keep(record, connection);
+    const held = this.#keep(record, connection, file);
     // Only one that still runs: a finished one's end was heard by the daemon it ended under, or by none.
     try { if ((await within(held.base.info(), 3000)).running) this.#adopted(record, held.exited); } catch { /* Gone already, or not answering. */ }
   }
 
-  #keep(record: HolderRecord, connection: { main: RpcStub<HolderApi>; close(): void }): Held {
+  #keep(record: HolderRecord, connection: { main: RpcStub<HolderApi>; close(): void }, file: string): Held {
     const { main } = connection;
     const exited = Promise.resolve(main.exited());
     const gone = Promise.withResolvers<void>();
-    const held: Held = { record, main, base: main.handle(), exited, gone: gone.promise, close: () => { connection.close(); gone.resolve(); } };
+    const held: Held = { record, file, main, base: main.handle(), exited, gone: gone.promise, close: () => { connection.close(); gone.resolve(); } };
     exited.then(() => { held.done = true; }, () => {});
     this.#held.set(record.name, held);
     // The holder ended, or this daemon lost it: the session is gone from here.
@@ -345,7 +348,8 @@ export class HeldSessions implements SessionHost {
       const abandon = (error: Error) => { try { process.kill(record.pid, "SIGTERM"); } catch { /* Gone. */ } return error; };
       const connection = await connectHolder(record).catch((error: Error) => { throw abandon(error); });
       if (this.#closed) { connection.close(); throw abandon(new Error("The daemon is stopping.")); }
-      this.#keep(record, connection);
+      // The holder names its record as it names its socket, by its id.
+      this.#keep(record, connection, path.join(this.#dir, `${path.basename(record.socket, ".sock")}.json`));
     } finally { this.#starting.delete(name); }
     return new HeldNamedPty(this, name, this.#held.get(name)!, scope);
   }
@@ -357,6 +361,10 @@ export class HeldSessions implements SessionHost {
     // Starts at the cap at once each take a session of their own: one that another start is killing is no longer held.
     const oldest = finished.find(([held]) => this.#held.get(held.record.name) === held)?.[0];
     if (!oldest) {
+      const ending = [...this.#ending.keys()].sort();
+      if (ending.length && this.#held.size + this.#unreachable.size + this.#starting.size <= this.#max) {
+        throw new Error(`Too many named PTY sessions for now: ${ending.join(", ")} ${ending.length === 1 ? "is" : "are"} still ending. Try again in a moment.`);
+      }
       const unreachable = [...this.#unreachable.keys()];
       const out = unreachable.length ? `, ${unreachable.length} of them in holders this daemon cannot reach (${unreachable.join(", ")}), as its log says` : "";
       throw new Error(`Too many named PTY sessions: all ${this.#max} are running or in use${out}. Kill one first.`);
@@ -403,6 +411,8 @@ export class HeldSessions implements SessionHost {
       if (!(error instanceof NoAnswer) || held.lost) throw error;
       try { process.kill(held.record.pid, "SIGKILL"); } catch { /* Gone. */ }
       await held.gone;
+      // Killed, it could not remove its record and socket itself.
+      await Promise.all([held.file, path.join(this.#dir, path.basename(held.record.socket))].map((leftover) => unlink(leftover).catch(() => {})));
       return {
         exitCode: null, signal: null, signalNumber: null, timedOut: false, elapsedMs: Date.now() - Date.parse(held.record.startedAt),
         error: `The session's holder (pid ${held.record.pid}) did not answer, so it was killed.`,
