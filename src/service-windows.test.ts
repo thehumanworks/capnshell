@@ -277,17 +277,21 @@ test("on Windows, cns up --install runs a hidden daemon from the task, restarts 
   assert.equal(installed.code, 0, installed.stderr);
   assert.match(installed.stderr, /Installed a scheduled task named cns-.+, defined in .+service\.xml\./);
   assert.match(installed.stdout, /^Running as \S+ \(cns [\d.]+, pid \d+, a scheduled task\), listening at ws:\/\/127\.0\.0\.1:\d+\./);
-  const query = spawnSync("schtasks", ["/Query", "/TN", taskName(), "/XML"], { encoding: "utf8" });
+  // Task Scheduler exports its own XML, leaving out defaults such as RunLevel LeastPrivilege, so look for what matters.
+  const query = spawnSync(schtasks(), ["/Query", "/TN", taskName(), "/XML"], { encoding: "utf8" });
   assert.equal(query.status, 0, query.stderr);
-  for (const part of ["<LogonTrigger>", "<LogonType>InteractiveToken</LogonType>", "<RunLevel>LeastPrivilege</RunLevel>", "conhost.exe</Command>", "<Arguments>--headless "]) assert.ok(query.stdout.includes(part), part);
+  for (const part of [/<LogonTrigger\b/, /<LogonType>\s*InteractiveToken\s*</, /conhost\.exe\s*<\/Command>/i, /<Arguments>\s*--headless\s/, /--supervise/]) {
+    assert.match(query.stdout, part, `The exported task:\n${query.stdout}`);
+  }
+  assert.doesNotMatch(query.stdout, /HighestAvailable/, `Elevated. The exported task:\n${query.stdout}`);
 
   // No window: not the headless console host, the supervisor in it, nor the daemon.
   const windows = spawnSync("powershell", ["-NoProfile", "-Command",
     `Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like '*${daemonState.replace(/'/g, "''")}*' } | ForEach-Object { "$($_.Name) $((Get-Process -Id $_.ProcessId).MainWindowHandle)" }`], { encoding: "utf8" });
   const processes = windows.stdout.trim().split(/\r?\n/).filter(Boolean);
-  assert.ok(processes.some((line) => line.startsWith("conhost.exe ")), windows.stdout + windows.stderr);
-  assert.ok(processes.length >= 3, windows.stdout);
-  for (const line of processes) assert.match(line, / 0$/, `${line} has a window`);
+  assert.ok(processes.some((line) => /^conhost\.exe /i.test(line)), windows.stdout + windows.stderr);
+  assert.ok(processes.length >= 3, windows.stdout + windows.stderr);
+  for (const line of processes) assert.match(line, /\s0$/, `${line} has a window. All of them:\n${windows.stdout}`);
 
   // A daemon that crashes comes back through the supervisor.
   const crashed = await pid();
@@ -332,6 +336,6 @@ test("on Windows, cns up --install runs a hidden daemon from the task, restarts 
   const removed = await cli(["up", "--uninstall", "--state", daemonState]);
   assert.equal(removed.code, 0, removed.stderr);
   assert.match(removed.stdout, /^Removed the scheduled task; the daemon is stopped\./);
-  assert.notEqual(spawnSync("schtasks", ["/Query", "/TN", taskName()], { encoding: "utf8" }).status, 0);
+  assert.notEqual(spawnSync(schtasks(), ["/Query", "/TN", taskName()], { encoding: "utf8" }).status, 0);
   assert.match((await cli(["status", "--state", daemonState])).stdout, /Daemon:\s+not running/);
 });
