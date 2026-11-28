@@ -447,6 +447,28 @@ export function createCli(): Command {
       const { upgrade } = await import("./commands/upgrade.js");
       process.exitCode = await upgrade(oneDevice("upgrade", name, device), options);
     });
+  program.command("wake")
+    .description("Wake a sleeping paired device: this device, or a paired one on its network, sends it a Wake-on-LAN packet")
+    .argument("[device]", "A paired device's name")
+    .addOption(deviceOption("The paired device to wake, in place of the DEVICE argument"))
+    .option("-v, --via <device>", "Only this paired device sends the packet, through the shell grant it gives this one (default: this device and each paired device known to be on DEVICE's network)")
+    .option("-m, --mac <mac>", "Send the packet from this device for the network card with this MAC address, in place of DEVICE; each sender runs this")
+    .option("-a, --address <ip>", "With --mac: the card's IPv4 address, so the packet goes to the network here that holds it")
+    .addHelpText("after", [
+      "",
+      "Daemons tell paired devices their network cards over their links, and each device keeps the last",
+      "it heard, so it knows them once a device sleeps. cns wake DEVICE sends the packet from this device",
+      "when it is on one of DEVICE's networks, and asks each paired device that said it is on one to send",
+      "it too, by running cns wake --mac there through the shell grant it gives this one, as cns run would.",
+      "A packet goes to UDP port 9 at the network's broadcast address and at 255.255.255.255, so it does",
+      "not cross a router. DEVICE must have Wake-on-LAN turned on, which most machines allow only on a",
+      "wired card. Exit 0 when a packet went out, 4 when each sender refused this device, else 1.",
+      "Examples: cns wake studio    cns wake studio --via nas    cns wake --mac 3c:22:fb:12:34:56",
+    ].join("\n"))
+    .action(async (name: string | undefined, { device, ...options }: { device?: string; via?: string; mac?: string; address?: string }) => {
+      const { wake } = await import("./commands/wake.js");
+      process.exitCode = await wake(oneDevice("wake", name, device), options);
+    });
   program.command("identity")
     .description("Show this device's identity for pairing, creating it on first use")
     .option("-j, --json", "Print { publicKey, fingerprint, createdAt, path } as JSON")

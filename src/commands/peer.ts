@@ -17,7 +17,8 @@ import { ensureIdentity, fingerprint, type Identity, type PublicKey } from "../i
 import { GrantedShell, type GrantHolder } from "../granted-shell.js";
 import { createInvite, decisionSchema, PairingApi, suggestedName } from "../pairing.js";
 import { InviteBook } from "../invites.js";
-import { advertisedSchema, describeGrants, explainDenial, findPairedPeer, getPeer, grantsSchema, isRevoked, learnAddresses, listPeers, revokedDevices, savePairedPeer, updatePairedPeer } from "../peers.js";
+import { advertisedSchema, describeGrants, explainDenial, findPairedPeer, getPeer, grantsSchema, isRevoked, lanSchema, learnAddresses, listPeers, revokedDevices, savePairedPeer, updatePairedPeer, type LanCard, type PeerEntry } from "../peers.js";
+import { lanCards } from "../wake.js";
 import { listeningAddresses } from "../addresses.js";
 import { serveControl, type PairingController } from "./daemon-server.js";
 import { removeStaleState } from "./daemon.js";
@@ -107,14 +108,22 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
    * behind, such as one restored from a backup, does not let it in. Pairing again clears that.
    */
   const pairedHere = (publicKey: PublicKey) => isRevoked(publicKey) ? undefined : findPairedPeer(publicKey);
-  /** What this device lets an authenticated paired device do here: exactly its saved incoming grants. */
-  function offerTo(publicKey: PublicKey): { local: GrantedShell; name: string; grants: GrantHolder } {
+  /** What this device lets an authenticated paired device do here: exactly its saved incoming grants. `daemon`: the device's daemon made the link. */
+  function offerTo(publicKey: PublicKey, daemon: boolean): { local: GrantedShell; name: string; grants: GrantHolder } {
     const entry = pairedHere(publicKey);
     if (!entry) throw new AuthError("not-paired", "Not paired with this device.");
     const grants: GrantHolder = { current: entry.grants.incoming };
     const owner = fingerprint(publicKey);
-    return { local: new GrantedShell(new ShellApi(ptys, { owner }), grants, entry.name, owner, advertisedToPeers, answerMeshes(publicKey), answerSecrets(publicKey), localSecrets, audit), name: entry.name, grants };
+    return { local: new GrantedShell(new ShellApi(ptys, { owner }), grants, entry.name, owner, advertisedToPeers, answerMeshes(publicKey), answerSecrets(publicKey), localSecrets, audit, lanFor(entry, daemon, grants)), name: entry.name, grants };
   }
+  /**
+   * This device's network cards, for cns wake: told only over a standing link to another daemon, and
+   * only while this device grants that one something. A command's connection, the cns gateway's
+   * (which links as one, and may also be saved as a mesh's gateway) and a device granted nothing
+   * here learn none.
+   */
+  const lanFor = (entry: Pick<PeerEntry, "gateway">, daemon: boolean, grants: GrantHolder) => (): LanCard[] =>
+    daemon && !entry.gateway && grants.current.length ? lanCards() : [];
   /** Invites handed out and not yet settled (invites.ts). */
   const invites = new InviteBook();
   const links = new Map<string, { stop: () => void; publicKey: PublicKey }>();
@@ -284,22 +293,23 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
   }
 
   /**
-   * Ask a paired device on a standing link where it can be reached now and what it lets
-   * this device do there, and save both in its record: a device that moved networks or
-   * changed relays is then dialed where it is rather than where it was, and the access
-   * `cns peers` shows follows grants changed on that device since pairing. A question that
-   * fails leaves that part of the record as saved.
+   * Ask a paired device on a standing link where it can be reached now, what it lets this
+   * device do there and which network cards it has, and save them in its record: a device
+   * that moved networks or changed relays is then dialed where it is rather than where it
+   * was, the access `cns peers` shows follows grants changed on that device since pairing,
+   * and cns wake knows its cards once it sleeps. A question that fails, as lan does on a cns
+   * from before cns wake, leaves that part of the record as saved.
    */
   async function learnFromPeer(session: Session) {
     const peer = session.peer!;
-    const remote = session.remote as unknown as RpcStub<{ addresses(): string[]; granted(): string[] }>;
+    const remote = session.remote as unknown as RpcStub<{ addresses(): string[]; granted(): string[]; lan(): unknown[] }>;
     const ask = async <T>(call: () => Promise<unknown>, schema: z.ZodType<T>): Promise<T | undefined> => {
       try {
         const parsed = schema.safeParse(await call());
         return parsed.success ? parsed.data : undefined;
       } catch { return undefined; }
     };
-    const [advertised, granted] = await Promise.all([ask(() => remote.addresses(), advertisedSchema), ask(() => remote.granted(), grantsSchema)]);
+    const [advertised, granted, lan] = await Promise.all([ask(() => remote.addresses(), advertisedSchema), ask(() => remote.granted(), grantsSchema), ask(() => remote.lan(), lanSchema)]);
     if (!sessions.has(session.id) || stopping) return;
     try {
       // Found by key, so a renamed alias is still the one updated.
@@ -311,10 +321,13 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
       const same = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((value, index) => value === b[index]);
       const movedTo = !same(addresses, entry.addresses);
       const regranted = !same(outgoing, entry.grants.outgoing);
-      if (!movedTo && !regranted) return;
-      updatePairedPeer(entry.name, (current) => current.publicKey === peer.publicKey ? { ...current, addresses, grants: { ...current.grants, outgoing } } : current);
+      const cards = lan ?? entry.lan;
+      const recarded = JSON.stringify(cards) !== JSON.stringify(entry.lan);
+      if (!movedTo && !regranted && !recarded) return;
+      updatePairedPeer(entry.name, (current) => current.publicKey === peer.publicKey ? { ...current, addresses, grants: { ...current.grants, outgoing }, ...cards ? { lan: cards } : {} } : current);
       if (movedTo) announce(`${entry.name} is reachable at ${addresses.join(", ")}; saved.`);
       if (regranted) announce(`${entry.name} lets this device use: ${describeGrants(outgoing)}; saved.`);
+      if (recarded) announce(`${entry.name}'s network cards, for cns wake: ${cards!.map((card) => `${card.mac} (${card.cidr})`).join(", ") || "none"}; saved.`);
     } catch (error) {
       announce(`${peer.name}: could not update its saved record: ${errorMessage(error)}`);
     }
@@ -557,7 +570,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
       const via = isRelayAddress(url) ? "relay" : "direct";
       const grants: GrantHolder = { current: current.grants.incoming };
       const owner = fingerprint(current.publicKey);
-      const local = new GrantedShell(new ShellApi(ptys, { owner }), grants, name, owner, advertisedToPeers, answerMeshes(current.publicKey), answerSecrets(current.publicKey), localSecrets, audit);
+      const local = new GrantedShell(new ShellApi(ptys, { owner }), grants, name, owner, advertisedToPeers, answerMeshes(current.publicKey), answerSecrets(current.publicKey), localSecrets, audit, lanFor(current, true, grants));
       const remote = rpcSession<ShellApi>(channel, local);
       const session = register({ close: (reason) => channel.close(reason), outbound: true, via, dialed: url }, local, remote, new URL(url).host, { name, publicKey: current.publicKey, daemon: true });
       session.grants = grants;
@@ -680,7 +693,7 @@ export async function startPeer(config: PeerConfig | DaemonConfig): Promise<void
         channel.close("Duplicate link");
         return undefined;
       }
-      const offered = invite ? { local: pairingFor(invite.id, peer), name: undefined, grants: undefined } : offerTo(peer);
+      const offered = invite ? { local: pairingFor(invite.id, peer), name: undefined, grants: undefined } : offerTo(peer, mode === "daemon");
       if (outcome === "replace") remove(held!);
       const remote = rpcSession<ShellApi>(channel, offered.local);
       const session = register({ close: (reason) => channel.close(reason), outbound: false, via }, offered.local, remote, address,

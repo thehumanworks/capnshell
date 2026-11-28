@@ -108,7 +108,7 @@ const knownFeatures: ReadonlySet<string> = new Set<string>(FEATURES);
  */
 type FieldKind = "base" | "informational" | Feature;
 export const PEER_FIELDS = {
-  record: { version: "base", needs: "base", publicKey: "base", addresses: "base", pairedAt: "base", grants: "base", mesh: "base", gateway: "informational" },
+  record: { version: "base", needs: "base", publicKey: "base", addresses: "base", pairedAt: "base", grants: "base", mesh: "base", gateway: "informational", lan: "informational" },
   grants: { incoming: "base", outgoing: "base" },
 } as const satisfies { record: Record<keyof PairedPeer, FieldKind>; grants: Record<keyof PairedPeer["grants"], FieldKind> };
 
@@ -116,6 +116,16 @@ const base64url = /^[A-Za-z0-9_-]+$/;
 export const publicKeySchema = z.string().regex(base64url).refine((value) => Buffer.from(value, "base64url").length === 32, "A public key is 32 bytes.");
 const addressSchema = z.string().max(2048).refine((value) => { try { validatePeerUrl(value); return true; } catch { return false; } }, "A peer address is a ws:// or wss:// URL.");
 const needsSchema = z.array(z.string().regex(/^[a-z][a-z0-9-]{0,31}$/)).max(16);
+/** A network card's MAC address as cns writes it: six pairs of lower-case hex digits, colon-separated. */
+export const MAC_PATTERN = /^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$/;
+const octet = "(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])";
+/** An IPv4 address in dotted decimal, without leading zeros. */
+export const IPV4_PATTERN = new RegExp(`^${octet}(?:\\.${octet}){3}$`);
+/** A card's IPv4 address and the length of its network's prefix, as os.networkInterfaces() gives it: 192.168.1.23/24. */
+const CIDR_PATTERN = new RegExp(`^${octet}(?:\\.${octet}){3}/(?:3[0-2]|[12]?[0-9])$`);
+/** Where a device is on local networks, for cns wake (wake.ts): each card's MAC address and its IPv4 address with prefix. */
+export const lanSchema = z.array(z.object({ mac: z.string().regex(MAC_PATTERN), cidr: z.string().regex(CIDR_PATTERN) })).max(16);
+export type LanCard = z.infer<typeof lanSchema>[number];
 /** Fields this cns does not know are dropped when it reads a record; see FEATURES. */
 export const pairedPeerSchema = z.object({
   version: z.literal(2),
@@ -140,6 +150,13 @@ export const pairedPeerSchema = z.object({
    * the gateway may do here, so a cns that ignores it only knocks on the relay for nothing.
    */
   gateway: z.literal(true).optional(),
+  /**
+   * The device's network cards as it last said over a link while awake, which cns wake uses to
+   * have a device on the same network wake it. Informational: it only says where to send a wake
+   * packet, never what a device may do. A value this cns cannot read is dropped rather than
+   * refused, so that it never makes the record unreadable.
+   */
+  lan: lanSchema.optional().catch(undefined),
 });
 export type PairedPeer = z.infer<typeof pairedPeerSchema>;
 

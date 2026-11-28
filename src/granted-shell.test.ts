@@ -160,6 +160,14 @@ test("any paired device may ask where this device is reachable and what it may d
   // What the peer may do here is reported as it stands, also without any grant.
   assert.deepEqual(granted.granted(), []);
   assert.deepEqual(fork.granted(), ["shell"]);
+  // So are this device's network cards, for cns wake, asked live too.
+  let cards = [{ mac: "3c:22:fb:12:34:56", cidr: "192.168.1.23/24" }];
+  const lan = new GrantedShell(new ShellApi(), [], "laptop", null, () => [], () => [], () => [], undefined, () => {}, () => cards);
+  t.after(() => lan[Symbol.dispose]());
+  assert.deepEqual(lan.lan(), [{ mac: "3c:22:fb:12:34:56", cidr: "192.168.1.23/24" }]);
+  cards = [];
+  assert.deepEqual(lan.lan(), []);
+  assert.deepEqual(granted.lan(), []);
 });
 
 test("a granted shell records what the peer does, by name and fingerprint, with secret names and never their values", { skip: windows }, async (t) => {
