@@ -324,8 +324,10 @@ export async function connectPaired(target: Extract<Target, { kind: "paired" }>,
   const { connectFirst, rpcSession } = await import("../src/secure.js");
   const { builtInRelay } = await import("../src/relay-config.js");
   const { dialAddresses } = await import("../src/relay-hub.js");
+  const { refuseRemoved } = await import("../src/peers.js");
   const identity = loadIdentity();
   if (!identity) throw new Error(`This machine has no cns identity, so it cannot be paired with ${target.name}. Pair it first with cns pair.`);
+  refuseRemoved(target);
   const { channel } = await connectFirst(dialAddresses(target, builtInRelay()), identity, { expect: target.publicKey, signal });
   const shell = rpcSession<ShellApi>(channel, new RefusingShell());
   const release = () => {

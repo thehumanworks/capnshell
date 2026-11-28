@@ -1,6 +1,6 @@
 # ADR 0010: Removing a lost device without widening anything
 
-- Status: proposed (Tomas to confirm the revoked list)
+- Status: accepted (Tomas confirmed the removed-keys design on 2026-11-28)
 - Date: 2026-11-28
 
 ## Context
@@ -48,9 +48,16 @@ Reviews found these ways that removing something could still give the lost devic
     so a record left behind, or restored, does not let it in. That is one look at the revoked
     directory per connection. A revoked directory that is not private fails closed: the daemon
     lets nothing in, and `cns peers` and `cns run` here name the directory and the `chmod` to run.
-  - `cns run`, `cns cp`, `cns shell` and the other commands that dial a device by name
-    (`resolvePeer`) refuse such a record, as what they send would go to whoever has the key.
-    `cns peers` marks it `removed` (`revoked` in `--json`), with the command that deletes it.
+  - No command connects to such a record, as what it sends would go to whoever has the key,
+    and what it takes, such as a skill, would come from them. `refuseRemoved` is checked where
+    every command's connection is made (`openDeviceLink`, before the daemon is asked to lend its
+    link), and by `cns doctor` and Pi, which dial on their own. A command named for the device
+    says so, with the command that deletes the record; one that asks every device, such as
+    `cns sessions`, `cns skills` or `cns ui`, leaves it out (`reachablePeers`), and
+    `--everywhere` reports it as `not used`, so it does not learn the fingerprint being removed.
+    Pairing is not refused, as it is the way back. `cns peers` marks it `removed`, and
+    `cns peers --json` and `cns peer list --json` give `revoked`. `secure.ts` does not check, as
+    the gateway's Worker shares it and keeps no revoked list.
   - `newerLists` takes no list it signs. A mesh it runs stays at the last list this device took.
   - `secretsFor` seals nothing to it. A secret version it set, or one set for it, is not kept or
     read, even when another member passes it on (`meshOf`), and `pruneSecrets` deletes it.

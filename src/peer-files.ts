@@ -9,6 +9,12 @@ import { checkConfigDirectory, checkPrivateDirectory, configDirectory, isPrivate
 export const peerNamePattern = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
 const namePattern = peerNamePattern;
 
+/**
+ * Open without waiting, so that a FIFO saved where a record belongs is refused rather than waited
+ * on. Windows has no such files there, and no such flag: Node leaves it out of fs.constants there.
+ */
+const NO_WAIT = process.platform === "win32" ? 0 : constants.O_NONBLOCK ?? 0;
+
 /** A private directory under the configuration directory, holding one private file per name. */
 function privateFiles(directory: () => string, what: string) {
   /** The configuration directory and this one are private and on a trusted path. */
@@ -24,14 +30,11 @@ function privateFiles(directory: () => string, what: string) {
     makePrivateDirectory(directory());
     checkDirectories();
   };
-  /**
-   * A file's contents, which must be a private regular file; undefined when there is none. Opened
-   * without waiting, so that a FIFO saved there is refused rather than waited on.
-   */
+  /** A file's contents, which must be a private regular file; undefined when there is none. Opened without waiting (NO_WAIT). */
   const read = (name: string): string | undefined => {
     const target = file(name);
     let fd: number;
-    try { checkDirectories(); fd = openSync(target, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0)); }
+    try { checkDirectories(); fd = openSync(target, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | NO_WAIT); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
       throw error;
@@ -47,7 +50,7 @@ function privateFiles(directory: () => string, what: string) {
    */
   const readLoosely = (name: string): string | undefined => {
     let fd: number;
-    try { checkDirectories(); fd = openSync(file(name), constants.O_RDONLY | (constants.O_NONBLOCK ?? 0)); } catch { return undefined; }
+    try { checkDirectories(); fd = openSync(file(name), constants.O_RDONLY | NO_WAIT); } catch { return undefined; }
     try {
       const stats = fstatSync(fd);
       return stats.isFile() && stats.size <= 65536 ? readFileSync(fd, "utf8") : undefined;

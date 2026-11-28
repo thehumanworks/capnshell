@@ -16,7 +16,7 @@ import { endpointUrl } from "../options.js";
 import { decisionSchema, decodeInvite, DEFAULT_INVITE_MS, INVITE_PREFIX, MAX_INVITE_MS, suggestedName, type Decision, type Invite, type PairingApi, type Proposal } from "../pairing.js";
 import { hostCode, inviteForCode, isPairingCode, MAX_WRONG_CODES, PairingCodeError, parseCode, type HostedCode } from "../pairing-code.js";
 import { peerFileExists, peerNamePattern, removePeerFile, validatePeerUrl } from "../peer-files.js";
-import { describeGrants, expandGrants, findPairedPeer, getPeer, isRevoked, listPeers, revokeDevice, revokedDevices, savedKey, savePairedPeer, updatePairedPeer, PERMISSIONS, type Permission } from "../peers.js";
+import { describeGrants, expandGrants, findPairedPeer, getPeer, isRevoked, listPeers, refuseRemoved, revokeDevice, revokedDevices, savedKey, savePairedPeer, updatePairedPeer, PERMISSIONS, type Permission } from "../peers.js";
 import { plain } from "../terminal.js";
 import { selfCheck, type SelfFacts } from "../self-check.js";
 import type { ShellApi } from "../shell.js";
@@ -757,6 +757,7 @@ export async function doctor(name: string | undefined, options: DoctorOptions): 
   if (name === undefined) return doctorSelf(options);
   const entry = getPeer(name);
   if (!entry) throw new Error(`No paired device is saved as ${name}. cns peers lists the paired devices.`);
+  refuseRemoved(entry);
   const report: Record<string, unknown> = { name };
   const lines: string[] = [];
   const identity = ensureIdentity().identity;

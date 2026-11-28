@@ -133,10 +133,11 @@ export function createCli(): Command {
       const { address } = await import("./commands/pairing-cli.js"); await address(device, after, options);
     });
   alias.command("list").description("List paired devices")
-    .option("-j, --json", "Print a JSON array sorted by name, [] when there are none: { name, fingerprint, publicKey, addresses, grants, mesh? } per device")
+    .option("-j, --json", "Print a JSON array sorted by name, [] when there are none: { name, fingerprint, publicKey, addresses, grants, mesh?, revoked } per device")
     .action(async (options: { json?: boolean }) => {
-      const { listPeers } = await import("./peers.js");
-      const peers = listPeers().map((peer) => ({ name: peer.name, fingerprint: peer.fingerprint, publicKey: peer.publicKey, addresses: peer.addresses, grants: peer.grants, ...peer.mesh === undefined ? {} : { mesh: peer.mesh } }));
+      const { listPeers, revokedDevices } = await import("./peers.js");
+      const removed = revokedDevices();
+      const peers = listPeers().map((peer) => ({ name: peer.name, fingerprint: peer.fingerprint, publicKey: peer.publicKey, addresses: peer.addresses, grants: peer.grants, ...peer.mesh === undefined ? {} : { mesh: peer.mesh }, revoked: removed.has(peer.fingerprint) }));
       if (options.json) console.log(JSON.stringify(peers, null, 2));
       else for (const peer of peers) console.log(`${peer.name}\t${peer.fingerprint}\t${peer.addresses[0] ?? "-"}`);
     });

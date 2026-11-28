@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, renameSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test, { afterEach, beforeEach } from "node:test";
 import { AuthError } from "../auth.js";
+import { openDeviceLink } from "../device-link.js";
 import { strictlyPrintable } from "../errors.js";
 import { ensureIdentity, generateIdentity, newKeyPair, type Identity } from "../identity.js";
 import { applyMeshes, firstList, listMeshes, newerLists, nextList, readMesh, removeMesh, savedRecords, signList, writeMesh } from "../mesh.js";
@@ -14,6 +16,7 @@ import { removePeerFile } from "../peer-files.js";
 import { getPeer, listPeers, resolvePeer, revokedDevices, revokeDevice, savePairedPeer, type PeerEntry, type Permission } from "../peers.js";
 import { keepSecret, sealSecret, secretsFor } from "../secrets.js";
 import { secureReady } from "../secure.js";
+import { launchCli } from "../test-support.js";
 import { allowMembers, listMeshesCommand } from "./mesh-cli.js";
 import { peers, unpair } from "./pairing-cli.js";
 import { answerPlaces, forgetAtGateway, gatewayPlace, readAnswer, refused, removeCommand, removeHere, removePeer, type Place } from "./remove-everywhere.js";
@@ -150,16 +153,19 @@ test("a pairing that fails leaves a removed device on the revoked list", () => {
 });
 
 test("a plain removal narrows a mesh the device runs, and names the meshes here that list it, which give it no record now", async () => {
+  await secureReady();
   pair("phone", phone);
   pair("hub", hub);
   mesh("work", phone, [], ["shell"]);
+  // A secret this device took from phone's mesh before: a device whoever has phone's key added may have set it.
+  keepSecret(sealSecret(self, { mesh: "work", admin: phone.publicKey, name: "API_URL", version: 1, setAt: new Date().toISOString() }, new TextEncoder().encode("value")));
   mesh("home", self, [phone], []);
   mesh("club", hub, [phone], ["files"]);
   applyMeshes(self.publicKey);
   const { out } = await quietly(() => removePeer("phone", { state }));
   assert.equal(out, [
     "Removed phone.",
-    "phone runs the mesh work, which this device is in. It stays at its last list here, version 2, which whoever has phone's key may have added devices to, so its members may now use nothing here. To finish, leave it: cns mesh leave work. To let its members use shell here again, only once cns mesh list work shows no device you do not know: cns mesh allow work shell.",
+    "phone runs the mesh work, which this device is in. It stays at its last list here, version 2, which whoever has phone's key may have added devices to, so its members may now use nothing here. The secrets held from it here may have been set by such a device, and leaving the mesh drops them. To finish, leave it: cns mesh leave work. To let its members use shell here again, only once cns mesh list work shows no device you do not know: cns mesh allow work shell.",
     "phone is listed in the mesh club, which hub runs; it gets no record here from that mesh until this device pairs with it directly.",
     `phone is still listed in the mesh home, which this device runs. To take it out: cns mesh remove home member-0, or cns peer remove --fingerprint ${phone.fingerprint} --everywhere.`,
   ].join("\n") + "\n");
@@ -307,7 +313,44 @@ test("a record left of a device removed here is marked in cns peers, and cns doe
   assert.match(table, /^phone {2}removed {2}/m);
   assert.match(table, /^hub {4}offline {2}/m);
   assert.match(hint, /^phone was removed from this device \(cns peer remove\), so cns neither connects to it nor lets it in; its record is left over, as from a backup\. To delete it: cns peer remove phone\.$/m);
-  assert.doesNotMatch(hint, /^phone grants this device no access/m);
+  assert.match(hint, /^hub grants this device no access\. To change that, run on hub: /m, "the hint names hub alone, not the removed phone");
+});
+
+test("no command connects to a device removed here, by a record of it left or restored", { skip: process.platform === "win32", timeout: 90_000 }, async (t) => {
+  // A listener stands in for whoever has phone's key: any command that dials phone connects to it.
+  let dialed = 0;
+  const server = net.createServer((socket) => { dialed++; socket.destroy(); });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => { server.close(); });
+  const address = `ws://127.0.0.1:${(server.address() as net.AddressInfo).port}`;
+  savePairedPeer("phone", { publicKey: phone.publicKey, addresses: [address], pairedAt: new Date().toISOString(), grants: { incoming: [], outgoing: ["shell", "files", "skills", "sessions:list", "sessions:view"] } });
+  revokeDevice(phone.fingerprint, phone.publicKey);
+  const cli = async (args: string[]) => {
+    // No relay and no daemon of the person's: only phone's own address could be dialed.
+    const child = launchCli(t, args, { env: { CNS_CONFIG_DIR: dir, HOME: dir, CNS_RELAY: "off" } });
+    child.child.stdin.end();
+    return { args: args.join(" "), code: await child.exited, stdout: child.stdout, stderr: child.stderr };
+  };
+  const refused = "phone was removed from this device (cns peer remove), so cns does not connect to it. To delete the record of it left here, run: cns peer remove phone. To use it again, pair with it again after that: cns pair.";
+  // Where every command's connection to a device is made, whichever way it found the device.
+  await assert.rejects(openDeviceLink({ name: "phone", publicKey: phone.publicKey, addresses: [address] }, self, AbortSignal.timeout(5000)), { message: refused });
+  for (const args of [["run", "phone", "--", "true"], ["cp", "phone:/etc/hostname", path.join(dir, "copy")], ["doctor", "phone"]]) {
+    const ran = await cli(args);
+    assert.ok(ran.code !== 0 && ran.stderr.includes(refused), `${ran.args}: ${ran.code} ${ran.stderr}`);
+  }
+  // Commands that ask every device leave it out, rather than report it as an error.
+  for (const args of [["sessions"], ["skills", "list"], ["skills", "sync", "pdf"]]) {
+    const ran = await cli(args);
+    assert.doesNotMatch(ran.stdout + ran.stderr, /phone/, ran.args);
+  }
+  // Nor does --everywhere ask it, which would tell whoever has phone's key the fingerprint removed now.
+  const everywhere = await cli(["peer", "remove", "--fingerprint", hub.fingerprint, "--everywhere", "--json"]);
+  assert.deepEqual((JSON.parse(everywhere.stdout) as Place[]).find((place) => place.device === "phone"), {
+    device: "phone", place: "", outcome: "not used", detail: "it was removed from this device before, so it was not asked; to delete the record of it left here: cns peer remove phone",
+  });
+  // cns peer list --json marks it, as cns peers --json does.
+  assert.deepEqual((JSON.parse((await cli(["peer", "list", "--json"])).stdout) as Array<{ name: string; revoked: boolean }>).map((peer) => [peer.name, peer.revoked]), [["phone", true]]);
+  assert.equal(dialed, 0, "nothing connected to phone's address");
 });
 
 test("a FIFO, a link to a device file or a file too large for a record in peers/ is neither waited on nor read", { skip: process.platform === "win32" }, () => {

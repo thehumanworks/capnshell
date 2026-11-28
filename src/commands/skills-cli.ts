@@ -6,7 +6,7 @@ import { errorMessage, printable } from "../errors.js";
 import { setModified, type FileChunk, type FileKind } from "../files.js";
 import { failure, LIST_TIMEOUT_MS } from "../fleet-sessions.js";
 import { ensureIdentity, type Identity } from "../identity.js";
-import { explainDenial, listPeers, resolvePeer, type Permission } from "../peers.js";
+import { explainDenial, reachablePeers, resolvePeer, type Permission } from "../peers.js";
 import { secureReady } from "../secure.js";
 import type { ShellApi } from "../shell.js";
 import {
@@ -113,7 +113,7 @@ const before = <T>(signal: AbortSignal, promise: Promise<T>) => new Promise<T>((
  * within `timeoutMs`, so one that is slow or offline never hides the others' skills.
  */
 async function gather(links: Links, timeoutMs = LIST_TIMEOUT_MS): Promise<{ copies: Copy[]; unlisted: Unlisted[] }> {
-  const devices = listPeers(() => {});
+  const devices = reachablePeers(() => {});
   const asked = devices.map(async (peer): Promise<Copy[] | Unlisted> => {
     if (!mayRead(peer.grants.outgoing)) {
       return { device: peer.name, state: "not-granted", reason: `${peer.name} does not let this device read its skills (skills or files); cns doctor ${peer.name} checks what it grants now` };

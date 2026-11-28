@@ -56,7 +56,7 @@ export async function call<T>(options: GatewayOptions, action: string, input: Re
   if (!response.ok) {
     const said = (answer as { error?: unknown } | null)?.error;
     const message = typeof said === "string" ? said : `The gateway answered ${response.status}.`;
-    throw new GatewayError(response.status === 401 ? `${message} This device's public key is ${identity.publicKey}.` : message, response.status, typeof said === "string" ? said : undefined);
+    throw new GatewayError(response.status === 401 ? `${message} This device's public key is ${identity.publicKey}.` : message, response.status, typeof said === "string" ? said.slice(0, 200) : undefined);
   }
   return answer as T;
 }

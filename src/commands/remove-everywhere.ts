@@ -127,11 +127,18 @@ export async function removeCommand(name: string | undefined, options: RemoveOpt
     const key = savedKey(peer);
     if (key === undefined || fingerprint(key.publicKey) !== target.fingerprint) unreadable.push({ device: peer, place: "", outcome: "failed", detail: "this cns cannot read its record here, so it was not asked; cns peers says why", next: `On ${peer}, run: ${command}` });
   }).filter((peer) => peer.fingerprint !== target.fingerprint) : [];
+  // Devices removed here before are not asked, as that would tell whoever has their keys this one's.
+  // When the list cannot be read, each is refused where it would be dialed (refuseRemoved).
+  let before = new Set<string>();
+  try { before = revokedDevices(); } catch { /* Refused below. */ }
   const places = await removeHere(target.fingerprint, { meshes: options.meshes || options.everywhere, dryRun: options.dryRun, state: options.state });
   if (options.everywhere) {
     await secureReady();
     const { fingerprint: gateway, ...atGateway } = await forgetAtGateway(target.fingerprint, !!options.dryRun);
     const reached = await Promise.all(peers.map((peer) => {
+      if (before.has(peer.fingerprint)) {
+        return Promise.resolve([{ device: peer.name, place: "", outcome: "not used", detail: `it was removed from this device before, so it was not asked; to delete the record of it left here: cns peer remove ${peer.name}` } satisfies Place]);
+      }
       const skipped = gatewayPlace(peer, gateway, target.fingerprint);
       if (skipped) return Promise.resolve([skipped]);
       return onDevice(peer, target.fingerprint, identity!, !!options.dryRun).catch((error): Place[] => [

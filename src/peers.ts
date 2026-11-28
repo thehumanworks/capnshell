@@ -313,11 +313,26 @@ export function learnAddresses(saved: readonly string[], advertised: readonly st
   return [...all.filter((url) => !isRelayAddress(url)).slice(0, 16 - relays.length), ...relays];
 }
 
+/**
+ * Refuse to connect to a device removed here (revokeDevice), whose record was left or restored, as
+ * from a backup: the connection would send whoever has its key what the command sends, such as a
+ * file, and take what it serves, such as a skill. Every connection a command makes to a paired
+ * device checks this (openDeviceLink, cns doctor, Pi); the daemon's dial loop checks it too.
+ */
+export function refuseRemoved(device: { name: string; publicKey: PublicKey }): void {
+  if (isRevoked(device.publicKey)) throw new Error(`${device.name} was removed from this device (cns peer remove), so cns does not connect to it. To delete the record of it left here, run: cns peer remove ${device.name}. To use it again, pair with it again after that: cns pair.`);
+}
+
+/** The paired devices a command that reaches every device asks: those saved, but for those removed here (refuseRemoved). */
+export function reachablePeers(report?: (name: string, error: unknown) => void): PeerEntry[] {
+  const removed = revokedDevices();
+  return listPeers(report).filter((peer) => !removed.has(peer.fingerprint));
+}
+
 /** The paired device a command names: the identity to expect and every address to try. */
 export function resolvePeer(name: string): { name: string; publicKey: PublicKey; outgoing: Permission[]; addresses: string[] } {
   const entry = getPeer(name);
   if (!entry) throw new Error(`No paired device is saved as ${name}. Pair with it first: cns pair. cns peers lists the paired devices.`);
-  // A record left or restored of a device removed here is not dialed: what goes over that link goes to whoever has its key.
-  if (isRevoked(entry.publicKey)) throw new Error(`${name} was removed from this device (cns peer remove), so cns does not connect to it. To delete the record of it left here, run: cns peer remove ${name}. To use it again, pair with it again after that: cns pair.`);
+  refuseRemoved(entry);
   return { name, publicKey: entry.publicKey, outgoing: entry.grants.outgoing, addresses: entry.addresses };
 }
