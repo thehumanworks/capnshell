@@ -9,7 +9,7 @@ import test from "node:test";
 import { connectControl } from "./commands/daemon.js";
 import {
   installedService, installedServiceRuns, installService, registeredTask, scheduledTask, schtasks, serviceFile, serviceKind, serviceLog, serviceName,
-  servicePath, runTask, superviseDaemon, taskName, uninstallService, windowsQuote, type Runner, type ServiceSpec,
+  servicePath, runTask, superviseDaemon, TaskGone, taskGone, taskName, uninstallService, windowsQuote, type Runner, type ServiceSpec,
 } from "./service.js";
 import { cliInvocation, launchCli, testDevices, unusedPort } from "./test-support.js";
 
@@ -188,6 +188,26 @@ test("starting the task runs it, and runs it again each second until a daemon an
   await assert.rejects(runTask(state, { runner: fakeSchtasks(["/Run"], "ERROR: Access is denied.").runner, sleep, answers: async () => false }), /\/Run \/TN \S+ failed: ERROR: Access is denied\.$/);
 });
 
+// What changed: a restart still running the task when cns up --uninstall deleted it found /Run
+// failing, and started the daemon detached, just after uninstalling had said it was stopped.
+test("a task that did not start the daemon lets it start without the task while Task Scheduler has it or its definition is kept, and not once uninstalling removed both", async (t) => {
+  const home = await tempHome(t);
+  const name = taskName();
+  const failed = `${schtasks()} /Run /TN ${name} failed: ERROR: The system cannot find the file specified.`;
+  const { calls, runner } = fakeSchtasks();
+  assert.equal(taskGone("no daemon answered within 15 seconds", runner, home), undefined, "there, maybe disabled: the daemon starts detached");
+  assert.deepEqual(calls, [step("/Query", "/TN", name)]);
+  await installService(serviceFile("schtasks", spec, home, {}), fakeSchtasks().runner);
+  // Task Scheduler failing, as /Run just did: schtasks exits 1 for any error, so the kept definition decides.
+  assert.equal(taskGone(failed, fakeSchtasks(["/Query"], "ERROR: Access is denied.").runner, home), undefined, "an outage: the daemon starts detached");
+  // cns up --uninstall deletes the task, then its definition.
+  assert.equal(await uninstallService("schtasks", fakeSchtasks().runner, home, {}), true);
+  const gone = taskGone(failed, fakeSchtasks(["/Query"]).runner, home);
+  assert.ok(gone instanceof TaskGone);
+  assert.equal(gone.failure, failed);
+  assert.equal(gone.message, `The scheduled task ${name} is gone, as after cns up --uninstall (${schtasks()} /Run /TN ${name} failed: ERROR: The system cannot find the file specified).`);
+});
+
 test("when schtasks refuses to register the task, the error says what failed and what to run next", async (t) => {
   const home = await tempHome(t);
   const file = serviceFile("schtasks", spec, home, {});
@@ -350,5 +370,8 @@ test("on Windows, cns up --install runs a hidden daemon from the task, restarts 
   assert.equal(removed.code, 0, removed.stderr);
   assert.match(removed.stdout, /^Removed the scheduled task; the daemon is stopped\./);
   assert.notEqual(spawnSync(schtasks(), ["/Query", "/TN", taskName()], { encoding: "utf8" }).status, 0);
-  assert.match((await cli(["status", "--state", daemonState])).stdout, /Daemon:\s+not running/);
+  // A restart still running the task when it went would leave its steps here.
+  const logs = async () => (await Promise.all(["restart.log", "service.log"].map(async (name) => `${name}:\n${await readFile(path.join(root, name), "utf8").catch((error: Error) => error.message)}`))).join("\n");
+  const after = (await cli(["status", "--state", daemonState])).stdout;
+  assert.match(after, /Daemon:\s+not running/, `${after}${await logs()}`);
 });
