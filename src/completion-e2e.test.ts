@@ -1,13 +1,12 @@
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
-import os from "node:os";
 import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { connectControl } from "./commands/daemon.js";
 import { LOOKUP_MS } from "./completion.js";
 import { PERMISSIONS, savePairedPeer, type Permission } from "./peers.js";
-import { launchCli, unusedPort } from "./test-support.js";
+import { endHolders, launchCli, TEST_TMP, unusedPort } from "./test-support.js";
 
 const posix = process.platform !== "win32";
 
@@ -16,7 +15,7 @@ const posix = process.platform !== "win32";
  * completion looks for the link it borrows. Hooks stop the daemons, then remove the homes.
  */
 async function devices(t: TestContext) {
-  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-complete-")));
+  const root = await realpath(await mkdtemp(path.join(TEST_TMP, "cns-complete-")));
   const stops: Array<() => Promise<unknown>> = [];
   t.after(async () => { for (const stop of stops.reverse()) await stop(); await rm(root, { recursive: true, force: true }); });
   const cli = async (dev: { env: Record<string, string> }, args: string[]) => {
@@ -43,7 +42,7 @@ async function devices(t: TestContext) {
   const up = async (dev: Device) => {
     const result = await cli(dev, ["up", "--bind", "127.0.0.1", "--port", dev.port, "--state", dev.state]);
     assert.equal(result.code, 0, result.stdout + result.stderr);
-    stops.push(() => cli(dev, ["stop", "--state", dev.state]));
+    stops.push(async () => { await cli(dev, ["stop", "--state", dev.state]); await endHolders(dev.state); });
   };
   /** What cns __complete prints, as lines, once it exits 0 having printed nothing on stderr. */
   const complete = async (dev: Device, words: string[]) => {
