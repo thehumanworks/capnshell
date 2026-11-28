@@ -64,7 +64,7 @@ test("the bash script joins DEVICE:PATH again, replaces what follows the colon, 
     const run = spawnSync("bash", ["-c", [
       `source ${JSON.stringify(file)}`,
       space ? "_cns_space=' '" : "compopt() { :; }",
-      `COMP_WORDBREAKS=$' \\t\\n"\\'><=;|&(:'`,
+      `COMP_WORDBREAKS=$' \\t\\n"\\'@><=;|&(:'`,
       `COMP_LINE=${JSON.stringify(line).replaceAll("$", "\\$")} COMP_POINT=${Buffer.byteLength(line)}`,
       `COMP_WORDS=(${words.map((word) => `'${word.replaceAll("'", "'\\''")}'`).join(" ")}) COMP_CWORD=${words.length - 1}`,
       "_cns",
@@ -90,6 +90,20 @@ test("the bash script joins DEVICE:PATH again, replaces what follows the colon, 
   assert.deepEqual(cns.asked().at(-1), ["__complete", "bash", ""]);
   // Nothing for a remote path leaves it as typed: bash would otherwise complete a local file there.
   assert.deepEqual(complete(["cns", "cp", "studio", ":", "no"], "cns cp studio:no"), ["[no]"]);
+  // Bash replaces from after the last = as well, and from the @ itself. Bash 3.2 does not split the word, and readline still replaces only that part.
+  cns.reply(["studio:x=yz", "studio:x=yz/"]);
+  const space = old ? " " : "";
+  assert.deepEqual(complete(["cns", "cp", "studio", ":", "x", "=", "y"], "cns cp studio:x=y"), [`[yz${space}]`, "[yz/]"]);
+  assert.deepEqual(complete(["cns", "cp", "studio:x="], "cns cp studio:x="), [`[yz${space}]`, "[yz/]"]);
+  assert.deepEqual(complete(["cns", "cp", "studio", ":", "x\\="], "cns cp studio:x\\="), [`[x=yz${space}]`, "[x=yz/]"]);
+  cns.reply(["studio:user@host"]);
+  assert.deepEqual(complete(["cns", "cp", "studio", ":", "user", "@", "h"], "cns cp studio:user@h"), [`[@host${space}]`]);
+  // A candidate that does not start as typed, or a quote left open, leaves the part bash replaces as it is.
+  cns.reply(["studio:x\\=yz"]);
+  assert.deepEqual(complete(["cns", "cp", "studio", ":", "x", "=", "y"], "cns cp studio:x=y"), ["[y]"]);
+  cns.reply([]);
+  assert.deepEqual(complete(["cns", "cp", "'studio:My D"], "cns cp 'studio:My D"), ["[studio:My D]"]);
+  assert.deepEqual(complete(["cns", "cp", "studio", ":", "\"My D"], "cns cp studio:\"My D"), ["[My D]"]);
 });
 
 test("the zsh script completes in an interactive zsh: the path is quoted, and a directory gets no space", { skip: !posix || !installed("zsh"), timeout: 60000 }, async (t) => {

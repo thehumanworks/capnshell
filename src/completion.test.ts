@@ -195,7 +195,9 @@ test("cns __complete quotes for the shell, takes the words as the shell gives th
   const { fake } = lookups(devices);
   assert.deepEqual(await printed(["bash", "cp", "studio:"], fake), ["studio:My\\ Docs/", "studio:it\\'s\\ \\$\\(id\\).txt"]);
   assert.deepEqual(await printed(["bash", "cp", "studio:My\\ D"], fake), ["studio:My\\ Docs/"]);
-  assert.deepEqual(await printed(["bash", "cp", "'studio:My D"], fake), ["studio:My\\ Docs/"]);
+  assert.deepEqual(await printed(["bash", "cp", "studio:\"My D\""], fake), ["studio:My\\ Docs/"]);
+  // Inside a quote the word leaves open, bash would quote a candidate again: nothing is offered.
+  for (const word of ["'studio:My D", "\"studio:My D", "studio:'it", "studio:My\\ D\""]) assert.deepEqual(await printed(["bash", "cp", word], fake), [], word);
   assert.deepEqual(await printed(["pwsh", "cp", "studio:"], fake), ["'studio:My Docs/'", "'studio:it''s $(id).txt'"]);
   assert.deepEqual(await printed(["pwsh", "cp", "'studio:My D'"], fake), ["'studio:My Docs/'"]);
   assert.deepEqual(await printed(["zsh", "cp", "studio:"], fake), ["studio:My Docs/", "studio:it's $(id).txt"]);

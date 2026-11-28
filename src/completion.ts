@@ -199,8 +199,11 @@ const SINGLE_QUOTES = "'‘’‚‛";
 const DOUBLE_QUOTES = "\"“”„";
 
 /** A word as bash or PowerShell hands it over, with its quotes and escapes removed; zsh and fish remove them themselves. */
-export function unquote(shell: Shell, word: string): string {
-  if (shell === "zsh" || shell === "fish") return word;
+export const unquote = (shell: Shell, word: string): string => unquoted(shell, word).text;
+
+/** The word without its quotes and escapes, and whether it leaves a quote open. */
+function unquoted(shell: Shell, word: string): { text: string; open: boolean } {
+  if (shell === "zsh" || shell === "fish") return { text: word, open: false };
   const escape = shell === "pwsh" ? "`" : "\\";
   let out = "";
   let quote: "'" | '"' | undefined;
@@ -223,7 +226,7 @@ export function unquote(shell: Shell, word: string): string {
     else if (shell === "pwsh" ? DOUBLE_QUOTES.includes(char) : char === '"') quote = '"';
     else out += char;
   }
-  return out;
+  return { text: out, open: quote !== undefined };
 }
 
 /** A candidate as the shell inserts it: bash and PowerShell insert it as it is, so it is quoted here; zsh and fish quote it themselves. */
@@ -241,7 +244,7 @@ export function quote(shell: Shell, candidate: string): string {
 const SCRIPTS: Record<Shell, string> = {
   bash: `# cns tab completion for bash 3.2 and later. In ~/.bashrc: eval "$(cns completion bash)"
 _cns() {
-  local line=\${COMP_LINE:0:COMP_POINT} words=() word rest i n=0 cur pre= c
+  local line=\${COMP_LINE:0:COMP_POINT} words=() word rest i n=0 cur pre c q= at=0 open
   # Bash splits a word at COMP_WORDBREAKS, such as the colon in DEVICE:PATH: join the parts no space separates.
   for ((i = 0; i <= COMP_CWORD; i++)); do
     word=\${COMP_WORDS[i]}
@@ -250,15 +253,27 @@ _cns() {
     line=\${rest#"$word"}
   done
   cur=\${words[n-1]}
-  # Bash replaces only what follows the last colon.
-  [[ $COMP_WORDBREAKS == *:* && $cur == *:* ]] && pre=\${cur%"\${cur##*:}"}
+  # Bash replaces the word from after its last unquoted COMP_WORDBREAKS character (from the character, for @),
+  # or from after a quote it leaves open: what comes before stays, and is taken off each candidate.
+  for ((i = 0; i < \${#cur}; i++)); do
+    c=\${cur:i:1}
+    if [[ $c == "$q" ]]; then q=
+    elif [[ $c == \\\\ && $q != "'" ]]; then ((i++))
+    elif [[ -n $q ]]; then :
+    elif [[ $c == [\\"\\'] ]]; then q=$c open=$((i + 1))
+    elif [[ $COMP_WORDBREAKS == *"$c"* ]]; then at=$((i + 1)); [[ $c == @ ]] && at=$i
+    fi
+  done
+  [[ -n $q ]] && at=$open
+  pre=\${cur:0:at}
   COMPREPLY=()
   while IFS= read -r c; do
+    [[ $c == "$pre"* ]] || continue
     case $c in *[/:\\\\]) [[ -n $_cns_space ]] || compopt -o nospace ;; *) c+=$_cns_space ;; esac
     COMPREPLY+=("\${c#"$pre"}")
   done < <(cns __complete bash "\${words[@]:1}" 2>/dev/null)
-  # Nothing for DEVICE:PATH: keep what is typed, rather than let bash put a local file there.
-  if [[ -n $pre && \${#COMPREPLY[@]} == 0 ]]; then COMPREPLY=("\${cur#"$pre"}"); [[ -n $_cns_space ]] || compopt -o nospace; fi
+  # Nothing for what follows the colon of DEVICE:PATH, or another break: keep it as typed, rather than let bash put a local file there.
+  if ((at)) && [[ \${#COMPREPLY[@]} == 0 ]]; then COMPREPLY=("\${cur:at}"); [[ -n $_cns_space ]] || compopt -o nospace; fi
 }
 # Bash 3.2 has no compopt: there, a space is added to each candidate that takes one.
 if type compopt >/dev/null 2>&1; then _cns_space=; complete -o default -F _cns cns
@@ -308,6 +323,8 @@ export const completionScript = (shell: Shell): string => SCRIPTS[shell];
 export async function completeCommand(program: Command, [shell, ...words]: readonly string[], lookups: Lookups = localLookups()): Promise<number> {
   try {
     if (!(SHELLS as readonly string[]).includes(shell ?? "")) return 0;
+    // Inside a quote the word leaves open, bash quotes a candidate again: such a word stays as typed.
+    if (shell === "bash" && unquoted(shell, words.at(-1) ?? "").open) return 0;
     const given = words.map((word) => unquote(shell as Shell, word));
     const found = (await complete(program, given.length ? given : [""], lookups)).filter(safe).slice(0, MAX_CANDIDATES);
     if (found.length) process.stdout.write(found.map((candidate) => quote(shell as Shell, candidate)).join("\n") + "\n");
