@@ -43,7 +43,7 @@ type Device = { name: string; publicKey: string; addresses: readonly string[] };
 export async function openDeviceLink(device: Device, identity: Identity, signal: AbortSignal): Promise<DeviceLink> {
   // Before the daemon is asked too: one from an older cns may still have a link to it.
   refuseRemoved(device);
-  const lent = await borrow(device, identity, signal);
+  const lent = await borrowDeviceLink(device, identity, signal);
   if (lent) return lent;
   signal.throwIfAborted();
   const { channel, url } = await connectFirst(dialAddresses(device, builtInRelay()), identity, { expect: device.publicKey, signal });
@@ -63,14 +63,16 @@ export async function openDeviceLink(device: Device, identity: Identity, signal:
 /**
  * Borrow the local daemon's standing link to `device`, or undefined when there is no daemon
  * at the default state path, it runs as another identity, it has no link to the device, it
- * is too old to lend one, or it does not answer within LEND_MS. The local control connection
- * stays open for the command: closing it is what ends the command's work on the device.
+ * is too old to lend one, or it does not answer within `waitMs`. Nothing is dialed. The local
+ * control connection stays open for the command: closing it is what ends the command's work
+ * on the device.
  */
-async function borrow(device: Device, identity: Identity, signal: AbortSignal): Promise<DeviceLink | undefined> {
+export async function borrowDeviceLink(device: Device, identity: Identity, signal: AbortSignal, waitMs = LEND_MS): Promise<DeviceLink | undefined> {
   signal.throwIfAborted();
   let connection: ControlConnection;
-  try { connection = await connectControl(undefined, LEND_MS); }
+  try { connection = await connectControl(undefined, waitMs); }
   catch { return undefined; }
+  if (signal.aborted) { connection.close(); signal.throwIfAborted(); }
   let closed = false;
   let broken = false;
   // Registered first, so a daemon that hangs up at once is still noticed.
@@ -81,7 +83,7 @@ async function borrow(device: Device, identity: Identity, signal: AbortSignal): 
     });
   });
   let answer: Awaited<ReturnType<ControlConnection["remote"]["lend"]>>;
-  const timer = setTimeout(() => connection.close(), LEND_MS);
+  const timer = setTimeout(() => connection.close(), waitMs);
   const cancel = () => connection.close();
   signal.addEventListener("abort", cancel, { once: true });
   try { answer = await connection.remote.lend(device.publicKey); }

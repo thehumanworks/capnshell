@@ -1,4 +1,4 @@
-import { Command, Option } from "commander";
+import { Argument, Command, Option } from "commander";
 import { addDaemonCommand, addMcpCommand, addPeerCommands, deviceAndRest, deviceOption, oneDevice } from "./options.js";
 import { CNS_VERSION } from "./version.js";
 
@@ -26,6 +26,8 @@ export function createCli(): Command {
     .showHelpAfterError()
     // A mesh bot token makes this machine the bot it names before any command runs (mesh-token.ts).
     .hook("preAction", async (_root, command) => {
+      // Tab completion only reads what is here.
+      if (command.name() === "__complete") return;
       const file: string | undefined = command.optsWithGlobals().tokenFile;
       const token = process.env.CNS_TOKEN;
       if (file === undefined && token === undefined) return;
@@ -568,6 +570,31 @@ export function createCli(): Command {
       await attachDaemon(options.state);
     });
   stopCommand(program.command("stop").description(`Stop the local daemon and its peer connections${keeps} (also cns daemon stop)`));
+  program.command("completion")
+    .description("Print the script that tab-completes cns commands, options, paired devices, named sessions and DEVICE:PATH in a shell")
+    .addArgument(new Argument("<shell>", "bash, zsh, fish or pwsh").choices(["bash", "zsh", "fish", "pwsh"]))
+    .addHelpText("after", [
+      "",
+      "Load it in each shell once:",
+      "  bash  in ~/.bashrc (~/.bash_profile on macOS):  eval \"$(cns completion bash)\"",
+      "  zsh   in ~/.zshrc, after compinit:              source <(cns completion zsh)",
+      "  fish  cns completion fish > ~/.config/fish/completions/cns.fish",
+      "  pwsh  in $PROFILE:                              cns completion pwsh | Out-String | Invoke-Expression",
+      "Tab then completes commands and options, paired devices, a device's named sessions, and the",
+      "remote path of cns cp DEVICE:PATH, one directory at a time. Sessions and paths come through the",
+      "local daemon's link to the device (cns up), with the sessions or files grant the device gives",
+      "this one. A device that does not answer within 300 ms offers nothing; nothing else is dialed.",
+    ].join("\n"))
+    .action(async (shell: "bash" | "zsh" | "fish" | "pwsh") => {
+      const { completionScript } = await import("./completion.js");
+      process.stdout.write(completionScript(shell));
+    });
+  // What the scripts run on each Tab: the shell, then the words after cns, the last one being typed.
+  program.command("__complete", { hidden: true }).argument("[words...]").helpOption(false).allowUnknownOption().passThroughOptions()
+    .action(async (words: string[]) => {
+      const { completeCommand } = await import("./completion.js");
+      process.exitCode = await completeCommand(program, words);
+    });
   return program;
 }
 
