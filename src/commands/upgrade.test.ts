@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { mkdtemp, realpath, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
-import { commandLine, fleet, installPath, reachDevice, reportLine, shellWord, statusFacts, upgradeDevice, upgradeExitCode, type Device, type Outcome, type Reach } from "./upgrade.js";
+import { generateIdentity } from "../identity.js";
+import { savePairedPeer } from "../peers.js";
+import { CNS_VERSION } from "../version.js";
+import { commandLine, fleet, installPath, reachDevice, reportLine, shellWord, statusFacts, upgrade, upgradeDevice, upgradeExitCode, type Device, type Outcome, type Reach } from "./upgrade.js";
 
 test("how cns came to a device is told by its daemon's executable", () => {
   assert.equal(installPath("/home/a/.local/share/mise/installs/github-thehumanworks-capnshell/2.7.0/cns"), "mise");
@@ -175,7 +181,7 @@ test("a daemon with named sessions, or too old to say, is left alone unless --en
 test("the cns mise gives must be the release, or nothing restarts", async () => {
   const other = device({ answers: { "2.9.0/cns' status --json": { code: 0, stdout: JSON.stringify({ version: "2.8.9", daemon: { sessions: [] }, service: null }) } } });
   const outcome = await upgradeDevice("studio", "2.9.0", other.reach, quick);
-  assert.equal(reportLine(outcome), `studio: needs a manual step: the cns mise gave for 2.9.0, ${other.fresh}, is cns 2.8.9. There, run mise use -g github:thehumanworks/capnshell@2.9.0, then restart its daemon on it (cns status there says how).`);
+  assert.equal(reportLine(outcome), `studio: needs a manual step: the cns mise gave for 2.9.0, ${other.fresh}, is cns 2.8.9. There, mise ls github:thehumanworks/capnshell lists what mise has; run mise install --force github:thehumanworks/capnshell@2.9.0, then restart its daemon on it (cns status there says how).`);
   assert.equal(outcome.result, "failed");
   assert.equal(other.state.pid, 100);
 });
@@ -192,6 +198,36 @@ test("--all leaves out the cns gateway, with a line for it, and names the mesh e
   assert.deepEqual(named, ["nas (from mesh home)", "studio"]);
   assert.deepEqual(skipped.map(reportLine), ["gw: not upgraded here: it is the cns gateway, a Worker to deploy again after upgrading cns (gateway/README.md)"]);
   assert.equal(upgradeExitCode(skipped), 0);
+});
+
+test("cns upgrade --all reaches the saved devices but never the cns gateway", async (t) => {
+  const dir = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-upgrade-fleet-")));
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.json({ tag_name: `v${CNS_VERSION}` }) });
+  const saved = { CNS_CONFIG_DIR: process.env.CNS_CONFIG_DIR, CNS_RELEASES: process.env.CNS_RELEASES, exitCode: process.exitCode };
+  t.after(async () => {
+    for (const name of ["CNS_CONFIG_DIR", "CNS_RELEASES"] as const) { if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name]; }
+    process.exitCode = saved.exitCode;
+    server.stop(true);
+    await rm(dir, { recursive: true, force: true });
+  });
+  process.env.CNS_CONFIG_DIR = dir;
+  process.env.CNS_RELEASES = `http://127.0.0.1:${server.port}/latest`;
+  const record = (more: { mesh?: string; gateway?: true } = {}) => ({ publicKey: generateIdentity().publicKey, addresses: ["ws://127.0.0.1:9"], pairedAt: new Date().toISOString(), grants: { incoming: [], outgoing: ["shell" as const] }, ...more });
+  savePairedPeer("gw", record({ mesh: "home", gateway: true }));
+  savePairedPeer("nas", record({ mesh: "home" }));
+  savePairedPeer("studio", record());
+  const printed: string[] = [];
+  t.mock.method(console, "log", (line: string) => printed.push(line));
+  t.mock.method(console, "error", (line: string) => printed.push(line));
+  const reached: string[] = [];
+  await upgrade(undefined, { all: true }, async (name) => { reached.push(name); throw new Error(`Cannot connect to ${name}.`); });
+  assert.deepEqual(reached.sort(), ["nas", "studio"]);
+  assert.deepEqual(printed.slice(0, 2), [
+    "gw: not upgraded here: it is the cns gateway, a Worker to deploy again after upgrading cns (gateway/README.md)",
+    `Upgrading nas (from mesh home), studio to cns ${CNS_VERSION}, the latest release.`,
+  ]);
+  assert.deepEqual(printed.slice(2).sort(), ["nas: unreachable (Cannot connect to nas). Later, run cns upgrade nas", "studio: unreachable (Cannot connect to studio). Later, run cns upgrade studio"]);
+  assert.equal(process.exitCode, 1);
 });
 
 test("a device that does not answer a step is given up on soon after the step's limit", async () => {

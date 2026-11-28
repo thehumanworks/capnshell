@@ -19,6 +19,12 @@ permissions:
 jobs:
   launchd:
     if: github.event_name == 'workflow_dispatch' || github.event.action == 'opened' || github.event.label.name == 'macos'
+    # One run per pull request: one opened with the label on it is opened and labeled at once.
+    # On the job, not the workflow, so that adding another label, whose run skips this job,
+    # does not cancel a run in progress.
+    concurrency:
+      group: macos-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
     runs-on: macos-latest
     timeout-minutes: 15
     env:

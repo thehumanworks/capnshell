@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -12,14 +13,21 @@ import { CNS_VERSION } from "./version.js";
 /** One word for the paired device's shell. */
 const sh = (word: string) => `'${word.replaceAll("'", `'\\''`)}'`;
 
-// Loads a real launchd agent for this account, in place of any cns agent there, and removes it after: macos.yml sets CNS_TEST_LAUNCHD.
+// Loads a real launchd agent for this account and removes it after: macos.yml sets CNS_TEST_LAUNCHD.
+// An account that has a cns agent already, as a developer's Mac may, is skipped, so its agent is never touched.
 test("on macOS, a restart through the daemon kickstarts its launchd agent, and cns up --install from a cns at another path loads the agent's new file", { skip: process.platform !== "darwin" || !process.env.CNS_TEST_LAUNCHD, timeout: 240000 }, async (t) => {
+  const plist = servicePath("launchd");
+  if (existsSync(plist)) {
+    const why = `this account has a cns launchd agent at ${plist}, which this test would boot out and remove. It runs only where none is installed, as on the runner macos.yml uses.`;
+    console.error(`Skipped: ${why}`);
+    t.skip(why);
+    return;
+  }
   const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "cns-launchd-")));
   // Offline: the agent's daemon registers at no relay.
   const env = { CNS_CONFIG_DIR: root, CNS_RELAY: "off" };
   const state = path.join(root, "daemon.json");
   const job = `gui/${process.getuid!()}/${SERVICE_LABEL}`;
-  const plist = servicePath("launchd");
   const cli = async (args: string[]) => {
     const child = launchCli(t, args, { env });
     child.child.stdin.end();

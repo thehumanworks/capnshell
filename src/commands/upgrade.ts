@@ -208,7 +208,9 @@ export async function upgradeDevice(name: string, target: string, reach: Reach, 
     const status = await run(word(path), ["status", "--json"]);
     const fresh = status.code === 0 ? statusFacts(status.stdout) : undefined;
     if (!fresh?.version) return fail(`the cns mise installed, ${printable(path)}, does not run (${why(status, path)})`);
-    if (fresh.version !== target) return fail(`the cns mise gave for ${target}, ${printable(path)}, is cns ${fresh.version}`);
+    if (fresh.version !== target) {
+      return { device: name, result: "failed", reason: `the cns mise gave for ${target}, ${printable(path)}, is cns ${fresh.version}`, next: `There, mise ls ${MISE_TOOL} lists what mise has; run mise install --force ${tool}, ${RESTART_THERE}.` };
+    }
     // Sessions started while mise worked: a daemon from 2.9.0 on names them again now.
     const current = fresh.daemon?.sessions?.map(printable);
     if (!options.endSessions && current?.length) return sessionsLeft(name, current, from);
@@ -299,7 +301,7 @@ export function fleet(peers: readonly Pick<PeerEntry, "name" | "mesh" | "gateway
 }
 
 /** `cns upgrade DEVICE` or `cns upgrade --all`: upgrade cns there to the latest release, and say what became of each device. */
-export async function upgrade(name: string | undefined, options: { all?: boolean; dryRun?: boolean; endSessions?: boolean }): Promise<void> {
+export async function upgrade(name: string | undefined, options: { all?: boolean; dryRun?: boolean; endSessions?: boolean }, reach: Reach = reachDevice): Promise<void> {
   if ((name === undefined) === !options.all) throw new Error("Name one paired device, or --all for every one: cns upgrade DEVICE, or cns upgrade --all.");
   const peers = name === undefined ? listPeers() : [resolvePeer(name)];
   if (!peers.length) { console.error("No paired devices. Run cns pair to pair with another device."); return; }
@@ -312,7 +314,7 @@ export async function upgrade(name: string | undefined, options: { all?: boolean
   catch (error) { throw new Error(`Cannot learn the latest cns release (${errorMessage(error)}). Try again once this device reaches GitHub.`, { cause: error }); }
   console.error(`${options.dryRun ? "Checking" : "Upgrading"} ${named.join(", ")} ${options.dryRun ? "against" : "to"} cns ${target}, the latest release.`);
   const outcomes = await Promise.all(devices.map(async (device) => {
-    const outcome = await upgradeDevice(device, target, reachDevice, { dryRun: options.dryRun, endSessions: options.endSessions });
+    const outcome = await upgradeDevice(device, target, reach, { dryRun: options.dryRun, endSessions: options.endSessions });
     // As soon as it is known: a device that is slow to answer holds up only its own line.
     console.log(reportLine(outcome));
     return outcome;
