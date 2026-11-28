@@ -171,6 +171,9 @@ test("cns up --install runs the daemon from the unit; cns up starts it again aft
   assert.match(unit, /"daemon" "--service" "--state"/);
   assert.ok(unit.includes(`"--bind" "127.0.0.1" "--port" "${port}"`));
   assert.ok(installedService(state, home, env));
+  // cns up --install tells the restart worker the file is new, which launchd needs to load it again; cns daemon restart does not.
+  const worker = async () => /^Restarting the daemon \(pid \d+\)(.*)\.$/m.exec(await readFile(path.join(home, ".cns", "restart.log"), "utf8"))?.[1];
+  assert.equal(await worker(), " from its service's new file");
 
   // cns stop ends the daemon; cns up then starts it through the service, not as a detached process.
   assert.equal((await cli(["stop", "--state", state])).code, 0);
@@ -187,6 +190,7 @@ test("cns up --install runs the daemon from the unit; cns up starts it again aft
   assert.match(restarted.stdout, /^Restarted as \S+ \(cns [\d.]+, pid \d+, a systemd user service\)/);
   assert.notEqual(/pid (\d+)/.exec(restarted.stdout)![1], /pid (\d+)/.exec(again.stdout)![1]);
   assert.equal(await restarts(), restartsBefore + 1);
+  assert.equal(await worker(), "");
 
   const removed = await cli(["up", "--uninstall", "--state", state]);
   assert.equal(removed.code, 0, removed.stderr);
@@ -235,7 +239,13 @@ test("cns up --install refuses, writing nothing, while a service it did not inst
   await fakeSystemctl(bin);
   const env = { HOME: root, CNS_CONFIG_DIR: path.join(root, ".cns"), XDG_CONFIG_HOME: path.join(root, ".config"), PATH: `${bin}:${process.env.PATH}` };
   const state = path.join(root, ".cns", "daemon.json");
-  t.after(() => rm(root, { recursive: true, force: true }));
+  // Had it not refused, the restart would have started a daemon of its own.
+  t.after(async () => {
+    const stop = launchCli(t, ["stop", "--state", state], { env });
+    stop.child.stdin.end();
+    await stop.exited;
+    await rm(root, { recursive: true, force: true });
+  });
   // As the NixOS module runs it: a system service, with no user unit.
   const daemon = launchCli(t, ["daemon", "--service", "--state", state, "--bind", "127.0.0.1", "--port", await unusedPort("127.0.0.1")], { env });
   await daemon.waitFor("listening at");

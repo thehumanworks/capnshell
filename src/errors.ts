@@ -17,9 +17,9 @@ function parseIssues(message: string): { path?: PropertyKey[]; message: string }
   return undefined;
 }
 
-/** Text from another machine, made safe to print or log: no terminal control sequences, and no invisible format characters (\p{Cf}), such as bidi overrides. */
+/** Text from another machine, made safe to print or log: no terminal control sequences. */
 export function printable(text: string): string {
-  return String(text).replace(/[\u0000-\u001f\u007f-\u009f\p{Cf}]/gu, "?");
+  return String(text).replace(/[\u0000-\u001f\u007f-\u009f]/g, "?");
 }
 
 /**

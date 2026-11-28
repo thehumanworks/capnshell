@@ -5,7 +5,8 @@ import { errorMessage, printable } from "./errors.js";
 
 /**
  * The latest cns release: what GitHub names it, and what this device last learned of it, which
- * cns peers trusts for a day. Kept out of version.ts, which the gateway Worker bundles.
+ * cns peers trusts for a day. Kept out of version.ts, which the gateway Worker bundles, so that
+ * the Worker carries neither this fetch nor a cache in a home folder it does not have.
  */
 
 const LATEST_RELEASE = "https://api.github.com/repos/thehumanworks/capnshell/releases/latest";
@@ -43,27 +44,39 @@ export async function latestRelease(timeoutMs = 10_000): Promise<string> {
   } finally { remember(version); }
 }
 
-/** Keep what GitHub said, or that it did not answer, privately; a device that cannot write it asks again next time. */
+/** What this device last learned: the release, checked as GitHub's answer is, and when it asked. */
+function saved(): { version?: string; checkedAt: number } {
+  try {
+    const { version, checkedAt } = JSON.parse(readFileSync(cacheFile(), "utf8")) as { version?: unknown; checkedAt?: unknown };
+    const known = releaseVersion(version);
+    return { ...known ? { version: known } : {}, checkedAt: Number(checkedAt) };
+  } catch { return { checkedAt: Number.NaN }; }
+}
+
+/**
+ * Keep what GitHub said privately, or, when it did not answer, that it was asked, beside the last
+ * release it named. A device that cannot write it asks again next time.
+ */
 function remember(version: string | undefined): void {
   const file = cacheFile();
   const temporary = `${file}.${process.pid}.tmp`;
+  const known = version ?? saved().version;
   try {
-    writeFileSync(temporary, `${JSON.stringify({ ...version ? { version } : {}, checkedAt: Date.now() })}\n`, { mode: 0o600, flag: "wx" });
+    writeFileSync(temporary, `${JSON.stringify({ ...known ? { version: known } : {}, checkedAt: Date.now() })}\n`, { mode: 0o600, flag: "wx" });
     renameSync(temporary, file);
   } catch { /* The configuration directory is missing or read-only. */ }
 }
 
 /**
- * The latest release for cns peers: what this device learned within the last day, else what
- * GitHub says within `timeoutMs`. Undefined when that is not known, so cns peers never waits on
- * an unreachable GitHub more than once a day.
+ * The latest release for cns peers: what this device last learned, when it asked GitHub within
+ * the last day, else what GitHub says within `timeoutMs`, else the last release it named.
+ * Undefined when none is known, and cns peers never waits on an unreachable GitHub more than
+ * once a day.
  */
 export async function knownLatestRelease(timeoutMs = 2000): Promise<string | undefined> {
   if (process.env.CNS_RELEASES === "off") return undefined;
-  try {
-    const saved = JSON.parse(readFileSync(cacheFile(), "utf8")) as { version?: unknown; checkedAt?: unknown };
-    const age = Date.now() - Number(saved.checkedAt);
-    if (age >= 0 && age < KEEP_MS) return releaseVersion(saved.version);
-  } catch { /* Never asked, or not readable: ask now. */ }
-  try { return await latestRelease(timeoutMs); } catch { return undefined; }
+  const last = saved();
+  const age = Date.now() - last.checkedAt;
+  if (age >= 0 && age < KEEP_MS) return last.version;
+  try { return await latestRelease(timeoutMs); } catch { return saved().version; }
 }

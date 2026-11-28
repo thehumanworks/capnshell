@@ -1,12 +1,12 @@
 import { z } from "zod";
 import { AuthError } from "../auth.js";
 import { errorMessage, printable } from "../errors.js";
-import { explainDenial, listPeers, resolvePeer } from "../peers.js";
+import { explainDenial, listPeers, resolvePeer, type PeerEntry } from "../peers.js";
 import { latestRelease } from "../releases.js";
 import type { RunResult } from "../shell.js";
 import { plain } from "../terminal.js";
 import { CNS_VERSION, compareVersions, describeVersion, reportedVersion } from "../version.js";
-import { connectDevice } from "./connect-device.js";
+import { connectDevice, type DeviceConnection } from "./connect-device.js";
 
 /**
  * `cns upgrade`: upgrade cns on paired devices from here, each through the shell grant it gives
@@ -73,9 +73,8 @@ function executablePath(text: string): string | undefined {
 export interface Device {
   platform: NodeJS.Platform;
   shell: Shell;
-  /** Its daemon's version and process, as the link's handshake reports them. */
+  /** Its daemon's version, as the link's handshake reports it. */
   version?: string;
-  pid: number;
   run(command: string, timeoutMs: number): Promise<{ code: number | null; stdout: string; stderr: string }>;
   close(): void;
 }
@@ -91,18 +90,31 @@ export type Outcome =
   /** A step failed there. */
   | { device: string; result: "failed"; reason: string; next: string }
   | { device: string; result: "unreachable"; reason: string; later: string }
-  | { device: string; result: "planned"; from?: string; to: string; steps: string[] };
+  | { device: string; result: "planned"; from?: string; to: string; steps: string[] }
+  /** Not a device cns upgrades, such as the cns gateway. */
+  | { device: string; result: "skipped"; reason: string };
+
+/**
+ * A line safe to print: devices chose much of it, so no control, format or separator characters
+ * (such as bidi overrides) that would make it read as something else. As audit-cli's tableSafe;
+ * the shared printable() keeps format characters for right-to-left text elsewhere.
+ */
+const lineSafe = (text: string) => text.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, "?");
 
 /** The report's line for one device. */
 export function reportLine(outcome: Outcome): string {
   const { device } = outcome;
-  switch (outcome.result) {
-    case "upgraded": return `${device}: upgraded from ${outcome.from ?? describeVersion(undefined)} to ${outcome.to}`;
-    case "current": return `${device}: already current (${outcome.version})`;
-    case "manual": case "failed": return `${device}: needs a manual step: ${outcome.reason}. ${outcome.next}`;
-    case "unreachable": return `${device}: unreachable (${outcome.reason}). Later, run ${outcome.later}`;
-    case "planned": return `${device}: would upgrade from ${outcome.from ?? describeVersion(undefined)} to ${outcome.to}: ${outcome.steps.join(", then ")}`;
-  }
+  const line = (() => {
+    switch (outcome.result) {
+      case "upgraded": return `${device}: upgraded from ${outcome.from ?? describeVersion(undefined)} to ${outcome.to}`;
+      case "current": return `${device}: already current (${outcome.version})`;
+      case "manual": case "failed": return `${device}: needs a manual step: ${outcome.reason}. ${outcome.next}`;
+      case "unreachable": return `${device}: unreachable (${outcome.reason}). Later, run ${outcome.later}`;
+      case "planned": return `${device}: would upgrade from ${outcome.from ?? describeVersion(undefined)} to ${outcome.to}: ${outcome.steps.join(", then ")}`;
+      case "skipped": return `${device}: not upgraded here: ${outcome.reason}`;
+    }
+  })();
+  return lineSafe(line);
 }
 
 /** As for cns peer remove --everywhere: 1 when a device did not answer or a step failed, else 4 when one is left for a person, else 0. */
@@ -176,24 +188,17 @@ export async function upgradeDevice(name: string, target: string, reach: Reach, 
     }
     // Restarting the daemon ends its named sessions, where an agent may be at work.
     const sessions = facts?.daemon?.sessions?.map(printable);
-    if (!options.endSessions && sessions?.length !== 0) {
-      return {
-        device: name, result: "manual",
-        reason: sessions ? `restarting its daemon would end its named sessions ${sessions.join(", ")}` : `its daemon, ${describeVersion(from)}, cannot say whether it holds named sessions, which restarting it would end`,
-        next: `To end ${sessions ? "them" : "any"} and upgrade, run cns upgrade ${name} --end-sessions.`,
-      };
-    }
-    const ends = !sessions ? ", which ends any named sessions it holds" : sessions.length ? `, which ends its named sessions ${sessions.join(", ")}` : "";
+    if (!options.endSessions && sessions?.length !== 0) return sessionsLeft(name, sessions, from);
+    const ends = `, which ends ${!sessions ? "any named sessions it holds and " : sessions.length ? `its named sessions ${sessions.join(", ")} and ` : ""}any open shells`;
     const tool = `${MISE_TOOL}@${target}`;
     const fail = (reason: string): Outcome => ({ device: name, result: "failed", reason, next: `There, run mise use -g ${tool}, ${RESTART_THERE}.` });
     if (options.dryRun) {
       const mise = await run("mise", ["--version"]);
       if (mise.code !== 0) return { device: name, result: "failed", reason: `mise --version failed (${why(mise, "mise")})`, next: `There, install cns ${target}, ${RESTART_THERE}.` };
-      const service = facts?.service;
-      const restart = service === undefined ? "cns up --install from the new cns if a service runs the old one, else cns daemon restart"
-        : service && !service.managedByNix ? "cns up --install from the new cns, which moves its service onto it and restarts the daemon"
-        : "cns daemon restart from the new cns";
-      return { device: name, result: "planned", from, to: target, steps: [`mise use -g ${tool}, which pins that version in mise's global config there`, `${restart}${ends}`] };
+      return {
+        device: name, result: "planned", from, to: target,
+        steps: [`mise use -g ${tool}, which pins that version in mise's global config there`, `cns up --install from the new cns if a service runs the old one, else cns daemon restart${ends}`],
+      };
     }
     const installed = await run("mise", ["use", "-g", word(tool)], MISE_MS);
     if (installed.code !== 0) return fail(`mise use -g ${tool} failed (${why(installed, "mise")})`);
@@ -203,49 +208,74 @@ export async function upgradeDevice(name: string, target: string, reach: Reach, 
     const status = await run(word(path), ["status", "--json"]);
     const fresh = status.code === 0 ? statusFacts(status.stdout) : undefined;
     if (!fresh?.version) return fail(`the cns mise installed, ${printable(path)}, does not run (${why(status, path)})`);
+    if (fresh.version !== target) return fail(`the cns mise gave for ${target}, ${printable(path)}, is cns ${fresh.version}`);
+    // Sessions started while mise worked: a daemon from 2.9.0 on names them again now.
+    const current = fresh.daemon?.sessions?.map(printable);
+    if (!options.endSessions && current?.length) return sessionsLeft(name, current, from);
     // A service keeps the cns it names, so only cns up --install, from the new cns, moves it onto that one.
     const restart = fresh.service && !fresh.service.managedByNix && !fresh.service.runsThis ? ["up", "--install"] : ["daemon", "restart"];
     let ran: Awaited<ReturnType<Device["run"]>> | undefined;
     // Both hand the restart to a process of their own, which outlives this command and the daemon.
     try { ran = await run(word(path), restart); } catch { /* The link may drop as the daemon restarts; what answers next tells. */ }
     if (ran && ran.code !== 0) return fail(`cns ${restart.join(" ")} failed (${why(ran, path)})`);
-    return settled(name, from, device.pid, { path, version: fresh.version }, reach, options);
+    return settled(name, from, { path, version: fresh.version }, reach, options);
   } catch (error) { return fault(name, error); }
   finally { device.close(); }
 }
 
-/** Once the restart is under way: wait for another daemon to answer with the new cns. */
-async function settled(name: string, from: string | undefined, pid: number, restarted: { path: string; version: string }, reach: Reach, options: UpgradeOptions): Promise<Outcome> {
+/** A device left alone because restarting its daemon would end named sessions, or might. */
+function sessionsLeft(name: string, sessions: string[] | null | undefined, from: string | undefined): Outcome {
+  if (sessions) {
+    return { device: name, result: "manual", reason: `restarting its daemon would end its named sessions ${sessions.join(", ")}`, next: `To end them and upgrade, run cns upgrade ${name} --end-sessions.` };
+  }
+  return {
+    device: name, result: "manual",
+    reason: `its daemon, ${describeVersion(from)}, cannot say whether it holds named sessions, which restarting it would end`,
+    next: `To end any and upgrade, run cns upgrade ${name} --end-sessions. Once is enough: a daemon from cns 2.9.0 on names its sessions.`,
+  };
+}
+
+/** Once the restart is under way: wait for a daemon to answer with the new cns. */
+async function settled(name: string, from: string | undefined, restarted: { path: string; version: string }, reach: Reach, options: UpgradeOptions): Promise<Outcome> {
   const { backMs = BACK_MS, sleep = wait } = options;
   const deadline = Date.now() + backMs;
-  let seen: { pid: number; version?: string } | undefined;
+  let seen: { version?: string } | undefined;
   let reason = "";
   for (;;) {
     await sleep(1000);
     try {
       const device = await reach(name);
       device.close();
-      if (device.pid !== pid && device.version === restarted.version) return { device: name, result: "upgraded", from, to: restarted.version };
-      seen = { pid: device.pid, version: device.version };
+      if (device.version === restarted.version) return { device: name, result: "upgraded", from, to: restarted.version };
+      seen = { version: device.version };
     } catch (error) { reason = printable(errorMessage(error)).replace(/\.$/, ""); }
     if (Date.now() >= deadline) break;
   }
   const since = `${Math.round(backMs / 1000)} seconds`;
   if (!seen) return { device: name, result: "unreachable", reason: `its daemon has not answered in the ${since} since it restarted${reason ? `: ${reason}` : ""}`, later: `cns up on ${name}, whose ~/.cns/restart.log says what happened` };
-  const daemon = seen.pid === pid ? `its daemon did not restart in ${since}` : `its daemon came back with ${describeVersion(seen.version)}`;
-  return { device: name, result: "failed", reason: `mise installed cns ${restarted.version} (${printable(restarted.path)}), but ${daemon}`, next: `There, run ${printable(restarted.path)} status, which says how to restart the daemon on it.` };
+  return {
+    device: name, result: "failed",
+    reason: `mise installed cns ${restarted.version} (${printable(restarted.path)}), but its daemon still runs ${describeVersion(seen.version)} ${since} later`,
+    next: `There, run ${printable(restarted.path)} status, which says how to restart the daemon on it.`,
+  };
 }
 
 /** Reach a paired device as cns run does: through the local daemon's link to it, else by dialing it. */
-async function reachDevice(name: string): Promise<Device> {
-  const connection = await connectDevice(resolvePeer(name), AbortSignal.timeout(20_000));
+type Connection = Pick<DeviceConnection, "remote" | "info" | "close">;
+const dial = (name: string): Promise<Connection> => connectDevice(resolvePeer(name), AbortSignal.timeout(20_000));
+
+/**
+ * Reach a paired device over `connect`. The device ends each command at its limit; one that has
+ * not answered `graceMs` later is given up on, so that it holds up nothing for longer.
+ */
+export async function reachDevice(name: string, connect: (name: string) => Promise<Connection> = dial, graceMs = 5000): Promise<Device> {
+  const connection = await connect(name);
   const { info } = connection;
   return {
-    platform: info.platform, shell: info.shell, pid: info.pid, ...info.version ? { version: info.version } : {},
+    platform: info.platform, shell: info.shell, ...info.version ? { version: info.version } : {},
     async run(command, timeoutMs) {
-      // The device ends the command after timeoutMs; one that does not answer soon after is given up on.
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const late = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`no answer within ${timeoutMs / 1000 + 5} seconds`)), timeoutMs + 5000); });
+      const late = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`no answer within ${(timeoutMs + graceMs) / 1000} seconds`)), timeoutMs + graceMs); });
       try {
         const result = await Promise.race([plain(connection.remote.run(command, { timeoutMs }) as unknown as Promise<RunResult>), late]);
         return { code: result.exitCode, stdout: result.stdout, stderr: result.stderr };
@@ -255,15 +285,32 @@ async function reachDevice(name: string): Promise<Device> {
   };
 }
 
+/**
+ * The saved devices cns upgrade asks, each named with the mesh it came from, if one; and lines for
+ * the cns gateway, a Worker that is deployed again rather than upgraded and is never dialed.
+ */
+export function fleet(peers: readonly Pick<PeerEntry, "name" | "mesh" | "gateway">[]): { devices: string[]; named: string[]; skipped: Outcome[] } {
+  const devices = peers.filter((peer) => !peer.gateway);
+  return {
+    devices: devices.map((peer) => peer.name),
+    named: devices.map((peer) => peer.mesh ? `${peer.name} (from mesh ${peer.mesh})` : peer.name),
+    skipped: peers.flatMap((peer) => peer.gateway ? [{ device: peer.name, result: "skipped", reason: "it is the cns gateway, a Worker to deploy again after upgrading cns (gateway/README.md)" } as const] : []),
+  };
+}
+
 /** `cns upgrade DEVICE` or `cns upgrade --all`: upgrade cns there to the latest release, and say what became of each device. */
 export async function upgrade(name: string | undefined, options: { all?: boolean; dryRun?: boolean; endSessions?: boolean }): Promise<void> {
   if ((name === undefined) === !options.all) throw new Error("Name one paired device, or --all for every one: cns upgrade DEVICE, or cns upgrade --all.");
-  const devices = name === undefined ? listPeers().map((peer) => peer.name) : [resolvePeer(name).name];
-  if (!devices.length) { console.error("No paired devices. Run cns pair to pair with another device."); return; }
+  const peers = name === undefined ? listPeers() : [resolvePeer(name)];
+  if (!peers.length) { console.error("No paired devices. Run cns pair to pair with another device."); return; }
+  const { devices, named, skipped } = fleet(peers);
+  for (const outcome of skipped) console.log(reportLine(outcome));
+  if (!devices.length) return;
   let target: string;
+  // Always asked: what cns peers learned may be a day old.
   try { target = await latestRelease(); }
   catch (error) { throw new Error(`Cannot learn the latest cns release (${errorMessage(error)}). Try again once this device reaches GitHub.`, { cause: error }); }
-  console.error(`${options.dryRun ? "Checking" : "Upgrading"} ${devices.join(", ")} ${options.dryRun ? "against" : "to"} cns ${target}, the latest release.`);
+  console.error(`${options.dryRun ? "Checking" : "Upgrading"} ${named.join(", ")} ${options.dryRun ? "against" : "to"} cns ${target}, the latest release.`);
   const outcomes = await Promise.all(devices.map(async (device) => {
     const outcome = await upgradeDevice(device, target, reachDevice, { dryRun: options.dryRun, endSessions: options.endSessions });
     // As soon as it is known: a device that is slow to answer holds up only its own line.

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
-import { commandLine, installPath, reportLine, shellWord, statusFacts, upgradeDevice, upgradeExitCode, type Device, type Outcome, type Reach } from "./upgrade.js";
+import { commandLine, fleet, installPath, reachDevice, reportLine, shellWord, statusFacts, upgradeDevice, upgradeExitCode, type Device, type Outcome, type Reach } from "./upgrade.js";
 
 test("how cns came to a device is told by its daemon's executable", () => {
   assert.equal(installPath("/home/a/.local/share/mise/installs/github-thehumanworks-capnshell/2.7.0/cns"), "mise");
@@ -42,8 +42,6 @@ interface Simulated {
   platform: NodeJS.Platform;
   version: string;
   executable: string;
-  /** What the old cns's status --json says of the service: undefined for a cns too old to say. */
-  probeService: object | null;
   /** The daemon's named sessions; null for a daemon too old to say. */
   sessions: string[] | null;
   service: object | null;
@@ -67,7 +65,7 @@ function device(overrides: Partial<Simulated> = {}) {
   });
   const answer = (command: string): { code: number; stdout?: string; stderr?: string } => {
     for (const [prefix, result] of Object.entries(overrides.answers ?? {})) if (command.includes(prefix)) return result;
-    if (/^(& )?cns status --json/.test(command)) return status(state.version, overrides.probeService === undefined ? {} : { service: overrides.probeService });
+    if (/^(& )?cns status --json/.test(command)) return status(state.version);
     if (command.includes("mise --version")) return { code: 0, stdout: "2026.11.3 linux-x64 (2026-11-20)" };
     if (command.includes("mise use -g")) return { code: 0, stderr: "mise github:thehumanworks/capnshell@2.9.0 ✓ installed" };
     if (command.includes("mise which cns")) return { code: 0, stdout: `${fresh}\n` };
@@ -82,7 +80,7 @@ function device(overrides: Partial<Simulated> = {}) {
   const reach: Reach = async (name) => {
     if (!state.up) throw new Error(`Cannot connect to ${name}: connect ECONNREFUSED 192.168.1.9:47381.`);
     const reached: Device = {
-      platform: overrides.platform ?? (windows ? "win32" : "linux"), shell, pid: state.pid, version: state.version,
+      platform: overrides.platform ?? (windows ? "win32" : "linux"), shell, version: state.version,
       run: async (command) => { state.commands.push(command); const result = answer(command); return { stdout: "", stderr: "", ...result }; },
       close() {},
     };
@@ -140,16 +138,10 @@ test("--dry-run reads what each device runs and plans, changing nothing", async 
   const pins = "mise use -g github:thehumanworks/capnshell@2.9.0, which pins that version in mise's global config there";
   const studio = device();
   const plan = await upgradeDevice("studio", "2.9.0", studio.reach, { ...quick, dryRun: true });
-  assert.equal(reportLine(plan), `studio: would upgrade from 2.7.0 to 2.9.0: ${pins}, then cns up --install from the new cns if a service runs the old one, else cns daemon restart`);
+  assert.equal(reportLine(plan), `studio: would upgrade from 2.7.0 to 2.9.0: ${pins}, then cns up --install from the new cns if a service runs the old one, else cns daemon restart, which ends any open shells`);
   assert.deepEqual(studio.state.commands, ["cns status --json", "mise --version"]);
   assert.equal(studio.state.pid, 100);
   assert.equal(upgradeExitCode([plan]), 0);
-  // A cns that reports its service says which.
-  const service = device({ probeService: { kind: "launchd", path: "/p", managedByNix: false, runsThis: true } });
-  assert.equal(reportLine(await upgradeDevice("mac", "2.9.0", service.reach, { ...quick, dryRun: true })),
-    `mac: would upgrade from 2.7.0 to 2.9.0: ${pins}, then cns up --install from the new cns, which moves its service onto it and restarts the daemon`);
-  const none = device({ probeService: null });
-  assert.equal(reportLine(await upgradeDevice("pi", "2.9.0", none.reach, { ...quick, dryRun: true })), `pi: would upgrade from 2.7.0 to 2.9.0: ${pins}, then cns daemon restart from the new cns`);
   // Without mise there, the upgrade would fail: the plan says so.
   const noMise = device({ answers: { "mise --version": { code: 127, stderr: "bash: mise: command not found" } } });
   const failing = await upgradeDevice("box", "2.9.0", noMise.reach, { ...quick, dryRun: true });
@@ -164,13 +156,50 @@ test("a daemon with named sessions, or too old to say, is left alone unless --en
   assert.deepEqual(busy.state.commands, ["cns status --json"]);
   assert.equal(upgradeExitCode([left]), 4);
   assert.match(reportLine(await upgradeDevice("studio", "2.9.0", busy.reach, { ...quick, dryRun: true, endSessions: true })),
-    /, then cns up --install from the new cns if a service runs the old one, else cns daemon restart, which ends its named sessions build, shell-1$/);
+    /, then cns up --install from the new cns if a service runs the old one, else cns daemon restart, which ends its named sessions build, shell-1 and any open shells$/);
   assert.equal(reportLine(await upgradeDevice("studio", "2.9.0", busy.reach, { ...quick, endSessions: true })), "studio: upgraded from 2.7.0 to 2.9.0");
 
   const old = device({ sessions: null });
   assert.equal(reportLine(await upgradeDevice("pi", "2.9.0", old.reach, quick)),
-    "pi: needs a manual step: its daemon, cns 2.7.0, cannot say whether it holds named sessions, which restarting it would end. To end any and upgrade, run cns upgrade pi --end-sessions.");
-  assert.match(reportLine(await upgradeDevice("pi", "2.9.0", old.reach, { ...quick, dryRun: true, endSessions: true })), /, which ends any named sessions it holds$/);
+    "pi: needs a manual step: its daemon, cns 2.7.0, cannot say whether it holds named sessions, which restarting it would end. To end any and upgrade, run cns upgrade pi --end-sessions. Once is enough: a daemon from cns 2.9.0 on names its sessions.");
+  assert.match(reportLine(await upgradeDevice("pi", "2.9.0", old.reach, { ...quick, dryRun: true, endSessions: true })), /, which ends any named sessions it holds and any open shells$/);
+
+  // A session started while mise installed the release: the new cns sees it, and nothing restarts.
+  const late = device({ answers: { "2.9.0/cns' status --json": { code: 0, stdout: JSON.stringify({ version: "2.9.0", daemon: { version: "2.9.0-rc.1", sessions: ["agent"] }, service: null }) } }, version: "2.9.0-rc.1" });
+  const started = await upgradeDevice("studio", "2.9.0", late.reach, quick);
+  assert.equal(reportLine(started), "studio: needs a manual step: restarting its daemon would end its named sessions agent. To end them and upgrade, run cns upgrade studio --end-sessions.");
+  assert.equal(late.state.pid, 100, "not restarted");
+  assert.equal(late.state.commands.length, 4);
+});
+
+test("the cns mise gives must be the release, or nothing restarts", async () => {
+  const other = device({ answers: { "2.9.0/cns' status --json": { code: 0, stdout: JSON.stringify({ version: "2.8.9", daemon: { sessions: [] }, service: null }) } } });
+  const outcome = await upgradeDevice("studio", "2.9.0", other.reach, quick);
+  assert.equal(reportLine(outcome), `studio: needs a manual step: the cns mise gave for 2.9.0, ${other.fresh}, is cns 2.8.9. There, run mise use -g github:thehumanworks/capnshell@2.9.0, then restart its daemon on it (cns status there says how).`);
+  assert.equal(outcome.result, "failed");
+  assert.equal(other.state.pid, 100);
+});
+
+test("the report's lines carry no control, format or separator characters a device sent", async () => {
+  const sneaky = device({ executable: "/usr/local/bin/cns\u202e\u2028\u200b\u0007x" });
+  assert.equal(reportLine(await upgradeDevice("box", "2.9.0", sneaky.reach, quick)),
+    "box: needs a manual step: cns cannot tell how cns was installed there: its daemon runs /usr/local/bin/cns????x. There, install cns 2.9.0, then restart its daemon on it (cns status there says how).");
+});
+
+test("--all leaves out the cns gateway, with a line for it, and names the mesh each device came from", () => {
+  const { devices, named, skipped } = fleet([{ name: "gw", mesh: "home", gateway: true }, { name: "nas", mesh: "home" }, { name: "studio" }]);
+  assert.deepEqual(devices, ["nas", "studio"]);
+  assert.deepEqual(named, ["nas (from mesh home)", "studio"]);
+  assert.deepEqual(skipped.map(reportLine), ["gw: not upgraded here: it is the cns gateway, a Worker to deploy again after upgrading cns (gateway/README.md)"]);
+  assert.equal(upgradeExitCode(skipped), 0);
+});
+
+test("a device that does not answer a step is given up on soon after the step's limit", async () => {
+  const silent = { remote: { run: () => new Promise(() => {}) }, info: { platform: "linux", shell: "Bash", version: "2.7.0" }, close() {} };
+  const reached = await reachDevice("studio", async () => silent as never, 50);
+  const started = Date.now();
+  await assert.rejects(reached.run("cns status --json", 100), /^Error: no answer within 0\.15 seconds$/);
+  assert.ok(Date.now() - started < 2000);
 });
 
 test("a device already on the release, or newer, is left alone without running anything", async () => {
@@ -261,13 +290,13 @@ test("a device that refuses the shell, or does not answer, is reported with what
   assert.equal(upgradeExitCode(outcomes), 1);
 });
 
-test("after the restart the upgrade waits for a new daemon on the new cns, and says when none comes", async () => {
-  // The service brought the old cns back: a new daemon, the old version.
+test("after the restart the upgrade waits for a daemon on the new cns, and says when none comes", async () => {
+  // The service brought the old cns back, or the restart never happened: the old version answers.
   const stale = device();
   stale.state.restartsInto = "2.7.0";
   const back = await upgradeDevice("studio", "2.9.0", stale.reach, quick);
   assert.equal(reportLine(back),
-    `studio: needs a manual step: mise installed cns 2.9.0 (${stale.fresh}), but its daemon came back with cns 2.7.0. There, run ${stale.fresh} status, which says how to restart the daemon on it.`);
+    `studio: needs a manual step: mise installed cns 2.9.0 (${stale.fresh}), but its daemon still runs cns 2.7.0 0 seconds later. There, run ${stale.fresh} status, which says how to restart the daemon on it.`);
   assert.equal(upgradeExitCode([back]), 1);
   // No daemon answers since the restart.
   const gone = device();
@@ -276,9 +305,4 @@ test("after the restart the upgrade waits for a new daemon on the new cns, and s
     return await gone.reach(name);
   }, { backMs: 2000, sleep: () => new Promise((resolve) => setTimeout(resolve, 100)) });
   assert.equal(reportLine(lost), "studio: unreachable (its daemon has not answered in the 2 seconds since it restarted: Cannot connect to studio: connect ECONNREFUSED). Later, run cns up on studio, whose ~/.cns/restart.log says what happened");
-  // The old daemon goes on answering: the restart never happened.
-  const stuck = device();
-  stuck.state.restartsInto = stuck.state.version;
-  const still: Reach = async (name) => { const reached = await stuck.reach(name); return { ...reached, pid: 100 }; };
-  assert.match(reportLine(await upgradeDevice("studio", "2.9.0", still, quick)), /^studio: needs a manual step: mise installed cns 2\.9\.0 \(.*\), but its daemon did not restart in 0 seconds\./);
 });

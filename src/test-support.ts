@@ -1,6 +1,6 @@
 import { spawn, type SpawnOptionsWithoutStdio } from "node:child_process";
 import { EventEmitter, once } from "node:events";
-import { chmod, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -61,9 +61,22 @@ export function cliEnvironment(overrides: NodeJS.ProcessEnv = {}): NodeJS.Proces
   return { ...process.env, CNS_BIND: undefined, CNS_PORT: undefined, CNS_CWD: undefined, CNS_KEY: undefined, CNS_KITTY_KEYS: undefined, ...overrides };
 }
 
-/** Exercise actual CLI processes, keeping exact streams available for run assertions. */
-export function launchCli(t: TestContext, args: string[], options: SpawnOptionsWithoutStdio = {}) {
-  const invocation = cliInvocation(args);
+/**
+ * A copy of this cns's source that says it is `version` in its package.json, as an older or newer
+ * release would; returns the command that runs it, for launchCli.
+ */
+export async function cnsAs(root: string, version: string): Promise<string[]> {
+  const dir = path.join(root, `cns-${version}`);
+  await cp(path.join(PROJECT_ROOT, "src"), path.join(dir, "src"), { recursive: true });
+  const manifest = JSON.parse(await readFile(path.join(PROJECT_ROOT, "package.json"), "utf8"));
+  await writeFile(path.join(dir, "package.json"), JSON.stringify({ ...manifest, version }));
+  await symlink(path.join(PROJECT_ROOT, "node_modules"), path.join(dir, "node_modules"), "junction");
+  return [process.execPath, path.join(dir, "src", "cli.ts")];
+}
+
+/** Exercise actual CLI processes, keeping exact streams available for run assertions. `cns` runs another cns, as from cnsAs. */
+export function launchCli(t: TestContext, args: string[], options: SpawnOptionsWithoutStdio = {}, cns?: string[]) {
+  const invocation = cns ? { file: cns[0]!, args: [...cns.slice(1), ...args] } : cliInvocation(args);
   const child = spawn(invocation.file, invocation.args, {
     ...options, env: cliEnvironment(options.env), stdio: ["pipe", "pipe", "pipe"],
   });
@@ -142,8 +155,8 @@ export async function testDevices(t: TestContext, prefix = "cns-devices-") {
     }
     await rm(root, { recursive: true, force: true });
   });
-  const cli = async (device: TestDevice, args: string[], input = "") => {
-    const child = launchCli(t, args, { env: device.env });
+  const cli = async (device: TestDevice, args: string[], input = "", cns?: string[]) => {
+    const child = launchCli(t, args, { env: device.env }, cns);
     child.child.stdin.end(input);
     return { code: await child.exited, stdout: child.stdout, stderr: child.stderr, output: child.output };
   };
@@ -155,10 +168,10 @@ export async function testDevices(t: TestContext, prefix = "cns-devices-") {
       makePrivateDirectory(dir); // Applies the private ACL as well as mode 0700 on the respective platforms.
       return { name, dir, env: { CNS_CONFIG_DIR: dir, HOME: dir, ...env }, state: path.join(dir, "daemon.json") };
     },
-    /** Start the device's daemon on loopback. */
-    async up(device: TestDevice, port?: string): Promise<string> {
+    /** Start the device's daemon on loopback, with this cns or with `cns`. */
+    async up(device: TestDevice, port?: string, cns?: string[]): Promise<string> {
       device.port = port ?? await unusedPort("127.0.0.1");
-      const result = await cli(device, ["up", "--bind", "127.0.0.1", "--port", device.port, "--state", device.state]);
+      const result = await cli(device, ["up", "--bind", "127.0.0.1", "--port", device.port, "--state", device.state], "", cns);
       if (result.code !== 0) throw new Error(`cns up failed on ${device.name}:\n${result.output}`);
       daemons.push(device);
       return device.port;

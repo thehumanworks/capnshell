@@ -40,9 +40,11 @@ test("the latest release is the tag GitHub names, refused unless it is vX.Y.Z, a
   served.tag = undefined;
   await assert.rejects(latestRelease(), /not named vX\.Y\.Z/);
   served.status = 403;
+  const before = (await saved()).checkedAt;
   await assert.rejects(latestRelease(), /cannot ask GitHub: GitHub answered 403/);
-  // That it asked and learned nothing is kept too.
-  assert.deepEqual(Object.keys(await saved()), ["checkedAt"]);
+  // That it asked is kept too, beside the last release GitHub named.
+  assert.equal((await saved()).version, "2.9.0");
+  assert.ok((await saved()).checkedAt >= before);
   server.stop(true);
   await assert.rejects(latestRelease(), /cannot ask GitHub/);
   process.env.CNS_RELEASES = "off";
@@ -57,16 +59,23 @@ test("cns peers goes by what this device learned of the latest release within a 
   assert.equal(await knownLatestRelease(), "2.9.0", "within a day, what it learned");
   assert.equal(served.asked, 1);
 
-  // A day later it asks again; when GitHub fails, it says nothing, and does not ask again that day.
+  // A day later it asks again; when GitHub fails, the last release it named stands, and it does not ask again that day.
   const day = 24 * 60 * 60_000;
   await writeFile(cache, JSON.stringify({ version: "2.9.0", checkedAt: Date.now() - day - 1000 }));
   served.status = 500;
-  assert.equal(await knownLatestRelease(), undefined);
+  assert.equal(await knownLatestRelease(), "2.9.0");
   assert.equal(served.asked, 2);
-  assert.deepEqual(Object.keys(await saved()), ["checkedAt"]);
+  assert.equal((await saved()).version, "2.9.0");
   served.status = 200;
-  assert.equal(await knownLatestRelease(), undefined);
+  assert.equal(await knownLatestRelease(), "2.9.0");
   assert.equal(served.asked, 2);
+  // With none named yet, it says nothing.
+  await writeFile(cache, JSON.stringify({ checkedAt: Date.now() - day - 1000 }));
+  served.status = 500;
+  assert.equal(await knownLatestRelease(), undefined);
+  assert.deepEqual(Object.keys(await saved()), ["checkedAt"]);
+  assert.equal(served.asked, 3);
+  served.status = 200;
 
   // What it reads back is checked as what GitHub says is; a time to come is no time it asked.
   await writeFile(cache, JSON.stringify({ version: "9.9.9; id", checkedAt: Date.now() }));
@@ -75,10 +84,10 @@ test("cns peers goes by what this device learned of the latest release within a 
   assert.equal(await knownLatestRelease(), "3.0.0");
   await writeFile(cache, "not json");
   assert.equal(await knownLatestRelease(), "3.0.0");
-  assert.equal(served.asked, 4);
+  assert.equal(served.asked, 5);
 
   // Off: neither asked nor read.
   process.env.CNS_RELEASES = "off";
   assert.equal(await knownLatestRelease(), undefined);
-  assert.equal(served.asked, 4);
+  assert.equal(served.asked, 5);
 });

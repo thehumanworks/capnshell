@@ -4,15 +4,16 @@ import path from "node:path";
 import test, { type TestContext } from "node:test";
 import { connectControl } from "./commands/daemon.js";
 import { CNS_VERSION } from "./version.js";
-import { cliInvocation, fakeSystemctl, testDevices } from "./test-support.js";
+import { cliInvocation, cnsAs, fakeSystemctl, testDevices } from "./test-support.js";
 
-// These run cns upgrade against real daemons, with stand-ins for mise and for the cns it installs:
-// a script that runs this cns. The stand-ins are sh scripts, so not on Windows.
+// These run cns upgrade against real daemons. The device's daemon starts on an older cns, a copy of
+// this source that says it is 2.7.0; stand-ins play mise, and the cns mise installs is this one. The
+// stand-ins are sh scripts, so not on Windows.
 
-/** The pid of the daemon at `state`, and whether a service manager runs it. */
-async function daemonAt(state: string): Promise<{ pid: number; service: boolean }> {
+/** The pid and version of the daemon at `state`, and whether a service manager runs it. */
+async function daemonAt(state: string): Promise<{ pid: number; version?: string; service: boolean }> {
   const control = await connectControl(state);
-  try { const { pid, service } = await control.remote.status(); return { pid, service: service === true }; } finally { control.close(); }
+  try { const { pid, version, service } = await control.remote.status(); return { pid, ...version ? { version } : {}, service: service === true }; } finally { control.close(); }
 }
 
 /** The daemon at `state` once another than `old` answers there; fails if none does. */
@@ -39,102 +40,105 @@ async function script(file: string, body: string): Promise<string> {
 }
 
 /**
- * A device whose daemon runs, as far as cns upgrade can tell, a cns that mise installed: the cns on
- * its PATH says so, and its mise "installs cns 99.0.0", which is this cns under a mise path. The
- * releases URL it returns, for CNS_RELEASES, names 99.0.0 as the latest release.
+ * A device whose daemon, once started with `old`, runs cns 2.7.0 that mise installed, as far as cns
+ * upgrade can tell: the cns on its PATH says so, and its mise "installs" this cns as the latest
+ * release, which the releases URL it returns, for CNS_RELEASES, names.
  */
 async function miseDevice(t: TestContext, devices: Awaited<ReturnType<typeof testDevices>>, name: string) {
   const tools = path.join(devices.root, `${name}-tools`);
   const bin = path.join(tools, "bin");
   const installs = path.join(tools, "mise", "installs", "github-thehumanworks-capnshell");
-  const fresh = await script(path.join(installs, "99.0.0", "cns"), `exec ${self().map(sh).join(" ")} "$@"`);
+  const old = await cnsAs(devices.root, "2.7.0");
+  const fresh = await script(path.join(installs, CNS_VERSION, "cns"), `exec ${self().map(sh).join(" ")} "$@"`);
   const miseLog = path.join(tools, "mise.log");
   await writeFile(miseLog, "");
-  await script(path.join(bin, "cns"), `echo ${sh(JSON.stringify({ version: "2.7.0", daemon: { version: CNS_VERSION, executable: path.join(installs, "2.7.0", "cns"), sessions: [] } }))}`);
+  await script(path.join(bin, "cns"), `echo ${sh(JSON.stringify({ version: "2.7.0", daemon: { version: "2.7.0", executable: path.join(installs, "2.7.0", "cns"), sessions: [] } }))}`);
   await script(path.join(bin, "mise"), `echo "$*" >> ${sh(miseLog)}\ncase "$1" in\n  --version) echo 2026.11.3 ;;\n  use) ;;\n  which) echo ${sh(fresh)} ;;\n  *) exit 2 ;;\nesac`);
   // XDG_CONFIG_HOME: a unit goes where cns and the stand-in for systemctl look, never into this user's own systemd.
   const device = await devices.device(name, { PATH: `${bin}:${process.env.PATH}`, XDG_CONFIG_HOME: path.join(devices.root, name, ".config") });
   // The state path cns uses by default, as the commands that run there do.
   device.state = path.join(device.dir, ".cns", "daemon.json");
-  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.json({ tag_name: "v99.0.0" }) });
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.json({ tag_name: `v${CNS_VERSION}` }) });
   t.after(() => server.stop(true));
   const log = async () => { try { return await readFile(path.join(device.dir, ".cns", "restart.log"), "utf8"); } catch (error) { return String(error); } };
-  return { device, tools, bin, miseLog, log, releases: `http://127.0.0.1:${server.port}/releases/latest` };
+  return { device, old, bin, miseLog, log, releases: `http://127.0.0.1:${server.port}/releases/latest` };
 }
 
 test("cns upgrade --all upgrades a device through mise and restarts its daemon, and names the device it cannot reach", { skip: process.platform === "win32", timeout: 120000 }, async (t) => {
   const devices = await testDevices(t, "cns-upgrade-");
-  const { device: studio, miseLog, log, releases } = await miseDevice(t, devices, "studio");
+  const { device: studio, old, miseLog, log, releases } = await miseDevice(t, devices, "studio");
   const pi = await devices.device("pi");
   const laptop = await devices.device("laptop");
-  await devices.up(studio);
+  await devices.up(studio, undefined, old);
   await devices.pair(studio, laptop);
   await devices.up(pi);
   await devices.pair(pi, laptop);
   assert.equal((await devices.cli(pi, ["stop", "--state", pi.state])).code, 0);
   const asks = { ...laptop, env: { ...laptop.env, CNS_RELEASES: releases } };
   const before = await daemonAt(studio.state);
+  assert.equal(before.version, "2.7.0");
+  // cns upgrade asks GitHub every time: what cns peers learned today does not count.
+  const cache = path.join(laptop.dir, "latest-release.json");
+  await writeFile(cache, JSON.stringify({ version: "1.0.0", checkedAt: Date.now() }));
 
   // The plan reads what each device runs and changes nothing.
   const plan = await devices.cli(asks, ["upgrade", "--all", "--dry-run"]);
   assert.equal(plan.code, 1, plan.output);
-  assert.match(plan.stderr, /^Checking pi, studio against cns 99\.0\.0, the latest release\./);
+  assert.match(plan.stderr, new RegExp(`^Checking pi, studio against cns ${escaped}, the latest release\\.`));
   // Each device's line comes as soon as it is known, so in no set order.
   assert.equal(plan.stdout.split("\n").length, 3, plan.stdout);
   assert.match(plan.stdout, /^pi: unreachable \(Cannot connect to pi: .*\)\. Later, run cns upgrade pi$/m);
-  assert.match(plan.stdout, new RegExp(`^studio: would upgrade from ${escaped} to 99\\.0\\.0: mise use -g github:thehumanworks/capnshell@99\\.0\\.0, which pins that version in mise's global config there, then cns up --install from the new cns if a service runs the old one, else cns daemon restart$`, "m"));
+  assert.match(plan.stdout, new RegExp(`^studio: would upgrade from 2\\.7\\.0 to ${escaped}: mise use -g github:thehumanworks/capnshell@${escaped}, which pins that version in mise's global config there, then cns up --install from the new cns if a service runs the old one, else cns daemon restart, which ends any open shells$`, "m"));
   assert.equal(await readFile(miseLog, "utf8"), "--version\n");
   assert.equal((await daemonAt(studio.state)).pid, before.pid);
+  assert.equal(JSON.parse(await readFile(cache, "utf8")).version, CNS_VERSION);
 
   const upgraded = await devices.cli(asks, ["upgrade", "--all"]);
   assert.equal(upgraded.code, 1, `${upgraded.output}\nThe restart's log:\n${await log()}`);
   assert.equal(upgraded.stdout.split("\n").length, 3, upgraded.stdout);
   assert.match(upgraded.stdout, /^pi: unreachable \(Cannot connect to pi: .*\)\. Later, run cns upgrade pi$/m);
-  // The "cns 99.0.0" mise installed is this cns, so the daemon comes back with this version, as another process.
-  assert.match(upgraded.stdout, new RegExp(`^studio: upgraded from ${escaped} to ${escaped}$`, "m"));
-  assert.equal(await readFile(miseLog, "utf8"), "--version\nuse -g github:thehumanworks/capnshell@99.0.0\nwhich cns --tool github:thehumanworks/capnshell@99.0.0\n");
+  assert.match(upgraded.stdout, new RegExp(`^studio: upgraded from 2\\.7\\.0 to ${escaped}$`, "m"));
+  assert.equal(await readFile(miseLog, "utf8"), `--version\nuse -g github:thehumanworks/capnshell@${CNS_VERSION}\nwhich cns --tool github:thehumanworks/capnshell@${CNS_VERSION}\n`);
   const after = await replaced(studio.state, before.pid, log);
+  assert.equal(after.version, CNS_VERSION);
   assert.equal(after.service, false, "a daemon cns up started is started again the same way");
   assert.match(await log(), new RegExp(`Restarted the daemon \\(pid ${after.pid}\\)`));
   const again = await devices.cli(laptop, ["run", "studio", "--", "echo back"]);
   assert.equal(again.code, 0, again.output);
 });
 
-test("a paired device's cns up --install hands the restart to a process of its own, and cns upgrade moves a service onto the new cns", { skip: process.platform !== "linux", timeout: 120000 }, async (t) => {
+test("a paired device's cns up --install hands the restart to a process of its own, and cns upgrade moves the service onto the new cns", { skip: process.platform !== "linux", timeout: 120000 }, async (t) => {
   const devices = await testDevices(t, "cns-upgrade-service-");
-  const { device: studio, tools, bin, log, releases } = await miseDevice(t, devices, "studio");
+  const { device: studio, old, bin, log, releases } = await miseDevice(t, devices, "studio");
   await fakeSystemctl(bin);
   const laptop = await devices.device("laptop");
-  await devices.up(studio);
+  await devices.up(studio, undefined, old);
   await devices.pair(studio, laptop);
   const unitPath = path.join(studio.dir, ".config", "systemd", "user", "cns.service");
   const before = await daemonAt(studio.state);
   assert.equal(before.service, false);
 
-  // It runs under the daemon it replaces: stopping that daemon itself would end it before the
-  // service existed, and leave studio without a daemon.
-  const installed = await devices.cli(laptop, ["run", "studio", "--", [...self(), "up", "--install"].map(sh).join(" ")]);
+  // The old cns installs its service. It runs under the daemon it replaces: stopping that daemon
+  // itself would end it before the service existed, and leave studio without a daemon.
+  const installed = await devices.cli(laptop, ["run", "studio", "--", [...old, "up", "--install"].map(sh).join(" ")]);
   assert.equal(installed.code, 0, `${installed.output}\nThe restart's log:\n${await log()}`);
   assert.match(installed.stdout, /^Restarting the daemon through its systemd user service in a moment\./);
   const service = await replaced(studio.state, before.pid, log);
-  assert.equal(service.service, true, "the service runs the daemon now");
-
-  // As after mise installed a new cns: the unit still names the old one, at a path of its own.
-  const old = await script(path.join(tools, "old-cns"), `exec ${self().map(sh).join(" ")} "$@"`);
-  const command = self().map((word) => `"${word}"`).join(" ");
-  const unit = await readFile(unitPath, "utf8");
-  assert.ok(unit.includes(`ExecStart=${command} "daemon" "--service"`), unit);
-  await writeFile(unitPath, unit.replace(`ExecStart=${command}`, `ExecStart="${old}"`));
+  assert.deepEqual([service.service, service.version], [true, "2.7.0"], "the service runs the old cns now");
+  // The worker was told the service's file changed, which launchd needs to load it again.
+  assert.match(await log(), /^Restarting the daemon \(pid \d+\) from its service's new file\.$/m);
+  assert.ok((await readFile(unitPath, "utf8")).includes(old[1]!));
 
   const upgraded = await devices.cli({ ...laptop, env: { ...laptop.env, CNS_RELEASES: releases } }, ["upgrade", "studio"]);
   assert.equal(upgraded.code, 0, `${upgraded.output}\nThe restart's log:\n${await log()}`);
-  assert.equal(upgraded.stdout, `studio: upgraded from ${CNS_VERSION} to ${CNS_VERSION}\n`);
+  assert.equal(upgraded.stdout, `studio: upgraded from 2.7.0 to ${CNS_VERSION}\n`);
   const after = await replaced(studio.state, service.pid, log);
-  assert.equal(after.service, true);
+  assert.deepEqual([after.service, after.version], [true, CNS_VERSION]);
+  assert.match(await log(), /^Restarting the daemon \(pid \d+\) from its service's new file\.$/m);
   // cns up --install from the new cns wrote the unit for that cns, which runs as this one.
   const rewritten = await readFile(unitPath, "utf8");
-  assert.ok(!rewritten.includes(old), rewritten);
-  assert.ok(rewritten.includes(`ExecStart=${command} "daemon" "--service"`), rewritten);
+  assert.ok(!rewritten.includes(old[1]!), rewritten);
+  assert.ok(rewritten.includes(`ExecStart=${self().map((word) => `"${word}"`).join(" ")} "daemon" "--service"`), rewritten);
   const again = await devices.cli(laptop, ["run", "studio", "--", "echo back"]);
   assert.equal(again.code, 0, again.output);
 });
@@ -176,14 +180,18 @@ test("cns peers names a device behind the latest release, learned at most once a
   assert.equal(served.code, 0, served.output);
   assert.ok(served.stderr.includes(behind), served.stderr);
 
-  // GitHub fails now, but laptop learned the release today.
+  // GitHub fails now, but laptop learned the release today; a day on, the last release it named stands.
   status = 500;
-  const remembered = await peers();
-  assert.equal(remembered.code, 0, remembered.output);
-  assert.ok(remembered.stderr.includes(behind), remembered.stderr);
+  const cache = path.join(laptop.dir, "latest-release.json");
+  for (const checkedAt of [Date.now(), Date.now() - 25 * 60 * 60_000]) {
+    await writeFile(cache, JSON.stringify({ version: "99.0.0", checkedAt }));
+    const remembered = await peers();
+    assert.equal(remembered.code, 0, remembered.output);
+    assert.ok(remembered.stderr.includes(behind), remembered.stderr);
+  }
 
-  // A day on, GitHub still fails: nothing is said of the release, and cns peers still lists the devices.
-  await writeFile(path.join(laptop.dir, "latest-release.json"), JSON.stringify({ version: "99.0.0", checkedAt: Date.now() - 25 * 60 * 60_000 }));
+  // Nothing learned, and GitHub fails: nothing is said of the release, and cns peers still lists the devices.
+  await writeFile(cache, JSON.stringify({ checkedAt: Date.now() - 25 * 60 * 60_000 }));
   const failing = await peers();
   assert.equal(failing.code, 0, failing.output);
   assert.doesNotMatch(failing.stderr, /latest release|Older cns/);

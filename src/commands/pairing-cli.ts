@@ -317,7 +317,7 @@ async function restartNow(statePath: string | undefined, delayMs: number, reload
   try { status = await control.remote.status(); } finally { control.close(); }
   const installed = installedService(state);
   const plan = restartPlan(status.service, installed?.kind);
-  console.error(`Restarting the daemon (pid ${status.pid}).`);
+  console.error(`Restarting the daemon (pid ${status.pid})${reload ? " from its service's new file" : ""}.`);
   // The daemon started below would otherwise hold this log open.
   await keepHandlesHere();
   if (plan.stop) {
